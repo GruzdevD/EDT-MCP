@@ -369,14 +369,66 @@ public final class PluginSelfUpdate
         return 0;
     }
 
-    /** Resolves the running EDT's {@code bundles.info}, or {@code null} when unresolvable. */
+    /**
+     * Resolves the running EDT's {@code bundles.info}, or {@code null} when
+     * unresolvable. The promotion/regressor install location of a macOS
+     * {@code .app} resolves to {@code Contents/MacOS}, while {@code bundles.info}
+     * lives under the OSGi configuration area
+     * ({@code …/Contents/Eclipse/configuration/org.eclipse.equinox.simpleconfigurator/bundles.info}),
+     * so the configuration location is tried first, the install location second.
+     */
     public static Path runtimeBundlesInfo()
     {
+        // The Eclipse launcher publishes the exact locations as system properties —
+        // the most reliable source on a macOS .app, where Platform's "install"
+        // location resolves to Contents/MacOS and its "configuration" location is
+        // not where bundles.info lives.
+        // NOTE: the simpleconfigurator dir is a SINGLE segment named
+        // "org.eclipse.equinox.simpleconfigurator" directly under the
+        // configuration area — it must NOT be split by dots into
+        // org/eclipse/equinox/simpleconfigurator (that never exists).
         try
         {
-            URL url = Platform.getInstallLocation().getURL();
-            Path install = url == null ? null : installPath(url);
-            if (install != null)
+            Path byConfig = bundlesInfoUnderProperty("osgi.configuration.area", //$NON-NLS-1$
+                "org.eclipse.equinox.simpleconfigurator", "bundles.info"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (byConfig != null)
+            {
+                return byConfig;
+            }
+        }
+        catch (Throwable t)
+        {
+            // Fall through to install-area then Platform guesses.
+        }
+        try
+        {
+            Path byInstall = bundlesInfoUnderProperty("osgi.install.area", //$NON-NLS-1$
+                "configuration", "org.eclipse.equinox.simpleconfigurator", "bundles.info"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (byInstall != null)
+            {
+                return byInstall;
+            }
+        }
+        catch (Throwable t)
+        {
+            // Fall through to Platform guesses.
+        }
+        try
+        {
+            Path config = configBundlesInfo(Platform.getConfigurationLocation().getURL());
+            if (config != null)
+            {
+                return config;
+            }
+        }
+        catch (Throwable t)
+        {
+            // Fall through to the install-location guess.
+        }
+        try
+        {
+            Path install = urlPath(Platform.getInstallLocation().getURL());
+            if (install != null && Files.isRegularFile(Paths.get(install.toString(), BUNDLES_INFO_SUBPATH)))
             {
                 return Paths.get(install.toString(), BUNDLES_INFO_SUBPATH);
             }
@@ -386,6 +438,63 @@ public final class PluginSelfUpdate
             // Headless / non-EDT context.
         }
         return null;
+    }
+
+    /**
+     * Resolves {@code bundles.info} under a system property holding an area URL
+     * (e.g. {@code osgi.configuration.area}) as {@code file:/…}, or {@code null}
+     * when the property is absent or does not point at an existing file there.
+     */
+    private static Path bundlesInfoUnderProperty(String property, String... subpath)
+    {
+        String raw = System.getProperty(property);
+        if (raw == null || raw.isEmpty())
+        {
+            return null;
+        }
+        String text = raw;
+        if (text.startsWith("file:")) //$NON-NLS-1$
+        {
+            text = text.substring("file:".length()); //$NON-NLS-1$
+        }
+        if (text.length() > 1 && text.endsWith("/")) //$NON-NLS-1$
+        {
+            text = text.substring(0, text.length() - 1);
+        }
+        try
+        {
+            Path file = Paths.get(text, subpath);
+            return Files.isRegularFile(file) ? file : null;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * {@code bundles.info} directly under a configuration-area URL, or {@code null}
+     * when the URL does not resolve to an existing file there.
+     */
+    private static Path configBundlesInfo(URL url)
+    {
+        Path config = url == null ? null : urlPath(url);
+        if (config == null)
+        {
+            return null;
+        }
+        Path file = Paths.get(config.toString(), "org.eclipse.equinox.simpleconfigurator", //$NON-NLS-1$
+            "bundles.info"); //$NON-NLS-1$
+        return Files.isRegularFile(file) ? file : null;
+    }
+
+    private static Path urlPath(URL url)
+    {
+        if (url == null)
+        {
+            return null;
+        }
+        return installPath(url);
     }
 
     private static Path installPath(URL url)
