@@ -1,0 +1,34 @@
+# CLAUDE.md
+
+> This is a template. Rename it to `CLAUDE.md` (or the instruction filename
+> used by your AI client; see `rules/README.md`) and place it at the project
+> root.
+
+## Core rules (always read)
+
+Read `rules/en/INDEX.md` - it is the navigator for working with this project
+and the EDT-MCP server.
+
+> For the localized Russian rules, replace the line above with: Read
+> `rules/ru/INDEX.md`.
+
+## Project rules
+
+<!--
+Describe project-specific facts here:
+- configuration name and edition;
+- 1C platform version;
+- SSL/BSP version when applicable;
+- key subsystems, common modules, and extensions;
+- team conventions for branches, commits, and review;
+- links to internal documentation.
+-->
+
+## Verification (optional)
+
+<!--
+List the checks the agent should run for this project, for example:
+- BSL/model validation: get_project_errors;
+- query validation: validate_query;
+- unit tests: run_yaxunit_tests.
+-->

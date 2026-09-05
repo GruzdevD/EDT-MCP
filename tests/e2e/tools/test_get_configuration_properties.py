@@ -1,0 +1,221 @@
+"""
+e2e tests for get_configuration_properties (kind: read).
+
+Read tool: returns the configuration's properties as a human-readable YAML body
+(ResponseType.YAML), so the payload is in r.text (NOT r.structured). Errors,
+however, still travel as structured JSON via ToolResult.error(...).toJson()
+({"success": false, "error": "<msg>"}) — the harness surfaces that through
+err = assert_error(r) (error_text() reads structured.error first).
+
+The tool has a SINGLE, OPTIONAL parameter:
+  - projectName (optional): if omitted/empty -> first IConfigurationProject;
+    if set -> the project whose name equals it.
+
+Parameter-shape consequences for the negative matrix:
+  - There is NO required parameter (projectName is optional) -> "missing required
+    param" cannot be provoked: calling with {} is a VALID happy path, not an error.
+  - There is NO enum, NO XOR, and NO conditional-required parameter -> none of those
+    negative branches exist for this tool.
+  - The ONLY error reachable from a well-formed client call is a non-existent
+    projectName -> execute()'s configProject == null branch ->
+    ToolResult.error("No configuration project found with name: <name>").
+So the negative matrix here is intentionally a single case; that is the tool's
+real surface, not an omission (see §5/anti-cheat-rule-11: there are no XOR/enum/
+conditional combinations to leave untested).
+
+Fixture ground truth (TestConfiguration/src/Configuration/Configuration.mdo):
+  name=TestConfiguration, synonym{en:Test configuration},
+  defaultRunMode=ManagedApplication, usePurposes=[PersonalComputer],
+  dataLockControlMode=Managed, objectAutonumerationMode=NotAutoFree,
+  modalityUseMode=DontUse, compatibilityMode=8.5.1,
+  defaultLanguage=Language.English (languageCode=en, name=English).
+These are the discriminating values asserted below: a broken tool that returned a
+no-op / wrong project / empty body would FAIL these (mutation thinking).
+"""
+
+from harness import (
+    call, assert_ok, assert_error, assert_error_quality,
+    assert_contains, assert_not_contains, assert_no_diff, wait_for_project_ready,
+    e2e_test, PROJECT, TESTS_PROJECT,
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Happy paths
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="get_configuration_properties", kind="read")
+def test_default_project_returns_fixture_properties():
+    # projectName omitted -> tool falls back to the first IConfigurationProject.
+    # In this single-project fixture that resolves to TestConfiguration, so the
+    # body MUST carry the fixture's real, discriminating property values.
+    r = call("get_configuration_properties", {})
+    assert_ok(r, "get_configuration_properties default project")
+    # name: read from configuration.getName() — proves the Configuration object
+    # was actually read (not an echo: we passed no projectName at all).
+    assert_contains(r.text, "name: TestConfiguration",
+                    "YAML must report the configuration name from the model")
+    # compatibilityMode is fixture-specific (8.5.1) — a wrong/empty model read
+    # would not produce this exact value.
+    assert_contains(r.text, "compatibilityMode:",
+                    "YAML must include the compatibilityMode key")
+    assert_contains(r.text, "8.5.1",
+                    "compatibilityMode must be the fixture's 8.5.1")
+    # defaultLanguage is reported by language CODE (the synonym map key), not name
+    # — the bilingual contract. Fixture default language code is 'en'.
+    assert_contains(r.text, "defaultLanguage: en",
+                    "defaultLanguage must be the language CODE 'en', not the name")
+    assert_contains(r.text, "defaultLanguageName: English",
+                    "defaultLanguageName must be the human-readable name 'English'")
+    # projectName is echoed from configProject.getProject().getName() — proves the
+    # fallback actually resolved a concrete project.
+    assert_contains(r.text, "projectName: TestConfiguration",
+                    "resolved project name must be echoed back")
+    # Regression guard: a BASE configuration must NOT carry the extension-only fields
+    # (those are emitted only for a configuration extension, see the extension test).
+    assert_not_contains(r.text, "projectKind: Extension",
+                        "a base configuration must not be tagged as an Extension")
+    assert_not_contains(r.text, "namePrefix:",
+                        "a base configuration has no extension namePrefix")
+    assert_no_diff("a read tool must not touch the project on disk")
+
+
+@e2e_test(tool="get_configuration_properties", kind="read")
+def test_explicit_project_returns_synonym_and_runmode():
+    # Explicit projectName exercises the name-matching branch (project.getName()
+    # .equals(projectName)). Asserts properties the DEFAULT-path test does not, so
+    # the two happy tests together cover scalar, list and localized-map emitters.
+    r = call("get_configuration_properties", {"projectName": PROJECT})
+    assert_ok(r, "get_configuration_properties explicit project")
+    assert_contains(r.text, "name: TestConfiguration",
+                    "explicit-project lookup must resolve TestConfiguration")
+    # synonym is a localized EMap rendered as a nested block keyed by language code.
+    # Fixture synonym is {en: Test configuration} -> both the block header and the
+    # indented 'en:' entry must appear (proves toLocalizedMap walked the EMap by code).
+    assert_contains(r.text, "synonym:",
+                    "localized synonym block must be emitted")
+    assert_contains(r.text, "Test configuration",
+                    "synonym value 'Test configuration' must be rendered")
+    # defaultRunMode is a scalar enum -> proves the scalar emitter ran for enums.
+    assert_contains(r.text, "defaultRunMode: ManagedApplication",
+                    "defaultRunMode must be the fixture's ManagedApplication")
+    # usePurposes is a YAML list (appendList) -> proves the list emitter ran.
+    assert_contains(r.text, "usePurposes:",
+                    "usePurposes list block must be emitted")
+    assert_contains(r.text, "PersonalComputer",
+                    "usePurposes must contain the fixture's PersonalComputer")
+    assert_no_diff("a read tool must not touch the project on disk")
+
+
+@e2e_test(tool="get_configuration_properties", kind="read")
+def test_extension_project_returns_extension_properties():
+    """A configuration EXTENSION project must return its properties, NOT an error.
+
+    Regression for the owner-reported bug: the tool used to gate on
+    `instanceof IConfigurationProject`, which excludes an extension, so pointing it at
+    `TestConfiguration.tests` returned "is not a configuration project". An extension
+    is `IConfigurationAware` (shares `getConfiguration()`), so the tool now resolves it
+    and emits the extension's properties PLUS the extension-only fields.
+
+    Mutation-sensitive: a tool that still rejected the extension (the old bug) fails
+    assert_ok; one that resolved the WRONG project would not show name `tests` /
+    namePrefix `tests_`; one that did not branch on extension would omit objectBelonging.
+    """
+    r = call("get_configuration_properties", {"projectName": TESTS_PROJECT})
+    assert_ok(r, "get_configuration_properties on a configuration extension")
+    # The extension's Configuration root is named 'tests' (tests/tests Configuration.mdo).
+    assert_contains(r.text, "name: tests",
+                    "extension configuration name must be read from the model")
+    # Extension-only fields prove the extension branch ran (a base config omits these).
+    assert_contains(r.text, "projectKind: Extension",
+                    "an extension must be tagged projectKind: Extension")
+    assert_contains(r.text, "namePrefix: tests_",
+                    "the extension namePrefix (tests_) must be surfaced")
+    # The resolved project name is the extension EDT project (proves matchedProject).
+    assert_contains(r.text, "projectName: " + TESTS_PROJECT,
+                    "resolved project name must be the extension project")
+    assert_no_diff("a read tool must not touch the project on disk")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Negative matrix
+#
+# Only ONE negative is reachable from a well-formed client call: a non-existent
+# projectName. projectName is OPTIONAL (no "missing required param" case) and there
+# are NO enum / XOR / conditional-required parameters, so no other negative branch
+# exists for this tool (documented in the module docstring above).
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="get_configuration_properties", kind="read")
+def test_nonexistent_project_errors_and_names_value():
+    # configProject == null + the name does not resolve to an existing project ->
+    # ToolResult.error(ProjectContext.notFoundMessage(name)) = "Project not found:
+    # <name>. Use list_projects to see available projects." (an existing project that
+    # exposes NO 1C configuration — neither a base config nor an extension — instead
+    # yields "Project '<name>' does not expose a 1C configuration ...".) Delivered as
+    # structured JSON even though the success path is YAML.
+    bad = "NoSuchProject_ZZZ_e2e"
+    r = call("get_configuration_properties", {"projectName": bad})
+    err = assert_error(r, "non-existent projectName")
+    # The error MUST name the bad value (which project was wrong) AND be actionable:
+    # it points at list_projects, the sibling tool that enumerates valid project names.
+    assert_error_quality(err, names=[bad], suggests=["list_projects"],
+                         ctx="non-existent project names the bad value and points at list_projects")
+    assert_no_diff("an invalid call must not touch the project on disk")
+
+
+@e2e_test(tool="get_configuration_properties", kind="write-metadata")
+def test_reports_every_declared_language_code():
+    # Issue #298: the localized-string tools only accept a DECLARED locale code, so the whole list
+    # has to be discoverable - reading a native object's .mdo by hand was the documented workaround.
+    # The fixture declares ONE language, so a second is added here: reporting only the DEFAULT one
+    # (the pre-#298 output) must not be able to pass this.
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": "Language.Z298FrOnConfig"}),
+              "add a second language to the configuration")
+    wait_for_project_ready()
+    assert_ok(call("modify_metadata", {"projectName": PROJECT, "fqn": "Language.Z298FrOnConfig",
+                                       "properties": [{"name": "languageCode", "value": "fr"}]}),
+              "give the second language its code")
+    wait_for_project_ready()
+
+    r = call("get_configuration_properties", {"projectName": PROJECT})
+    assert_ok(r, "read the configuration properties")
+    assert_contains(r.text, "languages:", "the declared language codes must be reported")
+    assert_contains(r.text, "- en", "the default language's code must be listed")
+    assert_contains(r.text, "- fr", "a NON-default declared code must be listed too")
+
+
+@e2e_test(tool="get_configuration_properties", kind="write-metadata")
+def test_reports_languages_in_use_and_not_in_use():
+    # Issue #298 follow-up: 'languages' alone tells an agent which codes are LEGAL to write a
+    # localized value (a synonym, a form title, an NStr() literal in BSL) under, but not which
+    # ones are worth filling in. The fixture's own synonym is filled in for 'en' (synonym:
+    # {en: Test configuration}), so 'en' must come back as in use. Declare a second language and
+    # leave the configuration's OWN synonym unset for it, so it lands on the OTHER side of the
+    # split - proving languagesNotInUse is a real, non-empty answer, not just an omitted key.
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": "Language.Z298DeOnConfig"}),
+              "add a second language to the configuration")
+    wait_for_project_ready()
+    assert_ok(call("modify_metadata", {"projectName": PROJECT, "fqn": "Language.Z298DeOnConfig",
+                                       "properties": [{"name": "languageCode", "value": "de"}]}),
+              "give the second language its code")
+    wait_for_project_ready()
+
+    r = call("get_configuration_properties", {"projectName": PROJECT})
+    assert_ok(r, "get_configuration_properties reports language usage")
+    assert_contains(r.text, "languagesInUse:", "the in-use codes block must be emitted")
+    assert_contains(r.text, "languagesNotInUse:", "the not-in-use codes block must be emitted")
+    # Slice the body around the two block headers (they are emitted in this fixed order) so 'en'
+    # and 'de' are checked against the RIGHT block, not just anywhere in the document - a tool
+    # that swapped the two lists, or put every declared code in both, would pass a plain
+    # assert_contains but fail this.
+    in_use_section = r.text.split("languagesInUse:", 1)[1].split("languagesNotInUse:", 1)[0]
+    not_in_use_section = r.text.split("languagesNotInUse:", 1)[1]
+    assert_contains(in_use_section, "- en",
+                    "the fixture's own synonym is filled in for 'en', so it must be in use")
+    assert_not_contains(in_use_section, "- de",
+                        "the newly-declared 'de' has no configuration synonym yet")
+    assert_contains(not_in_use_section, "- de",
+                    "'de' is declared but the configuration's own synonym has no text for it")
+    assert_not_contains(not_in_use_section, "- en",
+                        "'en' IS in use, so it must not also appear in the not-in-use list")

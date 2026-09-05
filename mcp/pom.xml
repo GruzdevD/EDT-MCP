@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+   Copyright (c) 2025 DitriX
+   This program and the accompanying materials are made available under
+   the terms of the Eclipse Public License 2.0 which is available at
+   https://www.eclipse.org/legal/epl-2.0/
+   SPDX-License-Identifier: EPL-2.0
+-->
+<project
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
+  xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.ditrix.edt.mcp</groupId>
+    <artifactId>bom</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>./bom/pom.xml</relativePath>
+  </parent>
+
+  <artifactId>parent</artifactId>
+  <packaging>pom</packaging>
+
+  <name>EDT MCP Server Plugin</name>
+
+  <properties>
+    <sonar.projectKey>DitriXNew_EDT-MCP</sonar.projectKey>
+    <sonar.organization>ditrixnew</sonar.organization>
+    <sonar.host.url>https://sonarcloud.io</sonar.host.url>
+  </properties>
+
+  <scm>
+    <connection>scm:git:git@github.com:DitriXNew/EDT-MCP.git</connection>
+  </scm>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <!-- Pinned so `mvn sonar:sonar` resolves a fixed scanner version (no "unspecified version" warning) -->
+        <plugin>
+          <groupId>org.sonarsource.scanner.maven</groupId>
+          <artifactId>sonar-maven-plugin</artifactId>
+          <version>5.7.0.6970</version>
+        </plugin>
+        <!-- Code-coverage agent + report; used by the tests fragment and the bundle.
+             Kept in step with the agent/CLI the e2e gate uses (0.8.15+, required to
+             instrument the Java 25 class files EDT 2026.2 runs on) so the unit and e2e
+             .exec files merge into one report. -->
+        <plugin>
+          <groupId>org.jacoco</groupId>
+          <artifactId>jacoco-maven-plugin</artifactId>
+          <version>0.8.15</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+
+  <modules>
+    <module>targets</module>
+    <module>bundles</module>
+    <module>tests</module>
+    <module>features</module>
+    <module>repositories</module>
+  </modules>
+
+</project>

@@ -1,0 +1,392 @@
+/**
+ * MCP Server for EDT - Tests
+ * Copyright (C) 2025 DitriX (https://github.com/DitriXNew)
+ * Licensed under AGPL-3.0-or-later
+ */
+
+package com.ditrix.edt.mcp.server.utils;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
+import java.util.Arrays;
+import java.util.List;
+
+import org.junit.Test;
+
+import com.ditrix.edt.mcp.server.utils.LaunchUpdateDialogAutoConfirmer.ConfirmAction;
+
+/**
+ * Tests for the external-changes conflict matcher of {@link LaunchUpdateDialogAutoConfirmer}:
+ * EDT's "Infobase configuration changes" modal, raised by the configuration-to-infobase
+ * update when the infobase was changed OUTSIDE EDT (Designer, ibcmd, a CLI pipeline).
+ *
+ * <p>Unlike the other two modals this one has NO safe default button - its default is
+ * "Import", which rewrites the caller's PROJECT sources. So the press is driven by the
+ * call's {@link ExternalInfobaseChangesPolicy} and a label that cannot be located must
+ * degrade to cancelling the dialog, never to the default button.
+ */
+public class LaunchUpdateDialogConflictMatcherTest
+{
+    /** EDT's conflict message for infobase "agent-base". */
+    private static final String BODY_A =
+        "Infobase \"agent-base\" configuration was changed independent of the project " //$NON-NLS-1$
+            + "since last EDT infobase interaction, possible with the Designer."; //$NON-NLS-1$
+
+    /** The same message for infobase "other-base". */
+    private static final String BODY_B =
+        "Infobase \"other-base\" configuration was changed independent of the project."; //$NON-NLS-1$
+
+    /** The same message for an infobase nobody armed. */
+    private static final String BODY_C =
+        "Infobase \"third-base\" configuration was changed independent of the project."; //$NON-NLS-1$
+
+    /** Russian title of the modal, unicode-escaped exactly like the production constant. */
+    private static final String CONFLICT_TITLE_RU = "\u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u043A\u043E\u043D\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438 \u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u043E\u043D\u043D\u043E\u0439 \u0431\u0430\u0437\u044B"; //$NON-NLS-1$
+
+    /** Russian label of the "Override" button. */
+    private static final String OVERRIDE_RU = "\u041F\u0435\u0440\u0435\u0437\u0430\u043F\u0438\u0441\u0430\u0442\u044C"; //$NON-NLS-1$
+
+    /** Russian label of the "Import" button. */
+    private static final String IMPORT_RU = "\u0418\u043C\u043F\u043E\u0440\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C"; //$NON-NLS-1$
+
+    @Test
+    public void testMatchesBothShippedLocales()
+    {
+        assertTrue(LaunchUpdateDialogAutoConfirmer.isConflictTitle("Infobase configuration changes")); //$NON-NLS-1$
+        assertTrue(LaunchUpdateDialogAutoConfirmer.isConflictTitle(CONFLICT_TITLE_RU));
+    }
+
+    @Test
+    public void testDoesNotMatchUnrelatedOrNearbyTitles()
+    {
+        assertFalse(LaunchUpdateDialogAutoConfirmer.isConflictTitle(null));
+        assertFalse(LaunchUpdateDialogAutoConfirmer.isConflictTitle("")); //$NON-NLS-1$
+        assertFalse(LaunchUpdateDialogAutoConfirmer.isConflictTitle("Application update")); //$NON-NLS-1$
+        assertFalse(LaunchUpdateDialogAutoConfirmer.isConflictTitle("Restructure data")); //$NON-NLS-1$
+        // Substrings must not match - the compare is whole-title.
+        assertFalse(LaunchUpdateDialogAutoConfirmer.isConflictTitle("Infobase configuration")); //$NON-NLS-1$
+        assertFalse(
+            LaunchUpdateDialogAutoConfirmer.isConflictTitle("Infobase configuration changes found")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testConflictTitleIsDisjointFromTheOtherMatchers()
+    {
+        assertFalse(LaunchUpdateDialogAutoConfirmer.isTargetTitle("Infobase configuration changes")); //$NON-NLS-1$
+        assertFalse(LaunchUpdateDialogAutoConfirmer.isRestructureTitle("Infobase configuration changes")); //$NON-NLS-1$
+        assertFalse(LaunchUpdateDialogAutoConfirmer.isConflictTitle(CONFLICT_TITLE_RU + " ")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGatingFiresOnlyWhenTheConflictMatcherIsArmed()
+    {
+        String title = "Infobase configuration changes"; //$NON-NLS-1$
+        assertTrue(LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(false, false, false, true, title, null));
+        // Armed for the other modals only: this dialog is left for a human.
+        assertFalse(LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(true, true, true, false, title, null));
+    }
+
+    @Test
+    public void testOverrideAndImportPressTheirOwnLabelledButton()
+    {
+        assertEquals(ConfirmAction.PRESS_POLICY_BUTTON,
+            LaunchUpdateDialogAutoConfirmer.chooseConflictAction(ExternalInfobaseChangesPolicy.OVERRIDE, true));
+        assertEquals(ConfirmAction.PRESS_POLICY_BUTTON,
+            LaunchUpdateDialogAutoConfirmer.chooseConflictAction(ExternalInfobaseChangesPolicy.IMPORT, true));
+    }
+
+    @Test
+    public void testCancelPolicyClosesTheDialogInsteadOfPressingAnything()
+    {
+        assertEquals(ConfirmAction.CANCEL_DIALOG,
+            LaunchUpdateDialogAutoConfirmer.chooseConflictAction(ExternalInfobaseChangesPolicy.CANCEL, true));
+        assertNull(
+            LaunchUpdateDialogAutoConfirmer.conflictButtonLabels(ExternalInfobaseChangesPolicy.CANCEL));
+    }
+
+    @Test
+    public void testMissingButtonLabelCancelsRatherThanPressingTheDefaultButton()
+    {
+        // The default button of this modal is "Import" (it rewrites the project sources),
+        // so a label miss must never fall through to it.
+        assertEquals(ConfirmAction.CANCEL_DIALOG,
+            LaunchUpdateDialogAutoConfirmer.chooseConflictAction(ExternalInfobaseChangesPolicy.OVERRIDE, false));
+        assertEquals(ConfirmAction.CANCEL_DIALOG,
+            LaunchUpdateDialogAutoConfirmer.chooseConflictAction(ExternalInfobaseChangesPolicy.IMPORT, false));
+        assertEquals(ConfirmAction.CANCEL_DIALOG,
+            LaunchUpdateDialogAutoConfirmer.chooseConflictAction(null, true));
+    }
+
+    @Test
+    public void testPolicyButtonLabelsCoverBothLocales()
+    {
+        assertTrue(LaunchUpdateDialogAutoConfirmer.matchesButtonLabel("Override", //$NON-NLS-1$
+            LaunchUpdateDialogAutoConfirmer.conflictButtonLabels(ExternalInfobaseChangesPolicy.OVERRIDE)));
+        assertTrue(LaunchUpdateDialogAutoConfirmer.matchesButtonLabel(OVERRIDE_RU,
+            LaunchUpdateDialogAutoConfirmer.conflictButtonLabels(ExternalInfobaseChangesPolicy.OVERRIDE)));
+        assertTrue(LaunchUpdateDialogAutoConfirmer.matchesButtonLabel("Import", //$NON-NLS-1$
+            LaunchUpdateDialogAutoConfirmer.conflictButtonLabels(ExternalInfobaseChangesPolicy.IMPORT)));
+        assertTrue(LaunchUpdateDialogAutoConfirmer.matchesButtonLabel(IMPORT_RU,
+            LaunchUpdateDialogAutoConfirmer.conflictButtonLabels(ExternalInfobaseChangesPolicy.IMPORT)));
+        // A mnemonic marker must not break the compare.
+        assertTrue(LaunchUpdateDialogAutoConfirmer.matchesButtonLabel("&Override", //$NON-NLS-1$
+            LaunchUpdateDialogAutoConfirmer.conflictButtonLabels(ExternalInfobaseChangesPolicy.OVERRIDE)));
+        // The two policies never claim each other's button.
+        assertFalse(LaunchUpdateDialogAutoConfirmer.matchesButtonLabel("Import", //$NON-NLS-1$
+            LaunchUpdateDialogAutoConfirmer.conflictButtonLabels(ExternalInfobaseChangesPolicy.OVERRIDE)));
+        assertFalse(LaunchUpdateDialogAutoConfirmer.matchesButtonLabel(null,
+            LaunchUpdateDialogAutoConfirmer.conflictButtonLabels(ExternalInfobaseChangesPolicy.IMPORT)));
+    }
+
+    @Test
+    public void testAmbiguousArmsDegradeToCancel()
+    {
+        // Two concurrent launches with DIFFERENT policies share the one Display filter and
+        // the modal carries no owner information, so acting on either arm would apply a
+        // choice the other caller never asked for - and one of those choices rewrites
+        // project sources. The ambiguous window must therefore resolve to CANCEL.
+        assertEquals(ConfirmAction.CANCEL_DIALOG, LaunchUpdateDialogAutoConfirmer
+            .chooseConflictAction(ExternalInfobaseChangesPolicy.CANCEL, true));
+        // A single armed policy is unambiguous and is acted on.
+        assertEquals(ConfirmAction.PRESS_POLICY_BUTTON, LaunchUpdateDialogAutoConfirmer
+            .chooseConflictAction(ExternalInfobaseChangesPolicy.IMPORT, true));
+    }
+
+    @Test
+    public void testCancelsLandInTheOwningWatchOnly()
+    {
+        // A cancel raised by a CONCURRENT update of another application must not be readable as
+        // this update's failure, and must not overwrite its reason.
+        try (LaunchUpdateDialogAutoConfirmer.ConflictWatch mine =
+            LaunchUpdateDialogAutoConfirmer.beginConflictWatch("mine-base"); //$NON-NLS-1$
+            LaunchUpdateDialogAutoConfirmer.ConflictWatch theirs =
+                LaunchUpdateDialogAutoConfirmer.beginConflictWatch("foreign-base")) //$NON-NLS-1$
+        {
+            LaunchUpdateDialogAutoConfirmer.recordConflictCancelForTest(
+                LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_POLICY, "foreign-base"); //$NON-NLS-1$
+            assertFalse(mine.cancelled());
+            assertTrue(theirs.cancelled());
+            assertEquals(LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_POLICY, theirs.reason());
+            assertNull(mine.reason());
+
+            LaunchUpdateDialogAutoConfirmer.recordConflictCancelForTest(
+                LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_BUTTON_NOT_FOUND, "mine-base"); //$NON-NLS-1$
+            assertTrue(mine.cancelled());
+            // Each window keeps ITS OWN reason - the other cancel did not overwrite it.
+            assertEquals(LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_BUTTON_NOT_FOUND, mine.reason());
+            assertEquals(LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_POLICY, theirs.reason());
+        }
+    }
+
+    @Test
+    public void testUnattributedCancelNeverClaimsANamedWatch()
+    {
+        // A cancel the filter could not attribute must NOT be pinned on a named window - callers
+        // treat a cancel in their window as a failure, so guessing an owner would fail a call whose
+        // own update actually applied. Only a caller that could not resolve a name either sees it.
+        try (LaunchUpdateDialogAutoConfirmer.ConflictWatch named =
+            LaunchUpdateDialogAutoConfirmer.beginConflictWatch("mine-base"); //$NON-NLS-1$
+            LaunchUpdateDialogAutoConfirmer.ConflictWatch unnamed =
+                LaunchUpdateDialogAutoConfirmer.beginConflictWatch(null))
+        {
+            LaunchUpdateDialogAutoConfirmer.recordConflictCancelForTest(
+                LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_NOT_ATTRIBUTED, null);
+            assertFalse(named.cancelled());
+            assertTrue(unnamed.cancelled());
+            assertEquals(LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_NOT_ATTRIBUTED,
+                unnamed.reason());
+        }
+        // A closed window records nothing further.
+        LaunchUpdateDialogAutoConfirmer.ConflictWatch closed =
+            LaunchUpdateDialogAutoConfirmer.beginConflictWatch("mine-base"); //$NON-NLS-1$
+        closed.close();
+        LaunchUpdateDialogAutoConfirmer.recordConflictCancelForTest(
+            LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_POLICY, "mine-base"); //$NON-NLS-1$
+        assertFalse(closed.cancelled());
+    }
+
+    @Test
+    public void testNotAttributedCancelDoesNotAdviseRepeatingThePolicy()
+    {
+        // Repeating the same policy cannot fix a dialog that was never attributable, so the advice
+        // must not say so - it names the two real ways forward instead.
+        String message = ExternalInfobaseChangesPolicy.declinedUpdateError(
+            ExternalInfobaseChangesPolicy.OVERRIDE,
+            LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_NOT_ATTRIBUTED);
+        assertTrue(message, message.contains("could not be attributed")); //$NON-NLS-1$
+        assertFalse(message, message.contains("Re-run with externalInfobaseChanges")); //$NON-NLS-1$
+        // BOTH remedies are pinned: the dialog may have belonged to another operation (retry), or
+        // this call cannot resolve its own infobase (retrying is useless - target one that does).
+        assertTrue(message, message.contains("simply retry")); //$NON-NLS-1$
+        assertTrue(message, message.contains("an application that does")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testDeclinedUpdateErrorAdviceDependsOnTheCancelReason()
+    {
+        // The caller cannot see the dialog, so the message must name the cause AND a way out -
+        // and repeating the same policy is NOT a way out of a missing button label.
+        String policyCancel = ExternalInfobaseChangesPolicy.declinedUpdateError(
+            ExternalInfobaseChangesPolicy.CANCEL, LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_POLICY);
+        assertTrue(policyCancel, policyCancel.contains("externalInfobaseChanges=cancel"));
+        assertTrue(policyCancel, policyCancel.contains("override") && policyCancel.contains("import"));
+
+        String labelMiss = ExternalInfobaseChangesPolicy.declinedUpdateError(
+            ExternalInfobaseChangesPolicy.OVERRIDE,
+            LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_BUTTON_NOT_FOUND);
+        assertTrue(labelMiss, labelMiss.contains("was not found"));
+        assertFalse(labelMiss, labelMiss.contains("Re-run with externalInfobaseChanges"));
+    }
+
+    @Test
+    public void testOnlyADialogAboutAnArmedInfobaseMayBePressed()
+    {
+        // EDT states the infobase in the conflict modal message - the only owner information
+        // the dialog carries. A dialog about ANOTHER infobase (or one we cannot read) must not
+        // be pressed: override would discard that infobase's external changes and import would
+        // rewrite that project's sources.
+        String body = "Infobase \"agent-base\" configuration was changed independent of the project " //$NON-NLS-1$
+            + "since last EDT infobase interaction, possible with the Designer."; //$NON-NLS-1$
+        assertTrue(LaunchUpdateDialogAutoConfirmer.bodyMentionsAny(body,
+            Arrays.asList("agent-base"))); //$NON-NLS-1$
+        assertFalse(LaunchUpdateDialogAutoConfirmer.bodyMentionsAny(body,
+            Arrays.asList("other-base"))); //$NON-NLS-1$
+        // A bare substring must NOT claim a dialog about a different infobase: the match is on
+        // the QUOTED name EDT renders, so an armed "base" never captures "agent-base".
+        assertFalse(LaunchUpdateDialogAutoConfirmer.bodyMentionsAny(body,
+            Arrays.asList("base"))); //$NON-NLS-1$
+        assertFalse(LaunchUpdateDialogAutoConfirmer.bodyMentionsAny(
+            "Infobase configuration changes", Arrays.asList("configuration"))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse(LaunchUpdateDialogAutoConfirmer.bodyMentionsAny(body, Arrays.asList()));
+        assertFalse(LaunchUpdateDialogAutoConfirmer.bodyMentionsAny(body, null));
+        assertFalse(LaunchUpdateDialogAutoConfirmer.bodyMentionsAny(null,
+            Arrays.asList("agent-base"))); //$NON-NLS-1$
+        // A blank armed name must not match everything.
+        assertFalse(LaunchUpdateDialogAutoConfirmer.bodyMentionsAny(body, Arrays.asList(""))); //$NON-NLS-1$
+        // An unattributed dialog is CANCELLED, never pressed: cancelling writes nothing, while
+        // leaving an application-modal dialog open would freeze the workbench and hang the call.
+        assertEquals(ConfirmAction.CANCEL_DIALOG,
+            LaunchUpdateDialogAutoConfirmer.chooseConflictAction(null, true));
+    }
+
+    @Test
+    public void testNotArmedYieldsNoPolicy()
+    {
+        // Headless (no Display): arm() is a no-op, so nothing is ever armed here and the
+        // filter can never claim a dialog.
+        assertNull(LaunchUpdateDialogAutoConfirmer.decideFor(BODY_A).policy);
+        LaunchUpdateDialogAutoConfirmer.arm(false, false, false, ExternalInfobaseChangesPolicy.OVERRIDE);
+        assertNull(LaunchUpdateDialogAutoConfirmer.decideFor(BODY_A).policy);
+        // An unbalanced disarm stays a no-op too.
+        LaunchUpdateDialogAutoConfirmer.disarm(false, false, false, ExternalInfobaseChangesPolicy.OVERRIDE);
+        assertNull(LaunchUpdateDialogAutoConfirmer.decideFor(BODY_A).policy);
+    }
+
+    @Test
+    public void testPolicyIsChosenPerAttributedInfobaseNotGlobally()
+    {
+        // Two independent updates armed at once with DIFFERENT policies: each dialog must get
+        // the policy of the arm that NAMED its infobase. Collapsing to CANCEL just because some
+        // other policy is armed would break parallel runs of unrelated projects.
+        List<LaunchUpdateDialogAutoConfirmer.ConflictArm> arms = Arrays.asList(
+            arm("agent-base", ExternalInfobaseChangesPolicy.OVERRIDE), //$NON-NLS-1$
+            arm("other-base", ExternalInfobaseChangesPolicy.IMPORT)); //$NON-NLS-1$
+        assertEquals(ExternalInfobaseChangesPolicy.OVERRIDE,
+            LaunchUpdateDialogAutoConfirmer.choosePolicyFor(BODY_A, arms));
+        assertEquals(ExternalInfobaseChangesPolicy.IMPORT,
+            LaunchUpdateDialogAutoConfirmer.choosePolicyFor(BODY_B, arms));
+        // A dialog about an infobase nobody armed is somebody else\'s: cancel, never a press.
+        assertNull(LaunchUpdateDialogAutoConfirmer.choosePolicyFor(BODY_C, arms));
+        assertNull(LaunchUpdateDialogAutoConfirmer.choosePolicyFor(null, arms));
+    }
+
+    @Test
+    public void testSameInfobaseWithTwoPoliciesIsTheOnlyRealAmbiguity()
+    {
+        // Two callers want DIFFERENT answers to the SAME dialog - the only case where acting
+        // would apply a choice the other caller never asked for.
+        assertEquals(ExternalInfobaseChangesPolicy.CANCEL,
+            LaunchUpdateDialogAutoConfirmer.choosePolicyFor(BODY_A, Arrays.asList(
+                arm("agent-base", ExternalInfobaseChangesPolicy.OVERRIDE), //$NON-NLS-1$
+                arm("agent-base", ExternalInfobaseChangesPolicy.IMPORT)))); //$NON-NLS-1$
+        // The same policy twice (nested arms) is not ambiguous.
+        assertEquals(ExternalInfobaseChangesPolicy.OVERRIDE,
+            LaunchUpdateDialogAutoConfirmer.choosePolicyFor(BODY_A, Arrays.asList(
+                arm("agent-base", ExternalInfobaseChangesPolicy.OVERRIDE), //$NON-NLS-1$
+                arm("agent-base", ExternalInfobaseChangesPolicy.OVERRIDE)))); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testUnnamedArmsCanOnlyDecline()
+    {
+        // A window that could not resolve an infobase name is degraded to cancel by arm(), so an
+        // unnamed arm can only ever decline - never write.
+        assertEquals(ExternalInfobaseChangesPolicy.CANCEL,
+            LaunchUpdateDialogAutoConfirmer.choosePolicyFor(BODY_A, Arrays.asList(
+                arm(null, ExternalInfobaseChangesPolicy.CANCEL))));
+        assertEquals(ExternalInfobaseChangesPolicy.CANCEL,
+            LaunchUpdateDialogAutoConfirmer.choosePolicyFor(BODY_A, Arrays.asList(
+                arm(null, ExternalInfobaseChangesPolicy.CANCEL),
+                arm(null, ExternalInfobaseChangesPolicy.CANCEL))));
+        // A NAMED arm that does not match still yields "not ours" - and the press path answers
+        // that by CANCELLING the dialog (this modal is application-modal: leaving it open would
+        // freeze the workbench), which writes nothing on either side.
+        assertNull(LaunchUpdateDialogAutoConfirmer.choosePolicyFor(BODY_C, Arrays.asList(
+            arm(null, ExternalInfobaseChangesPolicy.CANCEL),
+            arm("agent-base", ExternalInfobaseChangesPolicy.OVERRIDE)))); //$NON-NLS-1$
+        assertEquals(ConfirmAction.CANCEL_DIALOG,
+            LaunchUpdateDialogAutoConfirmer.chooseConflictAction(null, true));
+        assertNull(LaunchUpdateDialogAutoConfirmer.choosePolicyFor(BODY_A, Arrays.asList()));
+    }
+
+    @Test
+    public void testDecisionReportsTheAttributedInfobase()
+    {
+        // The decision carries the name so the cancel can be counted for the right owner.
+        assertEquals("agent-base", LaunchUpdateDialogAutoConfirmer.decideFor(BODY_A, //$NON-NLS-1$
+            Arrays.asList(arm("agent-base", ExternalInfobaseChangesPolicy.OVERRIDE))).infobaseName); //$NON-NLS-1$
+        assertNull(LaunchUpdateDialogAutoConfirmer.decideFor(BODY_C,
+            Arrays.asList(arm("agent-base", ExternalInfobaseChangesPolicy.OVERRIDE))).infobaseName); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testDeclinedUpdateErrorNamesTheWayOut()
+    {
+        // The message is what a caller gets INSTEAD of a generic launch failure, so it must carry
+        // the parameter and both writing answers - that is the whole point of preferring it.
+        String message = ExternalInfobaseChangesPolicy.declinedUpdateError(
+            ExternalInfobaseChangesPolicy.CANCEL, LaunchUpdateDialogAutoConfirmer.CANCEL_REASON_POLICY);
+        assertTrue(message, message.contains("externalInfobaseChanges")); //$NON-NLS-1$
+        assertTrue(message, message.contains("override")); //$NON-NLS-1$
+        assertTrue(message, message.contains("import")); //$NON-NLS-1$
+        assertTrue(message, message.contains("outside EDT")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testAnArmWithoutANameCanOnlyDecline()
+    {
+        // Without an infobase name nothing can be proven to be ours, so a WRITING answer is
+        // degraded to cancel: the modal is still answered (the call cannot hang on it), but a
+        // dialog whose ownership is unproven is never written through.
+        assertEquals(ExternalInfobaseChangesPolicy.CANCEL, LaunchUpdateDialogAutoConfirmer
+            .attributableAnswer(null, ExternalInfobaseChangesPolicy.OVERRIDE));
+        assertEquals(ExternalInfobaseChangesPolicy.CANCEL, LaunchUpdateDialogAutoConfirmer
+            .attributableAnswer("   ", ExternalInfobaseChangesPolicy.IMPORT)); //$NON-NLS-1$
+        assertEquals(ExternalInfobaseChangesPolicy.CANCEL, LaunchUpdateDialogAutoConfirmer
+            .attributableAnswer(null, ExternalInfobaseChangesPolicy.CANCEL));
+        // With a name the caller's own answer stands.
+        assertEquals(ExternalInfobaseChangesPolicy.OVERRIDE, LaunchUpdateDialogAutoConfirmer
+            .attributableAnswer("agent-base", ExternalInfobaseChangesPolicy.OVERRIDE)); //$NON-NLS-1$
+        assertEquals(ExternalInfobaseChangesPolicy.IMPORT, LaunchUpdateDialogAutoConfirmer
+            .attributableAnswer("agent-base", ExternalInfobaseChangesPolicy.IMPORT)); //$NON-NLS-1$
+    }
+
+    private static LaunchUpdateDialogAutoConfirmer.ConflictArm arm(String infobase,
+        ExternalInfobaseChangesPolicy policy)
+    {
+        return new LaunchUpdateDialogAutoConfirmer.ConflictArm(infobase, policy);
+    }
+}

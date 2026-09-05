@@ -1,0 +1,4825 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Add a base-configuration object or member to an extension for customization. Parameters and examples: get_tool_guide('adopt_metadata_object').",
+    "inputSchema": {
+      "properties": {
+        "extensionProjectName": {
+          "description": "Target extension EDT project name; REQUIRED only when more than one extension extends the configuration (otherwise the single extension is used automatically)",
+          "type": "string"
+        },
+        "fqn": {
+          "type": "string"
+        },
+        "projectName": {
+          "description": "The BASE configuration EDT project that owns the object (NOT the extension) (required)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "fqn"
+      ],
+      "type": "object"
+    },
+    "name": "adopt_metadata_object",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "extensionProject": {
+          "type": "string"
+        },
+        "fqn": {
+          "type": "string"
+        },
+        "objectBelonging": {
+          "type": "string"
+        },
+        "persisted": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "writtenProjects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Apply an EDT quick fix to a validation problem. Parameters and examples: get_tool_guide('apply_quick_fix').",
+    "inputSchema": {
+      "properties": {
+        "checkId": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "modulePath": {
+          "description": "Narrow to a BSL module: the 'Module path' from get_project_errors (e.g. 'CommonModules/MyModule/Module.bsl'). Optional but recommended when the same check fires in several modules.",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "variant": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "projectName",
+        "checkId"
+      ],
+      "type": "object"
+    },
+    "name": "apply_quick_fix",
+    "outputSchema": {
+      "properties": {
+        "appliedVariant": {
+          "type": "string"
+        },
+        "checkId": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "modulePath": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Compile external 1C data processors and reports into deployable files. NOT self-contained: the project needs an associated infobase AND a resolvable 1C runtime - without either the call fails with a setup error, not a compile error (see create_infobase / set_infobase_credentials). Parameters and examples: get_tool_guide('build_external_objects').",
+    "inputSchema": {
+      "properties": {
+        "objectName": {
+          "description": "Name of a single external data processor/report to build. Omit to build ALL external objects of the project.",
+          "type": "string"
+        },
+        "outputDir": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "recordBuildTime": {
+          "description": "Optional, default true. When true, the build time is written into each built object's Comment property (\"Время сборки: <yyyy-MM-dd HH:mm:ss>\") and the .mdo is flushed to disk, so the object records when it was last built. Set false to build without modifying the object (no Comment change, no .mdo diff); the build time is still reported in the response message either way.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "projectName",
+        "outputDir"
+      ],
+      "type": "object"
+    },
+    "name": "build_external_objects",
+    "outputSchema": {
+      "properties": {
+        "built": {
+          "type": "integer"
+        },
+        "failed": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "outputDir": {
+          "type": "string"
+        },
+        "outsideWorkspace": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string"
+        },
+        "results": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Cancel a background job by jobId. DESTRUCTIVE. Two-phase: call once WITHOUT confirm to see the owning tool, state and progress, then again with confirm=true to cancel. Cancellation is not guaranteed - a committed job whose owner declares no destructive stop stays in flight. Parameters and examples: get_tool_guide('cancel_job').",
+    "inputSchema": {
+      "properties": {
+        "confirm": {
+          "type": "boolean"
+        },
+        "jobId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "jobId"
+      ],
+      "type": "object"
+    },
+    "name": "cancel_job",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Rebuild an EDT project from the on-disk src/ files and revalidate everything. Direction DISK -> MODEL; slow, and it DISCARDS unsaved in-memory model edits - save first. For one externally-edited object prefer revalidate_objects; for the opposite direction see resync_to_disk. Parameters and examples: get_tool_guide('clean_project').",
+    "inputSchema": {
+      "properties": {
+        "projectName": {
+          "description": "Name of the project to clean (optional, cleans all EDT projects if not specified)",
+          "type": "string"
+        },
+        "timeout": {
+          "description": "How long to wait for the clean build itself, per project, in seconds (default 120, clamped to 10..3600). On expiry the call fails with a timeout error instead of waiting forever; the clean may still be running in EDT afterwards. Does not cover the subsequent revalidation wait.",
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "clean_project",
+    "outputSchema": {
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "projects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "projectsCleaned": {
+          "type": "integer"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Compare a project's working tree against two git revisions (three-way) and report which top objects differ. Read-only: it never merges and never writes the project. Returns a jobId immediately - the comparison runs in background; poll it with get_job_status and stop it with cancel_job. EDT runs ONE comparison at a time, so a second call while one is live is refused, naming the live comparison, and is never queued. Omitting scope compares the WHOLE configuration. Expand one object with get_comparison_node. A FINISHED comparison stays open and keeps the slot - cancel_job cannot end it then; free it by calling this tool with releaseComparisonId alone. Full parameters and examples: call get_tool_guide('compare_configurations').",
+    "inputSchema": {
+      "properties": {
+        "ancestorRevision": {
+          "type": "string"
+        },
+        "changedOnly": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "mergeRulesFile": {
+          "type": "string"
+        },
+        "otherRevision": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "releaseComparisonId": {
+          "type": "string"
+        },
+        "scope": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "waitSeconds": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "compare_configurations",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Start isolated work on a new Git branch for an EDT project. Parameters and examples: get_tool_guide('create_git_branch').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "checkout": {
+          "description": "Check out the new branch immediately after creating it (bounded background Job, up to 120 s). Default FALSE - the branch is created and the working tree STAYS on the current branch, so later edits land there unless you pass true.",
+          "type": "boolean"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "setDefault": {
+          "type": "boolean"
+        },
+        "startPoint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "branch"
+      ],
+      "type": "object"
+    },
+    "name": "create_git_branch",
+    "outputSchema": {
+      "properties": {
+        "bound": {
+          "type": "object"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "checkedOut": {
+          "type": "boolean"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "startPoint": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Prepare an infobase for an EDT project by creating a database or registering an existing one. Passing user/password/access STORES those credentials in EDT's infobase settings - the secret PERSISTS beyond this call and is reused by later connections. Parameters and examples: get_tool_guide('create_infobase').",
+    "inputSchema": {
+      "properties": {
+        "access": {
+          "enum": [
+            "INFOBASE",
+            "OS"
+          ],
+          "type": "string"
+        },
+        "applicationKind": {
+          "enum": [
+            "infobase",
+            "standaloneServer"
+          ],
+          "type": "string"
+        },
+        "infobaseFile": {
+          "description": "Absolute path to the infobase directory. FILE infobases only - server/web are rejected.",
+          "type": "string"
+        },
+        "infobaseName": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "create",
+            "register"
+          ],
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "setDefault": {
+          "type": "boolean"
+        },
+        "user": {
+          "description": "Infobase connection user to store so update_database / launch can authenticate the update agent (issue #194). Selects an EXISTING user; most useful with mode='register' (the existing base already has users). Omit to store no credentials. Accepted for applicationKind='infobase', and for applicationKind='standaloneServer' with mode='register'; rejected for a newly created standalone server (mode='create').",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "infobaseFile"
+      ],
+      "type": "object"
+    },
+    "name": "create_infobase",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "applicationKind": {
+          "type": "string"
+        },
+        "applications": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "boundToProject": {
+          "type": "boolean"
+        },
+        "infobaseFile": {
+          "type": "string"
+        },
+        "infobaseName": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "project": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "webUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Configure an EDT runtime client for launching a 1C application. Parameters and examples: get_tool_guide('create_launch_config').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "clientType": {
+          "enum": [
+            "thin",
+            "thick",
+            "web"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "create_launch_config",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "clientType": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Add a new metadata object or member to a configuration. Parameters and examples: get_tool_guide('create_metadata').",
+    "inputSchema": {
+      "properties": {
+        "callType": {
+          "enum": [
+            "Before",
+            "After",
+            "Instead"
+          ],
+          "type": "string"
+        },
+        "commonModuleKind": {
+          "description": "CommonModule top-object only. Selects a standards-compliant flag combination the common-module-type validator accepts (no warning), instead of a bare module: 'Server', 'ServerCall', 'ClientManaged', 'ClientOrdinary', 'ClientServer', 'Global'. Defaults to 'Server'. Ignored for other types. Combine with 'serverCall' / 'privileged' / 'returnValuesReuse'. These are create-time-only (the flag set cannot be re-derived post-hoc).",
+          "enum": [
+            "Server",
+            "ServerCall",
+            "ClientManaged",
+            "ClientOrdinary",
+            "ClientServer",
+            "Global"
+          ],
+          "type": "string"
+        },
+        "expectedNotExists": {
+          "type": "boolean"
+        },
+        "fqn": {
+          "type": "string"
+        },
+        "generateContent": {
+          "type": "boolean"
+        },
+        "normalizeYo": {
+          "description": "Normalize the Russian letter 'ё'->'е' / 'Ё'->'Е' in the new node's NAME (the trailing FQN segment) and in any synonym / comment / predefined-item description value (default true). 'ё' in a Name is flagged by the 1C standard mdo-ru-name-unallowed-letter, so normalizing on input stores a compliant name. Set false to keep 'ё' exactly as supplied.",
+          "type": "boolean"
+        },
+        "objectFields": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "privileged": {
+          "description": "CommonModule top-object only. When true, the module runs with full (privileged) access. Valid only with the 'Server' kind (not a server call). Ignored for other types.",
+          "type": "boolean"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "properties": {
+          "description": "Optional properties to apply at creation, as [{name, value, language?}]. For most kinds this applies 'synonym' (with optional 'language' code) and 'comment'; other property names are rejected (set them via modify_metadata). A FORM CONTENT member ('...Form.<F>.<Kind>.<Name>') takes a DIFFERENT vocabulary: 'title' (with optional 'language'), 'parent' (the group to nest a visual item under), 'dataPath' / 'attribute' (the bound attribute of a Field / Table), 'command' (a Button's command) and 'type' (a Group's kind). XDTO PACKAGE MEMBERS ('XDTOPackage.<Package>.ObjectType.<Name>' / '...Property.<Name>' / '...ObjectType.<Type>.Property.<Name>') use a DIFFERENT vocabulary instead: an ObjectType takes the optional boolean flags 'open' / 'abstract' / 'mixed' / 'ordered' / 'sequenced'; a Property REQUIRES 'type' (a built-in XSD type name like 'string', the EXACT name of an ObjectType already in the same package for a same-package reference, or an object {nsUri, name}) plus the optional 'lowerBound' / 'upperBound' (integers, ObjectType-nested properties only), 'nillable' / 'fixed' (booleans, 'fixed'=true needs a 'default') and 'default' (string). A PREDEFINED item ('...Predefined.<Item>') uses yet another vocabulary: 'description' / 'code' on every owner, 'isFolder' / 'parent' on a Catalog / ChartOfCharacteristicTypes (a ChartOfAccounts nests through 'parent' too; a ChartOfCalculationTypes takes neither), plus owner-specific properties - 'valueType' (alias 'type'; same {types:[...]} shape as an mdclass attribute's 'type') on a ChartOfCharacteristicTypes item; 'accountType' / 'offBalance' / 'order' / 'accountingFlags' / 'extDimensionTypes' on a ChartOfAccounts item; 'base' / 'displaced' / 'leading' / 'actionPeriodIsBase' on a ChartOfCalculationTypes item (see the guide for which apply to each owner).",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "returnValuesReuse": {
+          "description": "CommonModule top-object only. Reuse of return values: 'DontUse' (default), 'DuringRequest' or 'DuringSession'. 'DuringSession' yields a cached module accepted by the common-module-type validator. Ignored for other types.",
+          "enum": [
+            "DontUse",
+            "DuringRequest",
+            "DuringSession"
+          ],
+          "type": "string"
+        },
+        "serverCall": {
+          "description": "CommonModule top-object only. When true, the server module is callable from the client (server call). Valid only with a server kind and incompatible with 'Global'. Ignored for other types.",
+          "type": "boolean"
+        },
+        "setAsDefault": {
+          "type": "boolean"
+        },
+        "targetNamespace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "fqn"
+      ],
+      "type": "object"
+    },
+    "name": "create_metadata",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "applied": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "callType": {
+          "type": "string"
+        },
+        "commonModuleKind": {
+          "type": "string"
+        },
+        "fqn": {
+          "type": "string"
+        },
+        "generateContent": {
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "localeUnusedInConfiguration": {
+          "type": "boolean"
+        },
+        "localesMissing": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "normalized": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "persisted": {
+          "type": "boolean"
+        },
+        "setAsDefault": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "synonym": {
+          "type": "string"
+        },
+        "targetNamespace": {
+          "type": "string"
+        },
+        "writtenProjects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Start a new EDT configuration, extension, or external-objects project. Parameters and examples: get_tool_guide('create_project').",
+    "inputSchema": {
+      "properties": {
+        "autoSortTopObjects": {
+          "description": "Reserved for future use: auto-sort top-level metadata objects. Accepted but not yet applied in this release (see codestyle.autoSortNote in the response).",
+          "type": "boolean"
+        },
+        "baseProjectName": {
+          "description": "Name of the BASE configuration EDT project (required for extension; REJECTED for configuration and externalObjects). Must be an existing, open V8 configuration project. Use list_projects to find it.",
+          "type": "string"
+        },
+        "comment": {
+          "type": "string"
+        },
+        "commonChecks": {
+          "type": "boolean"
+        },
+        "compatibilityMode": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "projectKind": {
+          "enum": [
+            "configuration",
+            "extension",
+            "externalObjects"
+          ],
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "purpose": {
+          "enum": [
+            "Customization",
+            "AddOn",
+            "Patch"
+          ],
+          "type": "string"
+        },
+        "scriptVariant": {
+          "description": "Script variant (Russian or English). configuration: sets the Configuration scriptVariant and default Language code (default Russian). externalObjects: applied post-create via setScriptVariant (non-fatal on failure). extension: REJECTED — scriptVariant is always inherited from the base configuration.",
+          "enum": [
+            "Russian",
+            "English"
+          ],
+          "type": "string"
+        },
+        "standardChecks": {
+          "type": "boolean"
+        },
+        "synonym": {
+          "type": "string"
+        },
+        "version": {
+          "description": "Platform version string, e.g. '8.3.27' (configuration and externalObjects only; for extension: REJECTED — version is always inherited from the base configuration). Default: Version.LATEST when omitted.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectKind",
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "create_project",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "baseProject": {
+          "type": "string"
+        },
+        "codestyle": {
+          "type": "object"
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "projectKind": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "scriptVariant": {
+          "type": "string"
+        },
+        "scriptVariantNote": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "synonymNote": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Read, author, and losslessly XML-round-trip 1C DCS schemas, settings variants, form conditional appearance, and form dynamic lists. Call action='get' first; replace, remove and any index-addressed edit require its hash as expectedHash. Call get_tool_guide('dcs') for body shapes.",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "enum": [
+            "get",
+            "options",
+            "upsert",
+            "update",
+            "replace",
+            "remove"
+          ],
+          "type": "string"
+        },
+        "body": {
+          "description": "Mutation body; forbidden for get/options/remove and required by the other mutations.",
+          "type": "object"
+        },
+        "expectedHash": {
+          "type": "string"
+        },
+        "format": {
+          "description": "Read output; defaults to md. xml is only for a bare schema get.",
+          "enum": [
+            "md",
+            "xml"
+          ],
+          "type": "string"
+        },
+        "fqn": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "schema",
+            "dynamicList",
+            "dataSource",
+            "dataSet",
+            "field",
+            "fieldFolder",
+            "parameter",
+            "calculatedField",
+            "totalField",
+            "variant",
+            "grouping",
+            "selection",
+            "filter",
+            "dataParameter",
+            "order",
+            "conditionalAppearance",
+            "table",
+            "userField",
+            "outputParameter",
+            "userSettings"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "fqn",
+        "action",
+        "type"
+      ],
+      "type": "object"
+    },
+    "name": "dcs",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Check which EDT debug sessions are running or paused. Parameters and examples: get_tool_guide('debug_status').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "debug_status",
+    "outputSchema": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "debugServerTargetCount": {
+          "type": "integer"
+        },
+        "debugServerTargets": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "launches": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "recentLaunchFailures": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "registry": {
+          "type": "object"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "DEPRECATED alias of run_yaxunit_tests(debug=true) - prefer that instead; the implementation is shared. DEBUG mode, so breakpoints fire: a short start returns the launch handle and you call wait_for_break next, while Pending returns a jobId to poll with get_job_status. Parameters and examples: get_tool_guide('debug_yaxunit_tests').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "extensions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "externalInfobaseChanges": {
+          "description": "How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: 'override' (default) keeps the project configuration and overwrites the infobase, 'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update with an error. Omitted, the modal is still answered (with 'override'), so an unattended call never blocks on it.",
+          "type": "string"
+        },
+        "launchConfigurationName": {
+          "type": "string"
+        },
+        "modules": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "standaloneServerPortConflict": {
+          "description": "Answer to EDT's standalone-server port-conflict prompt: cancel (default) = fail and name the busy ports; reassign = let EDT move the server to free ports (rewrites its configuration).",
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tests": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "updateBeforeLaunch": {
+          "description": "Default true: terminate any live client and run a silent DB update first so no modal 'Update database?' dialog blocks the call; false keeps legacy delegate behaviour — no client sweep, no auto-confirmed update dialog; platform dialogs may appear.",
+          "type": "boolean"
+        },
+        "updateScope": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "debug_yaxunit_tests",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Remove a project's infobase or its standalone-server registration, optionally deleting the database files. DESTRUCTIVE and IRREVERSIBLE. Two-phase: call once WITHOUT confirm to preview, then again with confirm=true to apply. Parameters and examples: get_tool_guide('delete_infobase').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "deleteDatabaseFiles": {
+          "description": "true = ALSO delete the infobase database files/directory from disk (the 1Cv8.1CD directory) — IRREVERSIBLE. Default false = keep the database files on disk (the registration is removed but the data stays). Works for both a file infobase and a standalone server (deletes the served database directory).",
+          "type": "boolean"
+        },
+        "deleteRegistration": {
+          "description": "true = also deregister the infobase from the global EDT infobases list (equivalent to 'Delete' in the Infobases view); default true.",
+          "type": "boolean"
+        },
+        "infobaseName": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "delete_infobase",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "applicationKind": {
+          "type": "string"
+        },
+        "confirmationRequired": {
+          "type": "boolean"
+        },
+        "databaseFilesDeleted": {
+          "type": "boolean"
+        },
+        "deleteRegistration": {
+          "type": "boolean"
+        },
+        "infobaseName": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Remove an unused EDT runtime or attach launch configuration. Two-phase: call once WITHOUT confirm to preview, then again with confirm=true to apply. Parameters and examples: get_tool_guide('delete_launch_config').",
+    "inputSchema": {
+      "properties": {
+        "confirm": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "delete_launch_config",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "confirmationRequired": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Delete a metadata object or member (FQN-addressed). DESTRUCTIVE and CASCADING: on the md-refactoring path EDT cleans the REFERENCES to the deleted object across BSL, forms and metadata - the referring objects themselves are NOT deleted. Two-phase: call once WITHOUT confirm to preview what will be removed, then again with confirm=true to apply. A reference EDT cannot auto-clean leaves the delete BLOCKED and lists the referring objects; an EDT platform prohibition is listed separately and also blocks. force=true overrides either block and leaves only genuine incoming references dangling. EXCEPTION - an owned FORM object, a FORM member or an XDTO package member is removed straight from its container: NOTHING blocks it (force is ignored) and no cross-object cascade runs, so references from elsewhere (a field's dataPath, a command, an XDTO type) are left broken - re-check with get_metadata_details (find_references takes TOP-level FQNs only, not these members). Parameters and examples: get_tool_guide('delete_metadata').",
+    "inputSchema": {
+      "properties": {
+        "confirm": {
+          "type": "boolean"
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "fqn": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "projectName",
+        "fqn"
+      ],
+      "type": "object"
+    },
+    "name": "delete_metadata",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "affectedReferences": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "affectedReferencesCount": {
+          "type": "integer"
+        },
+        "blocking": {
+          "type": "boolean"
+        },
+        "blockingReferences": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "blockingReferencesCount": {
+          "type": "integer"
+        },
+        "forced": {
+          "type": "boolean"
+        },
+        "fqn": {
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "persisted": {
+          "type": "boolean"
+        },
+        "platformProhibitions": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "platformProhibitionsCount": {
+          "type": "integer"
+        },
+        "refactoringTitle": {
+          "type": "string"
+        },
+        "registeringContainer": {
+          "type": "string"
+        },
+        "registeringFile": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "writtenProjects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Remove an EDT project from the workspace, optionally with its sources on disk. DESTRUCTIVE and IRREVERSIBLE. Two-phase: call once WITHOUT confirm to preview, then again with confirm=true to apply. Parameters and examples: get_tool_guide('delete_project').",
+    "inputSchema": {
+      "properties": {
+        "confirm": {
+          "type": "boolean"
+        },
+        "deleteContent": {
+          "type": "boolean"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "delete_project",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "confirmationRequired": {
+          "type": "boolean"
+        },
+        "deleteContent": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Make additional MCP tool groups visible or hide them. Parameters and examples: get_tool_guide('enable_toolset').",
+    "inputSchema": {
+      "properties": {
+        "disable": {
+          "type": "boolean"
+        },
+        "toolsets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "toolsets"
+      ],
+      "type": "object"
+    },
+    "name": "enable_toolset",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "applied": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ignored": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "invalid": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "note": {
+          "type": "string"
+        },
+        "progressiveDisclosure": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "visibleToolsets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Evaluate a BSL expression in a paused debug frame and return the value. WARNING: this executes arbitrary code in the running application - it can change state, not just read it. Parameters and examples: get_tool_guide('evaluate_expression').",
+    "inputSchema": {
+      "properties": {
+        "expression": {
+          "type": "string"
+        },
+        "frameRef": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "frameRef",
+        "expression"
+      ],
+      "type": "object"
+    },
+    "name": "evaluate_expression",
+    "outputSchema": {
+      "properties": {
+        "fullLength": {
+          "type": "integer"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inspect or extract the image data of a 1C common picture. Parameters and examples: get_tool_guide('export_common_picture').",
+    "inputSchema": {
+      "properties": {
+        "fqn": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "variant": {
+          "description": "Optional. Which variant to decode to PNG: 'best' (the best raster variant), 'svg' (the vector variant, rasterized), or an exact variant/entry name from the 'variants' list. Omit it to return the inventory only (no image bytes).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "fqn"
+      ],
+      "type": "object"
+    },
+    "name": "export_common_picture",
+    "outputSchema": {
+      "properties": {
+        "fqn": {
+          "type": "string"
+        },
+        "selected": {
+          "type": "object"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "variants": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Export an EDT configuration into 1C XML files. Parameters and examples: get_tool_guide('export_configuration_to_xml').",
+    "inputSchema": {
+      "properties": {
+        "outputPath": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "outputPath"
+      ],
+      "type": "object"
+    },
+    "name": "export_configuration_to_xml",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Discover where a metadata object is used throughout the configuration and BSL code. Parameters and examples: get_tool_guide('find_references').",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "objectFqn": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "objectFqn"
+      ],
+      "type": "object"
+    },
+    "name": "find_references",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Collect translatable strings of a configuration and WRITE the generated keys into the project's translation storage (.lstr/.trans/.dict; storageId, default 'edit:default'). This changes project files - it is not a read-only scan. Run it on the configuration project (V8ConfigurationNature), not a dictionary storage project; requires LanguageTool installed in EDT. Parameters and examples: get_tool_guide('generate_translation_strings').",
+    "inputSchema": {
+      "properties": {
+        "collectInterface": {
+          "type": "boolean"
+        },
+        "collectModel": {
+          "type": "boolean"
+        },
+        "collectModelType": {
+          "type": "string"
+        },
+        "fillUpType": {
+          "description": "Pre-fill source: NOT_FILLUP | FROM_SOURCE_LANGUAGE | FROM_PROVIDER. Default: NOT_FILLUP.",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "providerId": {
+          "description": "Translation provider ID; required only when fillUpType=FROM_PROVIDER (see get_translation_project_info).",
+          "type": "string"
+        },
+        "storageId": {
+          "type": "string"
+        },
+        "targetLanguages": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "projectName",
+        "targetLanguages"
+      ],
+      "type": "object"
+    },
+    "name": "generate_translation_strings",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Discover infobases connected to an EDT project. Parameters and examples: get_tool_guide('get_applications').",
+    "inputSchema": {
+      "properties": {
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "get_applications",
+    "outputSchema": {
+      "properties": {
+        "applications": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "defaultApplicationId": {
+          "type": "string"
+        },
+        "inheritedFromProject": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Understand an EDT validation rule and how to fix its diagnostic. Parameters and examples: get_tool_guide('get_check_description').",
+    "inputSchema": {
+      "properties": {
+        "checkId": {
+          "description": "Check id: the symbolic dash-cased id (e.g. 'begin-transaction', 'ql-temp-table-index') OR the short UID code from get_project_errors (e.g. 'SU23'); a UID is resolved when projectName is also supplied. Precondition: a check-descriptions folder must be configured in MCP preferences, else the tool returns a configuration error.",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "checkId"
+      ],
+      "type": "object"
+    },
+    "name": "get_check_description",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Expand one node of a comparison started by compare_configurations: three-way property table, form structure, module sections, support state and potential problems. Address the node by objectFqn (Russian or English type tokens both work) or by the nodeId from the comparison report. The tree is built lazily, so an unfinished subtree is reported as unfinished, never as 'no differences'. Read-only: it never merges. Parameters and examples: get_tool_guide('get_comparison_node').",
+    "inputSchema": {
+      "properties": {
+        "comparisonId": {
+          "type": "string"
+        },
+        "depth": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "nodeId": {
+          "type": "integer"
+        },
+        "objectFqn": {
+          "type": "string"
+        },
+        "side": {
+          "enum": [
+            "main",
+            "other",
+            "ancestor"
+          ],
+          "type": "string"
+        },
+        "waitSeconds": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "comparisonId"
+      ],
+      "type": "object"
+    },
+    "name": "get_comparison_node",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inspect the identity and compatibility settings of a 1C configuration. Parameters and examples: get_tool_guide('get_configuration_properties').",
+    "inputSchema": {
+      "properties": {
+        "projectName": {
+          "description": "Project name (optional, if not specified returns first configuration project)",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_configuration_properties",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Find valid BSL completion suggestions at a source-code position. Parameters and examples: get_tool_guide('get_content_assist').",
+    "inputSchema": {
+      "properties": {
+        "column": {
+          "type": "integer"
+        },
+        "contains": {
+          "type": "string"
+        },
+        "extendedDocumentation": {
+          "type": "boolean"
+        },
+        "filePath": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "modulePath": {
+          "description": "BSL module path under src (e.g. 'CommonModules/MyModule/Module.bsl'); alias: filePath",
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "line",
+        "column"
+      ],
+      "type": "object"
+    },
+    "name": "get_content_assist",
+    "outputSchema": {
+      "properties": {
+        "column": {
+          "type": "integer"
+        },
+        "file": {
+          "type": "string"
+        },
+        "filteredOut": {
+          "type": "integer"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "proposals": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "returnedProposals": {
+          "type": "integer"
+        },
+        "skipped": {
+          "type": "integer"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "totalProposals": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Identify the installed 1C:EDT version. Parameters and examples: get_tool_guide('get_edt_version').",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_edt_version",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Investigate infobase activity and errors through its event log. Reads the LEGACY text format only (ver 2.0: 1Cv8.lgf + *.lgp); an infobase on the modern SQLite .lgd log is rejected, so switch the log format in 1C or use another source. A SERVER (client/server) infobase is NOT resolvable from projectName/applicationId - its cluster srvinfo path is not model-derivable, so pass an absolute logDir instead. Returns PII and live infobase data - user names, session data and business-record references. Parameters and examples: get_tool_guide('get_event_log').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "commentContains": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string"
+        },
+        "eventContains": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "logDir": {
+          "type": "string"
+        },
+        "metadataContains": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "order": {
+          "enum": [
+            "date_asc",
+            "date_desc"
+          ],
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "severity": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "to": {
+          "type": "string"
+        },
+        "user": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_event_log",
+    "outputSchema": {
+      "properties": {
+        "events": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "format": {
+          "type": "string"
+        },
+        "infobaseType": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "matched": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "resolvedLogDir": {
+          "type": "string"
+        },
+        "returned": {
+          "type": "integer"
+        },
+        "scanned": {
+          "type": "integer"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inspect the calculated visual layout of an EDT form. Requires EDT launched with -DnativeFormBufferedLayoutRender=true: without the flag the layout comes back BLANK rather than failing, so an empty snapshot means the flag is missing, not that the form has no elements. Parameters and examples: get_tool_guide('get_form_layout_snapshot').",
+    "inputSchema": {
+      "properties": {
+        "formPath": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "compact",
+            "full"
+          ],
+          "type": "string"
+        },
+        "projectName": {
+          "description": "EDT project name. Required when formPath is specified.",
+          "type": "string"
+        },
+        "refresh": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_form_layout_snapshot",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Visually inspect an EDT form as rendered by the designer. Requires EDT launched with -DnativeFormBufferedLayoutRender=true: without the flag the image comes back BLANK instead of failing, so an empty screenshot means the flag is missing, not that the call was wrong. Parameters and examples: get_tool_guide('get_form_screenshot').",
+    "inputSchema": {
+      "properties": {
+        "formPath": {
+          "type": "string"
+        },
+        "projectName": {
+          "description": "EDT project name. Required when formPath is specified.",
+          "type": "string"
+        },
+        "refresh": {
+          "description": "Force a real WYSIWYG re-render before capture; fails with an explicit error instead of returning a stale image when the re-render cannot be completed (default: false)",
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_form_screenshot",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Poll any background job by the jobId its owning tool returned: state, progress journal and terminal result. Parameters and examples: get_tool_guide('get_job_status').",
+    "inputSchema": {
+      "properties": {
+        "jobId": {
+          "type": "string"
+        },
+        "waitSeconds": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "jobId"
+      ],
+      "type": "object"
+    },
+    "name": "get_job_status",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Find bookmarks and TODO-style task markers in the workspace. Parameters and examples: get_tool_guide('get_markers').",
+    "inputSchema": {
+      "properties": {
+        "filePath": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "markerKind": {
+          "description": "'bookmark' = manual navigation bookmarks; 'task' = TODO/FIXME/XXX/HACK code markers. Omit for both.",
+          "enum": [
+            "bookmark",
+            "task"
+          ],
+          "type": "string"
+        },
+        "priority": {
+          "description": "Filter task markers by priority (optional). Applies to task markers only; bookmarks have no priority and are unaffected. Cannot be combined with markerKind=bookmark.",
+          "enum": [
+            "high",
+            "normal",
+            "low"
+          ],
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_markers",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Diagnose MCP tool calls by reviewing recent requests, failures, timings, and context usage. Parameters and examples: get_tool_guide('get_mcp_history').",
+    "inputSchema": {
+      "properties": {
+        "includeBodies": {
+          "description": "Include the raw request/response JSON bodies for each record (default false = metadata only). The bodies can carry infobase / personal data; keep them off unless you need the payloads.",
+          "type": "boolean"
+        },
+        "includeStats": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "minDurationMs": {
+          "type": "integer"
+        },
+        "sinceMs": {
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "all",
+            "error",
+            "ok"
+          ],
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "untilMs": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_mcp_history",
+    "outputSchema": {
+      "properties": {
+        "bufferSize": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "matched": {
+          "type": "integer"
+        },
+        "recording": {
+          "type": "boolean"
+        },
+        "records": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "returned": {
+          "type": "integer"
+        },
+        "stats": {
+          "type": "object"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "totalRecorded": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inspect the properties and structure of a metadata object or member. Parameters and examples: get_tool_guide('get_metadata_details').",
+    "inputSchema": {
+      "properties": {
+        "assignable": {
+          "type": "boolean"
+        },
+        "full": {
+          "type": "boolean"
+        },
+        "language": {
+          "type": "string"
+        },
+        "objectFqns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "roleObjectOffset": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "projectName",
+        "objectFqns"
+      ],
+      "type": "object"
+    },
+    "name": "get_metadata_details",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Discover metadata objects available in a 1C configuration. Parameters and examples: get_tool_guide('get_metadata_objects').",
+    "inputSchema": {
+      "properties": {
+        "language": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "metadataType": {
+          "type": "string"
+        },
+        "nameFilter": {
+          "description": "Case-insensitive substring matched against Name only (not Synonym)",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "textFilter": {
+          "description": "Case-insensitive substring matched against Name or Synonym selected by language; mutually exclusive with nameFilter",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "get_metadata_objects",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Trace which BSL methods call a method or are called by it; optional depth walks the chain transitively for impact analysis (callers only, max 5). Finds STATIC invocations only, so a complete result does not prove nothing else calls the method. Parameters and examples: get_tool_guide('get_method_call_hierarchy').",
+    "inputSchema": {
+      "properties": {
+        "depth": {
+          "type": "integer"
+        },
+        "direction": {
+          "description": "'callers' = who calls this method, 'callees' = what it calls, 'outgoing' = aggregated distinct call targets (module-wide when methodName is omitted).",
+          "enum": [
+            "callers",
+            "callees",
+            "outgoing"
+          ],
+          "type": "string"
+        },
+        "extApiPrefix": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "methodName": {
+          "description": "Name of the procedure/function (case-insensitive). Required for direction 'callers'/'callees'; optional for 'outgoing' (omit to aggregate the whole module).",
+          "type": "string"
+        },
+        "modulePath": {
+          "description": "Path from src/ folder, e.g. 'CommonModules/MyModule/Module.bsl' (required)",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "modulePath"
+      ],
+      "type": "object"
+    },
+    "name": "get_method_call_hierarchy",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Discover procedures, functions, regions, and execution contexts in a BSL module. Parameters and examples: get_tool_guide('get_module_structure').",
+    "inputSchema": {
+      "properties": {
+        "includeComments": {
+          "type": "boolean"
+        },
+        "includeVariables": {
+          "type": "boolean"
+        },
+        "modulePath": {
+          "description": "Path from src/ folder, e.g. 'CommonModules/MyModule/Module.bsl' (required)",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "responseFormat": {
+          "description": "Output verbosity. concise (default) = leaner methods table (drops Parameters and Description columns); detailed = full table with signatures and doc-comments.",
+          "enum": [
+            "concise",
+            "detailed"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "modulePath"
+      ],
+      "type": "object"
+    },
+    "name": "get_module_structure",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Find metadata objects organized under selected tags. Parameters and examples: get_tool_guide('get_objects_by_tags').",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "projectName",
+        "tags"
+      ],
+      "type": "object"
+    },
+    "name": "get_objects_by_tags",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Discover the fields passed to outgoing or qualified BSL method calls. BEST-EFFORT and incomplete by design: only top-level LITERAL keys of the first argument, found by a flow-insensitive scan - computed keys, constructor-supplied keys and deeper helper chains are missed, so absence is not proof. Parameters and examples: get_tool_guide('get_outgoing_structures').",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "method": {
+          "type": "string"
+        },
+        "modulePath": {
+          "description": "Path from src/ folder, e.g. 'CommonModules/MyModule/Module.bsl' (required)",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "qualifier": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "modulePath"
+      ],
+      "type": "object"
+    },
+    "name": "get_outgoing_structures",
+    "outputSchema": {
+      "properties": {
+        "structureCount": {
+          "type": "integer"
+        },
+        "structures": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Look up a built-in 1C type or global function in the platform documentation. Returns headers and member names by default - pass responseFormat='detailed' for signatures, parameters and return types. Parameters and examples: get_tool_guide('get_platform_documentation').",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "enum": [
+            "type",
+            "builtin"
+          ],
+          "type": "string"
+        },
+        "language": {
+          "enum": [
+            "en",
+            "ru"
+          ],
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "memberName": {
+          "type": "string"
+        },
+        "memberType": {
+          "enum": [
+            "method",
+            "property",
+            "constructor",
+            "event",
+            "all"
+          ],
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "responseFormat": {
+          "description": "'concise' (default) = leaner: headers + member names only; 'detailed' = full member signatures, parameters, types and flags.",
+          "enum": [
+            "concise",
+            "detailed"
+          ],
+          "type": "string"
+        },
+        "typeName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "typeName"
+      ],
+      "type": "object"
+    },
+    "name": "get_platform_documentation",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "See validation problem counts grouped by project and severity. Parameters and examples: get_tool_guide('get_problem_summary').",
+    "inputSchema": {
+      "properties": {
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_problem_summary",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Identify performance hotspots in executed BSL code. Returns the MOST RECENT measurement session GLOBALLY - applicationId only changes the reported active-state flag, so the results may belong to a different application than the one asked about. Parameters and examples: get_tool_guide('get_profiling_results').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "minFrequency": {
+          "type": "integer"
+        },
+        "moduleFilter": {
+          "type": "string"
+        },
+        "responseFormat": {
+          "enum": [
+            "concise",
+            "detailed"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_profiling_results",
+    "outputSchema": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "profilingActive": {
+          "type": "boolean"
+        },
+        "results": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Find detailed validation errors and warnings in an EDT project. Parameters and examples: get_tool_guide('get_project_errors').",
+    "inputSchema": {
+      "properties": {
+        "checkId": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "objectFqns": {
+          "description": "EXACT model addresses; mutually exclusive with objects. A MEMBER address (Catalog.Products.Attribute.Weight) widens the scan to its OWNING object - EDT indexes the marker there - so the result can carry problems from elsewhere in that object. Returns objectsNotFound / objectsUnsupported.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "objects": {
+          "description": "Loose case-insensitive SUBSTRING match against the reported location; mutually exclusive with objectFqns.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "responseFormat": {
+          "enum": [
+            "concise",
+            "detailed"
+          ],
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "ERRORS",
+            "BLOCKER",
+            "CRITICAL",
+            "MAJOR",
+            "MINOR",
+            "TRIVIAL",
+            "NONE"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_project_errors",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Diagnose the EDT MCP server and its feature configuration. Parameters and examples: get_tool_guide('get_server_status').",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_server_status",
+    "outputSchema": {
+      "properties": {
+        "authEnabled": {
+          "type": "boolean"
+        },
+        "checksFolderConfigured": {
+          "type": "boolean"
+        },
+        "edtVersion": {
+          "type": "string"
+        },
+        "enabledTools": {
+          "type": "integer"
+        },
+        "formRenderFlags": {
+          "type": "object"
+        },
+        "plainTextMode": {
+          "type": "boolean"
+        },
+        "pluginVersion": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "protocolVersion": {
+          "type": "string"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "totalTools": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inspect which metadata objects and child subsystems belong to a 1C subsystem. Parameters and examples: get_tool_guide('get_subsystem_content').",
+    "inputSchema": {
+      "properties": {
+        "language": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "recursive": {
+          "type": "boolean"
+        },
+        "subsystemFqn": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "subsystemFqn"
+      ],
+      "type": "object"
+    },
+    "name": "get_subsystem_content",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inspect the type and documentation of a BSL symbol at its source location. Parameters and examples: get_tool_guide('get_symbol_info').",
+    "inputSchema": {
+      "properties": {
+        "column": {
+          "type": "integer"
+        },
+        "filePath": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "modulePath": {
+          "description": "BSL module path from src/, e.g. 'CommonModules/MyModule/Module.bsl' (canonical; alias: filePath)",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "line",
+        "column"
+      ],
+      "type": "object"
+    },
+    "name": "get_symbol_info",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Discover user-defined tags used to organize project metadata. Parameters and examples: get_tool_guide('get_tags').",
+    "inputSchema": {
+      "properties": {
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "get_tags",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Visually inspect how a spreadsheet print template renders. Parameters and examples: get_tool_guide('get_template_screenshot').",
+    "inputSchema": {
+      "properties": {
+        "projectName": {
+          "type": "string"
+        },
+        "templatePath": {
+          "description": "Template FQN: a common template 'CommonTemplate.<Name>' or an object-owned template '<Type>.<Owner>.Template.<Name>' (e.g. 'DataProcessor.Invoices.Template.Printout').",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "templatePath"
+      ],
+      "type": "object"
+    },
+    "name": "get_template_screenshot",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Retrieve detailed instructions for an MCP tool. Parameters and examples: get_tool_guide('get_tool_guide').",
+    "inputSchema": {
+      "properties": {
+        "toolName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "toolName"
+      ],
+      "type": "object"
+    },
+    "name": "get_tool_guide",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inspect the translation setup of an EDT project. Parameters and examples: get_tool_guide('get_translation_project_info').",
+    "inputSchema": {
+      "properties": {
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "get_translation_project_info",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inspect runtime variables in a paused debug frame. Parameters and examples: get_tool_guide('get_variables').",
+    "inputSchema": {
+      "properties": {
+        "expandPath": {
+          "type": "string"
+        },
+        "frameIndex": {
+          "type": "integer"
+        },
+        "frameRef": {
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_variables",
+    "outputSchema": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "variables": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Locate the source definition of a BSL symbol or metadata object. Parameters and examples: get_tool_guide('go_to_definition').",
+    "inputSchema": {
+      "properties": {
+        "includeSource": {
+          "type": "boolean"
+        },
+        "modulePath": {
+          "description": "Module path from src/, e.g. 'CommonModules/My/Module.bsl'; required for a bare method name",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "go_to_definition",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Create an EDT project from exported 1C configuration XML files. Parameters and examples: get_tool_guide('import_configuration_from_xml').",
+    "inputSchema": {
+      "properties": {
+        "importPath": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "projectNature": {
+          "type": "string"
+        },
+        "xmlVersion": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "importPath",
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "import_configuration_from_xml",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Start a 1C application in EDT debug (default) or run mode. An already-running session is NOT relaunched - the call short-circuits with alreadyRunning:true; restartIfRunning=true instead TERMINATES that live session first. Parameters and examples: get_tool_guide('launch').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "externalInfobaseChanges": {
+          "description": "How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: 'override' (default) keeps the project configuration and overwrites the infobase, 'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update with an error. Omitted, the modal is still answered (with 'override'), so an unattended call never blocks on it.",
+          "type": "string"
+        },
+        "externalObjectName": {
+          "type": "string"
+        },
+        "externalObjectProjectName": {
+          "type": "string"
+        },
+        "launchConfigurationName": {
+          "type": "string"
+        },
+        "mode": {
+          "description": "Launch mode: debug (default) or run. Attach configurations support debug only.",
+          "enum": [
+            "debug",
+            "run"
+          ],
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "restartIfRunning": {
+          "description": "Default false: if a matching session is already running, short-circuit with alreadyRunning:true and do NOT relaunch (call terminate_launch to restart). true: non-interactively terminate the existing session, then relaunch — no 'Debug session already exists' modal blocks the call.",
+          "type": "boolean"
+        },
+        "standaloneServerPortConflict": {
+          "description": "Answer to EDT's standalone-server port-conflict prompt: cancel (default) = fail and name the busy ports; reassign = let EDT move the server to free ports (rewrites its configuration).",
+          "type": "string"
+        },
+        "startupOption": {
+          "type": "string"
+        },
+        "updateBeforeLaunch": {
+          "description": "Default true: silently apply the configuration->DB update before launching so no 'Update database?' modal blocks the call (even on a Russian-locale EDT the dialog is auto-confirmed); false skips the update and the platform may then show that modal. Ignored for Attach.",
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "launch",
+    "outputSchema": {
+      "properties": {
+        "alreadyRunning": {
+          "type": "boolean"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "attach": {
+          "type": "boolean"
+        },
+        "configurationType": {
+          "type": "string"
+        },
+        "externalObjectName": {
+          "type": "string"
+        },
+        "externalObjectProjectName": {
+          "type": "string"
+        },
+        "launchConfiguration": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "startupOption": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Review breakpoints currently set in BSL source code. Parameters and examples: get_tool_guide('list_breakpoints').",
+    "inputSchema": {
+      "properties": {
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_breakpoints",
+    "outputSchema": {
+      "properties": {
+        "breakpoints": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inventory common pictures available in a 1C configuration. Parameters and examples: get_tool_guide('list_common_pictures').",
+    "inputSchema": {
+      "properties": {
+        "language": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "list_common_pictures",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Discover EDT runtime and server-side launch configurations. Parameters and examples: get_tool_guide('list_configurations').",
+    "inputSchema": {
+      "properties": {
+        "projectName": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "attach",
+            "client",
+            "all"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_configurations",
+    "outputSchema": {
+      "properties": {
+        "configurations": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inspect available Git branches and their EDT infobase bindings. Parameters and examples: get_tool_guide('list_git_branches').",
+    "inputSchema": {
+      "properties": {
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "list_git_branches",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Discover BSL modules available in an EDT project. Parameters and examples: get_tool_guide('list_modules').",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "metadataType": {
+          "enum": [
+            "all",
+            "documents",
+            "catalogs",
+            "commonModules",
+            "informationRegisters",
+            "accumulationRegisters",
+            "reports",
+            "dataProcessors",
+            "exchangePlans",
+            "businessProcesses",
+            "tasks",
+            "constants",
+            "commonCommands",
+            "commonForms",
+            "webServices",
+            "httpServices"
+          ],
+          "type": "string"
+        },
+        "nameFilter": {
+          "type": "string"
+        },
+        "objectName": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "list_modules",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Discover projects available in the EDT workspace. Parameters and examples: get_tool_guide('list_projects').",
+    "inputSchema": {
+      "properties": {
+        "format": {
+          "enum": [
+            "md",
+            "json"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_projects",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Discover the subsystem hierarchy of a 1C configuration. Parameters and examples: get_tool_guide('list_subsystems').",
+    "inputSchema": {
+      "properties": {
+        "language": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "nameFilter": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "recursive": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "list_subsystems",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Discover available groups of MCP tools and their visibility. Parameters and examples: get_tool_guide('list_toolsets').",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_toolsets",
+    "outputSchema": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "note": {
+          "type": "string"
+        },
+        "progressiveDisclosure": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "toolsets": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Read or author EDT's merge-rules file - the per-node decisions a configuration comparison saves and re-applies when it is launched. Which container to write is chosen by filePath: '.xml' needs NO running comparison but is read by EDT 2026.1 only, while the '.zip' both versions read carries an entry named after the comparison's three project names, so it needs a live comparison and is refused without one. Validation has THREE outcomes: a comparison whose tree is FINISHED checks every rule against what its node allows and refuses an illegal one; a comparison that answers but whose tree cannot be read yet names a zip's entry without checking anything, reported NOT VALIDATED - or refused outright when you passed comparisonId; with no comparison at all the file is authored from names, also NOT VALIDATED. Never merges anything - running the merge stays a human action in the comparison window. Parameters and examples: get_tool_guide('merge_rules').",
+    "inputSchema": {
+      "properties": {
+        "basedOn": {
+          "type": "string"
+        },
+        "comparisonId": {
+          "type": "string"
+        },
+        "decisions": {
+          "description": "write: the decisions to record, as [{path, rule}]. 'path' is the key chain below the root - [] = the whole configuration, ['commonModules'] = a whole collection (the EMF feature name; a metadata type token in either language, 'Catalog' or 'Catalogs' or the Russian form, is translated to it), ['commonModules','Main:Main:Main'] = one object, keyed by its name on the main, other and ancestor sides joined by ':' with 'NONE' for a side that has no such object. 'rule' is one of GetFromOther, DoNotMerge, MergePrioritizingMain, MergePrioritizingOther.",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "filePath": {
+          "description": "Absolute path of the merge-rules file (required). read: the file to parse, '.xml' or the '.zip' a comparison saves - the extension's CASE does not matter, '.ZIP' is read. write: this is what picks the container, and here the extension must be spelled in LOWER CASE, because EDT's own reader compares it exactly and would refuse the file inside the launch. '.zip' is read by every supported EDT and holds an entry named after the comparison's three PROJECT names, so it needs a live comparison and is refused without one; '.xml' needs none and is read by EDT 2026.1 only. An existing file is OVERWRITTEN only when 'basedOn' names that SAME file, whose decisions are carried into the file that REPLACES it; any other write over an existing file is refused so decisions are never silently discarded.",
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "mode": {
+          "enum": [
+            "read",
+            "write"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "filePath"
+      ],
+      "type": "object"
+    },
+    "name": "merge_rules",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Set properties of any metadata node (object or member, including form items, attributes, commands, and handlers). Parameters and examples: get_tool_guide('modify_metadata').",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "Members to attach / detach in a structured membership list, dispatched by the FQN's kind (a COMMON ATTRIBUTE's owners, an EXCHANGE PLAN's content objects, a CATALOG's owners, a DOCUMENT's register records, a SUBSYSTEM's content objects), as [{op?, metadata, use?, autoRecord?}]. 'op' is 'add' (default) / 'remove'; 'metadata' is the member object FQN (e.g. 'Catalog.Products' or the Russian 'Справочник.Товары' - only the type token is bilingual). 'use' (CommonAttribute only, add only, default 'Use') is 'Use' / 'DontUse' / 'Auto'; 'autoRecord' (ExchangePlan only, add only) is 'Allow' / 'Deny' (omit to keep the platform default). A Catalog owner, a Document register record and a Subsystem content object are plain references (no flag). Adding is idempotent (a re-added CommonAttribute owner has its 'use' updated, a re-added ExchangePlan object its 'autoRecord'; a re-added plain reference is a no-op). Valid only for a CommonAttribute / ExchangePlan / Catalog / Document / Subsystem FQN (a Subsystem FQN may be nested); cannot be combined with 'properties'.",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "fqn": {
+          "type": "string"
+        },
+        "normalizeYo": {
+          "description": "Normalize the Russian letter 'ё'->'е' / 'Ё'->'Е' in localized-string values (synonym / title) and in the 'comment' property (default true). Matches the 1C standard mdo-ru-name-unallowed-letter. Other free-text strings can be identifier-like (e.g. XDTOPackage.namespace is a URI) and always keep the supplied value. Set false to keep 'ё' exactly as supplied everywhere.",
+          "type": "boolean"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "properties": {
+          "description": "Properties to set, as [{name, value, language?}]. 'name' is the property name (e.g. 'comment', 'synonym', 'indexing'); 'value' is the new value; 'language' is the code for a synonym (default: config default). Required unless the FQN is a Role and a role payload (rights / templates / roleProperties) is given.",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "rights": {
+          "description": "ROLE only: per-object access rights to set, as [{object, right, value?, rls?, rlsFields?}]. 'object' is a metadata FQN (e.g. 'Catalog.Products' or the Russian 'Справочник.Товары'); 'right' is a bilingual right name (e.g. 'Read'/'Чтение', 'Update'/'Изменение'); 'value' is 'set' (allowed, default) / 'unset' (denied) / 'provided' (default/inherited), or a boolean (true=set, false=unset). 'rls' is an optional Row-Level-Security restriction condition (1C query text); 'rlsFields' is an optional array of field names the RLS applies to (omit / empty = whole-object restriction).",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "roleProperties": {
+          "description": "ROLE only: the three role properties, as optional booleans {setForNewObjects, setForAttributesByDefault, independentRightsOfChildObjects}. Only supplied flags are changed.",
+          "type": "object"
+        },
+        "template": {
+          "description": "SpreadsheetDocument (print form / макет) TEMPLATE FQN only: the spreadsheet content to author, instead of 'properties'. An object with any of: 'cells' [{row, col (both 0-based, required), text? OR parameter? (a print-time parameter name), bold?, fontSize?, hAlign? ('Left'/'Center'/'Right'/'Auto'/'Width'), vAlign? ('Top'/'Center'/'Bottom'), wrap? (true word-wraps the cell text)}]; 'merges' [{fromRow, fromCol, toRow, toCol}] merged cell ranges; 'areas' [{name, fromRow, fromCol, toRow, toCol}] named areas (for ПолучитьОбласть / Вывести output); 'columnWidths' [{col, width}] and 'rowHeights' [{row, height}] column / row sizes. Setting a cell overwrites that (row, col); the rest of the content is kept. Valid only for a SpreadsheetDocument template FQN; cannot be combined with 'properties' / 'content' / a Role payload.",
+          "type": "object"
+        },
+        "templates": {
+          "description": "ROLE only: RLS restriction templates to change, as [{op?, name, condition?}]. 'op' is 'add' (default) / 'edit' / 'delete'; 'name' is the template name; 'condition' is the RLS restriction text (required for add/edit).",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "projectName",
+        "fqn"
+      ],
+      "type": "object"
+    },
+    "name": "modify_metadata",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "applied": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "content": {
+          "type": "object"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "fqn": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "localeUnusedInConfiguration": {
+          "type": "boolean"
+        },
+        "localesMissing": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "localesStale": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "normalized": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "persisted": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "template": {
+          "type": "object"
+        },
+        "writtenProjects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inspect the source of one BSL procedure or function. Parameters and examples: get_tool_guide('read_method_source').",
+    "inputSchema": {
+      "properties": {
+        "methodName": {
+          "type": "string"
+        },
+        "modulePath": {
+          "description": "Path from src/, e.g. 'CommonModules/MyModule/Module.bsl'",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "modulePath",
+        "methodName"
+      ],
+      "type": "object"
+    },
+    "name": "read_method_source",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Inspect the source of a complete BSL module. Parameters and examples: get_tool_guide('read_module_source').",
+    "inputSchema": {
+      "properties": {
+        "endLine": {
+          "type": "integer"
+        },
+        "modulePath": {
+          "description": "Path from src/, e.g. 'CommonModules/MyModule/Module.bsl' (required)",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "startLine": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "projectName",
+        "modulePath"
+      ],
+      "type": "object"
+    },
+    "name": "read_module_source",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Stop pausing execution at a BSL source breakpoint. Address it EITHER by breakpointId OR by modulePath together with lineNumber - every field is optional on its own, and a call carrying neither pair is rejected. Parameters and examples: get_tool_guide('remove_breakpoint').",
+    "inputSchema": {
+      "properties": {
+        "breakpointId": {
+          "type": "integer"
+        },
+        "lineNumber": {
+          "type": "integer"
+        },
+        "module": {
+          "type": "string"
+        },
+        "modulePath": {
+          "description": "EDT module path or absolute path (when looking up by coordinates)",
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "remove_breakpoint",
+    "outputSchema": {
+      "properties": {
+        "removed": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Rename a metadata object or member and rewrite the references EDT RESOLVES for it. CASCADES ACROSS THE WHOLE CONFIGURATION - BSL, forms, roles, subsystems - but a reference the refactoring cannot resolve (a dynamically built name) is left pointing at the old name. Two-phase: call once WITHOUT confirm to see the edit scope, then again with confirm=true to apply. Parameters and examples: get_tool_guide('rename_metadata_object').",
+    "inputSchema": {
+      "properties": {
+        "confirm": {
+          "type": "boolean"
+        },
+        "disableIndices": {
+          "type": "string"
+        },
+        "expectedHash": {
+          "description": "Optimistic-lock token from the preview's contentHash; required when confirm=true and disableIndices is non-empty.",
+          "type": "string"
+        },
+        "maxResults": {
+          "type": "integer"
+        },
+        "newName": {
+          "type": "string"
+        },
+        "objectFqn": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "timeout": {
+          "description": "How long to wait for the cascade itself, in seconds (default 420, clamped to 60..3600). On expiry the call fails with a timeout error naming the stage it reached instead of waiting forever; EDT may still finish the rename afterwards, so verify the model. Does not cover the pre-flight index drain (a separate 60s bound).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "projectName",
+        "objectFqn",
+        "newName"
+      ],
+      "type": "object"
+    },
+    "name": "rename_metadata_object",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Continue a paused 1C debug session. Parameters and examples: get_tool_guide('resume').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "resume",
+    "outputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "autoResolved": {
+          "type": "boolean"
+        },
+        "resumed": {
+          "type": "boolean"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "serverTarget": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Write the in-memory model back out to the on-disk src/ .mdo files and report model-to-disk desync; fixes 'object file does not exist' failures and dangling Configuration.mdo references. Direction MODEL -> DISK, the opposite of clean_project. Dangling references are REPORTED by default, not removed. Two opt-in modes are DESTRUCTIVE: re-exporting every object overwrites on-disk edits, and removing dangling references rewrites Configuration.mdo. Parameters and examples: get_tool_guide('resync_to_disk').",
+    "inputSchema": {
+      "properties": {
+        "cleanDanglingReferences": {
+          "type": "boolean"
+        },
+        "fullExport": {
+          "type": "boolean"
+        },
+        "overwriteDiskEdits": {
+          "description": "Required confirmation for fullExport=true: force-exporting every .mdo from the in-memory model OVERWRITES any on-disk edits. Default: false - fullExport is rejected unless this is true. Ignored when fullExport=false.",
+          "type": "boolean"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "revalidate": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "resync_to_disk",
+    "outputSchema": {
+      "properties": {
+        "cleanDanglingReferences": {
+          "type": "boolean"
+        },
+        "danglingDetails": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "danglingFound": {
+          "type": "integer"
+        },
+        "danglingRemoved": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "danglingRemovedCount": {
+          "type": "integer"
+        },
+        "danglingWarning": {
+          "type": "string"
+        },
+        "fullExport": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "missingBefore": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "missingBeforeCount": {
+          "type": "integer"
+        },
+        "objectsExported": {
+          "type": "integer"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "revalidate": {
+          "type": "boolean"
+        },
+        "revalidateWarning": {
+          "type": "string"
+        },
+        "stillMissing": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "stillMissingCount": {
+          "type": "integer"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "totalTopObjects": {
+          "type": "integer"
+        },
+        "writtenProjects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Revalidate a project or a named list of objects, picking up .mdo edits made outside EDT. Targeted, lightweight alternative to clean_project - no full rebuild, nothing discarded. Parameters and examples: get_tool_guide('revalidate_objects').",
+    "inputSchema": {
+      "properties": {
+        "objects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "revalidate_objects",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Run YAXUnit tests as a named background job and return a JUnit Markdown report. The start call waits up to `timeout` (default and maximum 45s): a short run returns the report in that call, otherwise Pending returns a jobId to poll with get_job_status. Address a known run by jobId, NOT by repeating the arguments - a repeated start attaches only while that job is still running, and otherwise launches a second run. Parameters and examples: get_tool_guide('run_yaxunit_tests').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "description": "Application ID from get_applications (required if launchConfigurationName is omitted).",
+          "type": "string"
+        },
+        "debug": {
+          "description": "true launches in DEBUG mode so breakpoints fire: a short start returns the launch handle and you call wait_for_break next, while Pending returns a jobId for get_job_status. Default false polls and returns the report.",
+          "type": "boolean"
+        },
+        "extensions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "externalInfobaseChanges": {
+          "description": "How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: 'override' (default) keeps the project configuration and overwrites the infobase, 'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update with an error. Omitted, the modal is still answered (with 'override'), so an unattended call never blocks on it.",
+          "type": "string"
+        },
+        "launchConfigurationName": {
+          "description": "Exact runtime-client launch config name (preferred; from list_configurations).",
+          "type": "string"
+        },
+        "modules": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "projectName": {
+          "description": "EDT project name (required if launchConfigurationName is omitted).",
+          "type": "string"
+        },
+        "standaloneServerPortConflict": {
+          "description": "Answer to EDT's standalone-server port-conflict prompt: cancel (default) = fail and name the busy ports; reassign = let EDT move the server to free ports (rewrites its configuration).",
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tests": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "updateBeforeLaunch": {
+          "description": "Auto-chain (default: true): recompute only the projects whose sources changed (the configuration is not exempt), terminate a live client and run a silent DB update first, so a freshly edited extension runs fresh (not stale), auto-answering the platform's update dialogs. This makes a blocking dialog unlikely, NOT impossible: a dialog EDT raises outside the tool's own windows still waits for a human, and the tool reports it as a Pending whose phase stops changing. false: legacy delegate behaviour — no client sweep, no auto-confirmed update dialog; platform dialogs may appear and block. Results are retained by jobId until registry eviction, while a new start after completion always executes a fresh run regardless of this flag.",
+          "type": "boolean"
+        },
+        "updateScope": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "run_yaxunit_tests",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Literal/regex full-text search across BSL modules. Matching is textual and NOT ru/en dialect-aware, so a query in one BSL language will not find the other spelling - for a symbol's usages use find_references, for where it is defined use go_to_definition. Parameters and examples: get_tool_guide('search_in_code').",
+    "inputSchema": {
+      "properties": {
+        "caseSensitive": {
+          "type": "boolean"
+        },
+        "contextLines": {
+          "type": "integer"
+        },
+        "fileMask": {
+          "type": "string"
+        },
+        "isRegex": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "maxResults": {
+          "type": "integer"
+        },
+        "metadataType": {
+          "type": "string"
+        },
+        "outputMode": {
+          "enum": [
+            "full",
+            "count",
+            "files"
+          ],
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "search_in_code",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Associate an existing infobase with a Git branch of an EDT project. Parameters and examples: get_tool_guide('set_branch_infobase').",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "enum": [
+            "attach",
+            "detach"
+          ],
+          "type": "string"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "setDefault": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "projectName",
+        "branch",
+        "applicationId"
+      ],
+      "type": "object"
+    },
+    "name": "set_branch_infobase",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "bound": {
+          "type": "object"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Pause BSL execution at a selected source line during debugging. Parameters and examples: get_tool_guide('set_breakpoint').",
+    "inputSchema": {
+      "properties": {
+        "lineNumber": {
+          "type": "integer"
+        },
+        "module": {
+          "type": "string"
+        },
+        "modulePath": {
+          "description": "Module identifier — EDT module path (CommonModules/Foo/Module.bsl) or absolute file path (required)",
+          "type": "string"
+        },
+        "projectName": {
+          "description": "EDT project name (required when modulePath is module-relative)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "lineNumber"
+      ],
+      "type": "object"
+    },
+    "name": "set_breakpoint",
+    "outputSchema": {
+      "properties": {
+        "breakpointId": {
+          "type": "integer"
+        },
+        "degraded": {
+          "type": "boolean"
+        },
+        "lineNumber": {
+          "type": "integer"
+        },
+        "module": {
+          "type": "string"
+        },
+        "modulePath": {
+          "type": "string"
+        },
+        "resolvedFile": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "warning": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "STORE infobase credentials (user/password) in EDT settings so update_database and launch can authenticate. The secret PERSISTS beyond this call, and addressing a launch configuration also rewrites that configuration's client authentication. Parameters and examples: get_tool_guide('set_infobase_credentials').",
+    "inputSchema": {
+      "properties": {
+        "access": {
+          "enum": [
+            "INFOBASE",
+            "OS"
+          ],
+          "type": "string"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "launchConfigurationName": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "set_infobase_credentials",
+    "outputSchema": {
+      "properties": {
+        "access": {
+          "type": "string"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "applicationName": {
+          "type": "string"
+        },
+        "clientConfigured": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "passwordSet": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Change a variable while execution is paused in the debugger. WARNING: the value is EVALUATED as a BSL expression in the running application, so it can invoke code and change state beyond the named variable. Parameters and examples: get_tool_guide('set_variable').",
+    "inputSchema": {
+      "properties": {
+        "frameIndex": {
+          "type": "integer"
+        },
+        "frameRef": {
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "integer"
+        },
+        "value": {
+          "description": "New value as a BSL literal/expression (e.g. 42, \"text\", True, Дата(2025,1,1))",
+          "type": "string"
+        },
+        "variableName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "variableName",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "set_variable",
+    "outputSchema": {
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "variableName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Measure execution time and coverage of BSL code in a debug session. Parameters and examples: get_tool_guide('start_profiling').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "applicationId"
+      ],
+      "type": "object"
+    },
+    "name": "start_profiling",
+    "outputSchema": {
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "started": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Advance paused debug execution one step. Parameters and examples: get_tool_guide('step').",
+    "inputSchema": {
+      "properties": {
+        "kind": {
+          "enum": [
+            "over",
+            "into",
+            "out"
+          ],
+          "type": "string"
+        },
+        "threadId": {
+          "type": "integer"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "threadId",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "name": "step",
+    "outputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "frames": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "hit": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "serverTarget": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "threadId": {
+          "type": "integer"
+        },
+        "threadName": {
+          "type": "string"
+        },
+        "topFrameRef": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Finish measuring BSL performance in a debug session. Parameters and examples: get_tool_guide('stop_profiling').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "applicationId"
+      ],
+      "type": "object"
+    },
+    "name": "stop_profiling",
+    "outputSchema": {
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "stopped": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Change the active version of an EDT project through Git branch checkout. Parameters and examples: get_tool_guide('switch_git_branch').",
+    "inputSchema": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "branch"
+      ],
+      "type": "object"
+    },
+    "name": "switch_git_branch",
+    "outputSchema": {
+      "properties": {
+        "bindings": {
+          "type": "object"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "previousBranch": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Stop 1C sessions started by EDT. NOT two-phase for a single launch: selecting one (launchConfigurationName, or projectName + applicationId) stops it IMMEDIATELY, with no preview call. Only mass termination is gated - all=true is rejected without confirm=true. Either way, list_configurations first to see what is running. Parameters and examples: get_tool_guide('terminate_launch').",
+    "inputSchema": {
+      "properties": {
+        "all": {
+          "type": "boolean"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "force": {
+          "description": "On polite-termination timeout, escalate to an OS-level process kill; may lose unsaved 1C state. Default false. Ignored for Attach.",
+          "type": "boolean"
+        },
+        "includeAttach": {
+          "description": "Whether to act on Attach configs (disconnected, server keeps running). Default true; set false to skip them.",
+          "type": "boolean"
+        },
+        "launchConfigurationName": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "timeoutSeconds": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "terminate_launch",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "SYNCHRONIZE a 1C configuration's translated artifacts with the target languages. Does NOT translate anything itself: it regenerates the artifacts from translations ALREADY present in the bound dictionary storages, so text absent from the dictionaries stays untranslated - fill the dictionaries first (generate_translation_strings). Parameters and examples: get_tool_guide('translate_configuration').",
+    "inputSchema": {
+      "properties": {
+        "projectName": {
+          "type": "string"
+        },
+        "targetLanguages": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "projectName",
+        "targetLanguages"
+      ],
+      "type": "object"
+    },
+    "name": "translate_configuration",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Apply the current EDT configuration to an infobase. DESTRUCTIVE - restructures data and can evict live sessions. Two-phase: call once WITHOUT confirm to preview, then again with confirm=true to apply. Parameters and examples: get_tool_guide('update_database').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "externalInfobaseChanges": {
+          "description": "How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: 'override' (default) keeps the project configuration and overwrites the infobase, 'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update with an error. Omitted, the modal is still answered (with 'override'), so an unattended call never blocks on it.",
+          "type": "string"
+        },
+        "fullUpdate": {
+          "type": "boolean"
+        },
+        "launchConfigurationName": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "standaloneServerPortConflict": {
+          "description": "Answer to EDT's standalone-server port-conflict prompt: cancel (default) = fail and name the busy ports; reassign = let EDT move the server to free ports (rewrites its configuration).",
+          "type": "string"
+        },
+        "terminateRunningClients": {
+          "description": "Before applying, terminate any 1C client THIS EDT launched on the target infobase to free the exclusive lock (default true). false keeps a running client — the update then fails if that client holds the infobase exclusively.",
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "update_database",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "applicationName": {
+          "type": "string"
+        },
+        "confirmationRequired": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "standaloneServerPortsReassigned": {
+          "type": "boolean"
+        },
+        "stateAfter": {
+          "type": "string"
+        },
+        "stateBefore": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "terminatedClient": {
+          "type": "boolean"
+        },
+        "updateType": {
+          "type": "string"
+        },
+        "willTerminateRunningClients": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Check a 1C query for syntax and metadata-reference errors. Parameters and examples: get_tool_guide('validate_query').",
+    "inputSchema": {
+      "properties": {
+        "dcsMode": {
+          "type": "boolean"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "queryText": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "queryText"
+      ],
+      "type": "object"
+    },
+    "name": "validate_query",
+    "outputSchema": {
+      "properties": {
+        "dcsMode": {
+          "type": "boolean"
+        },
+        "errorCount": {
+          "type": "integer"
+        },
+        "infoCount": {
+          "type": "integer"
+        },
+        "issues": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "warningCount": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Check an XDTO package for configuration validation problems. Reads the markers EDT computed EARLIER - it does not validate on demand, so a verdict right after an edit can be stale; run revalidate_objects first when you need it current. Parameters and examples: get_tool_guide('validate_xdto_package').",
+    "inputSchema": {
+      "properties": {
+        "fqn": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "fqn"
+      ],
+      "type": "object"
+    },
+    "name": "validate_xdto_package",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Wait until a running 1C debug session reaches a breakpoint or other suspend event. Parameters and examples: get_tool_guide('wait_for_break').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "wait_for_break",
+    "outputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "autoResolved": {
+          "type": "boolean"
+        },
+        "frames": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "hit": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "serverTarget": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "threadId": {
+          "type": "integer"
+        },
+        "threadName": {
+          "type": "string"
+        },
+        "topFrameRef": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Create or edit BSL source in a metadata module. Parameters and examples: get_tool_guide('write_module_source').",
+    "inputSchema": {
+      "properties": {
+        "commandName": {
+          "description": "Command name; required when moduleType=CommandModule (e.g. 'FillByTemplate').",
+          "type": "string"
+        },
+        "expectedHash": {
+          "description": "Lost-update guard: the hash from the read that produced your edit. The write is rejected if the module changed since.",
+          "type": "string"
+        },
+        "expectedSource": {
+          "type": "string"
+        },
+        "formName": {
+          "description": "Form name; required when moduleType=FormModule (e.g. 'ItemForm').",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Write mode (default searchReplace).",
+          "enum": [
+            "searchReplace",
+            "replace",
+            "append"
+          ],
+          "type": "string"
+        },
+        "modulePath": {
+          "description": "src/-relative module path, e.g. 'CommonModules/MyModule/Module.bsl'. Alternative to objectName (pass exactly one).",
+          "type": "string"
+        },
+        "moduleType": {
+          "enum": [
+            "ObjectModule",
+            "ManagerModule",
+            "FormModule",
+            "CommandModule",
+            "RecordSetModule",
+            "Module"
+          ],
+          "type": "string"
+        },
+        "objectName": {
+          "type": "string"
+        },
+        "oldSource": {
+          "description": "Fragment to find and replace; required for searchReplace, must match exactly once.",
+          "type": "string"
+        },
+        "overwrite": {
+          "type": "boolean"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "skipSyntaxCheck": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "source"
+      ],
+      "type": "object"
+    },
+    "name": "write_module_source",
+    "outputSchema": null
+  }
+]

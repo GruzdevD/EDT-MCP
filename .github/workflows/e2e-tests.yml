@@ -1,0 +1,568 @@
+name: E2E Tests (reusable)
+
+# REUSABLE workflow (on: workflow_call) — invoked by the thin caller workflow
+# e2e-2026.2.yml (parameterized by EDT version so it stays ready for a future matrix),
+# which gives the gate its OWN status badge. Black-box e2e gate on a STOCK
+# GitHub-hosted runner (ubuntu-latest):
+# no docker image, no self-hosted runner. The `build` job builds the plugin; the `e2e`
+# job boots a headless EDT (inlined setup, numbered steps 1/8…8/8 — each phase is a
+# separate line in the Actions UI so you can see what is cached vs what runs),
+# force-starts the MCP server (EDT_MCP_AUTO_START), imports the three fixture projects
+# into an empty workspace (EDT_MCP_IMPORT_PROJECTS), then runs the suite
+# against the local :8765.
+#
+# Scope: skips the live-infobase round-trip (requires_live_infobase) by default, so
+# it needs NO licensed 1C platform — EDT indexes the project model without one. The
+# skipped runtime tools (YAXUnit run / debug / update_database) stay covered in the
+# local / licensed dev loop.
+#
+# The EDT version comes from the caller via inputs.edt. The extra IUs the install
+# pulls (platform-support 8.5.1, profiling.feature, bsl.extension) are verified
+# present in the 2026.2 p2.
+#
+# EDT VERSION ⇄ ECLIPSE BASE ⇄ JDK are ONE tuple — an EDT release pins the other two. 2026.2
+# is Eclipse 4.38 on Java 25 (its bundles declare Bundle-RequiredExecutionEnvironment
+# JavaSE-25 and ship bytecode major 69); EDT 2026.1 was Eclipse 4.30 on Java 17. The
+# defaults below are the newest supported EDT's tuple, so a caller pinning an OLDER EDT
+# must pass its matching java / eclipse-archive / eclipse-p2 too.
+#
+# Note the `build` job deliberately stays on JDK 17: the plugin is COMPILED against the
+# 2026.1 target platform (the OLDEST supported EDT) so one artifact resolves on both
+# 2026.1 and 2026.2. Only the job that RUNS EDT needs the newer JDK.
+
+on:
+  workflow_call:
+    inputs:
+      edt:
+        description: "EDT version (public p2 ruby/<version>/)"
+        required: true
+        type: string
+      java:
+        description: "JDK the EDT under test requires at RUNTIME (EDT 2026.2 ⇒ 25)"
+        required: false
+        default: "25"
+        type: string
+      eclipse-archive:
+        description: "Eclipse Platform archive the EDT under test is built on"
+        required: false
+        default: "https://archive.eclipse.org/eclipse/downloads/drops4/R-4.38-202512010920/eclipse-platform-4.38-linux-gtk-x86_64.tar.gz"
+        type: string
+      eclipse-p2:
+        description: "Eclipse release p2 (for the platform closure) matching that base"
+        required: false
+        default: "https://download.eclipse.org/releases/2025-12/"
+        type: string
+      orbit-simrel-p2:
+        description: "Eclipse Orbit aggregation p2 (Batik / SVG) matching that base"
+        required: false
+        default: "https://download.eclipse.org/tools/orbit/simrel/orbit-aggregation/release/4.38.0/"
+        type: string
+      shards:
+        description: >-
+          JSON array of shard numbers, one runner each (e.g. "[1,2,3,4]"). The DIVISOR is not
+          written anywhere: run_all gets it from strategy.job-total, so changing this list is the
+          only edit needed to re-balance. Four is the knee of the curve - the ~3 min EDT setup is
+          paid per shard and does not divide, so 4 gives ~17 min against ~60 serial (3.8x on
+          measured durations) while 8 would give ~10 min for twice the runner minutes.
+        required: false
+        default: "[1, 2, 3, 4]"
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+
+      - name: Cache Tycho P2 repositories
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.m2/repository/.cache/tycho
+            ~/.m2/repository/p2
+          key: ${{ runner.os }}-tycho-p2-${{ hashFiles('**/*.target') }}
+          restore-keys: |
+            ${{ runner.os }}-tycho-p2-
+
+      - name: Build the MCP plugin (p2 repository)
+        working-directory: mcp
+        env:
+          MAVEN_OPTS: -Xmx2g -XX:+UseParallelGC
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/mvn-retry.sh" clean verify --batch-mode --no-transfer-progress -T 1C -DskipTests
+
+      - name: Upload plugin p2 repository
+        uses: actions/upload-artifact@v7
+        with:
+          name: mcp-plugin-p2
+          path: mcp/repositories/com.ditrix.edt.mcp.server.repository/target/repository
+          if-no-files-found: error
+
+  e2e:
+    needs: build
+    runs-on: ubuntu-latest
+    name: "e2e (shard ${{ matrix.shard }})"
+    # SHARDED across runners, which is also what makes it safe. The suite is serial by
+    # construction - every test resets the same git fixture and the same EDT workspace, so two
+    # tests must never run against one checkout. A matrix does not share anything: each shard gets
+    # its own runner, its own clone, its own EDT install and its own :8765. The isolation comes
+    # from separate machines, not from locking.
+    #
+    # fail-fast is OFF on purpose. Cancelling the siblings the moment one shard fails would hand
+    # back a quarter of the picture, and this gate exists to say what is broken - not to say that
+    # something is.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(inputs.shards) }}
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    # The EDT setup below is INLINED (instead of the ./.github/actions/setup-edt
+    # composite) so each phase shows as its own step in the Actions UI — you can see at
+    # a glance which steps are cached/skipped vs which run. These env values mirror the
+    # composite's inputs; the EDT version comes from the caller (inputs.edt).
+    env:
+      EDT_P2: "https://edt.1c.ru/downloads/releases/ruby/${{ inputs.edt }}/"
+      ECLIPSE_ARCHIVE: ${{ inputs.eclipse-archive }}
+      ECLIPSE_P2: ${{ inputs.eclipse-p2 }}
+      ORBIT_P2: "https://download.eclipse.org/tools/orbit/downloads/drops/R20211213173813/repository/"
+      ORBIT_SIMREL_P2: ${{ inputs.orbit-simrel-p2 }}
+      # EDT's own launcher requires this exact JDK (p2 requiredJavaVersion); a lower one
+      # leaves every JavaSE-25 bundle unresolved and EDT never boots.
+      EDT_JAVA: ${{ inputs.java }}
+      # TestConfiguration is compatibilityMode 8.5.1 → EDT needs the 8.5.1 platform-support
+      # FEATURE to initialize the project (no 1cv8 binary needed for indexing).
+      PLATFORM_SUPPORT_IU: "com._1c.g5.v8.dt.platform.support_v8.5.1.feature.feature.group"
+      # get_profiling_results needs the com._1c.g5.v8.dt.profiling.core bundle (a no-session
+      # read must be a benign sentinel, not "Profiling core bundle not found"). The core EDT
+      # feature does not pull it, so install the profiling feature too.
+      PROFILING_IU: "com._1c.g5.v8.dt.profiling.feature.feature.group"
+      # The extension-interception footer (read_method_source / read_module_source /
+      # get_module_structure) uses IModuleExtensionServiceProvider.INSTANCE, which resolves
+      # the real service via an extension point contributed ONLY by com._1c.g5.v8.dt.bsl.extension.
+      # The core EDT feature does not pull that bundle, so INSTANCE falls back to the no-op
+      # DefaultModuleExtensionService (everything empty) and the footer never appears. Install
+      # the bundle so the real service registers.
+      BSL_EXTENSION_IU: "com._1c.g5.v8.dt.bsl.extension"
+      PLUGIN_REPO: "plugin-p2"
+      MCP_PORT: "8765"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up the JDK EDT ${{ inputs.edt }} runs on
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java }}
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Download plugin p2 repository
+        uses: actions/download-artifact@v8
+        with:
+          name: mcp-plugin-p2
+          path: plugin-p2
+
+      # Coverage: pull the JaCoCo agent (attached to the EDT JVM below) and the CLI
+      # (used to dump the .exec out of the running JVM before EDT is stopped).
+      - name: "Coverage · fetch JaCoCo agent + CLI"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # 0.8.15+ is required to instrument the Java 25 class files EDT 2026.2 runs on.
+          V=0.8.15
+          BASE=https://repo1.maven.org/maven2/org/jacoco
+          curl -fSL "$BASE/org.jacoco.agent/$V/org.jacoco.agent-$V-runtime.jar" -o "$RUNNER_TEMP/jacocoagent.jar"
+          curl -fSL "$BASE/org.jacoco.cli/$V/org.jacoco.cli-$V-nodeps.jar" -o "$RUNNER_TEMP/jacococli.jar"
+          echo "JACOCO_AGENT=$RUNNER_TEMP/jacocoagent.jar" >> "$GITHUB_ENV"
+          echo "JACOCO_CLI=$RUNNER_TEMP/jacococli.jar" >> "$GITHUB_ENV"
+
+      # ── EDT setup (inlined for per-step visibility) ──────────────────────────────
+      - name: "EDT setup 1/8 · system libs (apt — NOT cached)"
+        shell: bash
+        run: |
+          set -x
+          sudo apt-get update
+          # Tolerant install: package names differ across Ubuntu 22.04/24.04 (t64 ABI
+          # transition), so try each and ignore the ones absent.
+          PKGS="xvfb \
+            libgtk-3-0 libgtk-3-0t64 \
+            libxtst6 libxrender1 libxi6 libxrandr2 libxcb1 \
+            libgl1 libglu1-mesa \
+            libasound2 libasound2t64 \
+            libsecret-1-0 libnss3 \
+            libwebkit2gtk-4.1-0 libwebkit2gtk-4.0-37 \
+            fonts-dejavu"
+          for p in $PKGS; do
+            sudo apt-get install -y --no-install-recommends "$p" 2>/dev/null || true
+          done
+          sudo apt-get install -y --no-install-recommends xvfb
+
+      - name: "EDT setup 2/8 · pin guard + compute base cache key"
+        id: edtcache
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pin the EDT build this base is validated against and FAIL if 1C shipped a newer one.
+          # The public ruby/<ver>/ channel is mutated IN PLACE on every point-release (no
+          # immutable per-release URL), so folding the SERVED build qualifier into the cache key
+          # makes the base cache track the served build — it can never go stale, which is what
+          # caused the felix uses-constraint overlay flap. edt-pin.sh exits 1 on a drift, which
+          # aborts this step under `set -e` (a red gate that forces a conscious re-pin).
+          EDT_BUILD="$(bash "$GITHUB_WORKSPACE/.github/scripts/edt-pin.sh" "${{ inputs.edt }}" "$EDT_P2")"
+          # Key on the IMMUTABLE base inputs (NOT the plugin, which is overlaid fresh) + the
+          # served EDT build qualifier. EVERY repository fed to the director below must be in
+          # here: they are caller-settable inputs now, and a repo that changes without changing
+          # the key would restore a base assembled from the OLD one and skip the reinstall.
+          H=$(printf '%s|%s|%s|%s|%s|%s|%s|%s|%s' \
+                "$ECLIPSE_ARCHIVE" "$EDT_P2" "$ECLIPSE_P2" "$ORBIT_P2" "$ORBIT_SIMREL_P2" \
+                "$PLATFORM_SUPPORT_IU" "$PROFILING_IU" "$BSL_EXTENSION_IU" \
+                "$EDT_BUILD" \
+                | sha256sum | cut -c1-16)
+          echo "key=edt-base-${{ runner.os }}-$H" >> "$GITHUB_OUTPUT"
+          echo "EDT-base cache key: edt-base-${{ runner.os }}-$H (edt build: $EDT_BUILD)"
+
+      - name: "EDT setup 3/8 · RESTORE base cache (Eclipse+EDT, no plugin)"
+        id: restore-edt
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/edt/eclipse
+          key: ${{ steps.edtcache.outputs.key }}
+
+      - name: "EDT setup 4/8 · download Eclipse [CACHE MISS ONLY]"
+        if: steps.restore-edt.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fSL "$ECLIPSE_ARCHIVE" -o "$RUNNER_TEMP/eclipse.tar.gz"
+          mkdir -p "$RUNNER_TEMP/edt"
+          tar -xzf "$RUNNER_TEMP/eclipse.tar.gz" -C "$RUNNER_TEMP/edt"
+          test -x "$RUNNER_TEMP/edt/eclipse/eclipse"
+
+      - name: "EDT setup 5/8 · install EDT base via p2 [CACHE MISS ONLY — slow, rate-limited]"
+        if: steps.restore-edt.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -uxo pipefail
+          ECLIPSE="$RUNNER_TEMP/edt/eclipse"
+          IUS="com._1c.g5.v8.dt.feature.feature.group"
+          if [ -n "$PLATFORM_SUPPORT_IU" ]; then IUS="$IUS,$PLATFORM_SUPPORT_IU"; fi
+          if [ -n "$PROFILING_IU" ]; then IUS="$IUS,$PROFILING_IU"; fi
+          if [ -n "$BSL_EXTENSION_IU" ]; then IUS="$IUS,$BSL_EXTENSION_IU"; fi
+          # edt.1c.ru intermittently 404s artifacts under the burst download (rate-limit;
+          # files DO exist). A failed director transaction rolls back cleanly, so retry with
+          # a cooldown; p2's own transport retry handles transient read errors per attempt.
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            echo "[edt] EDT-base p2 director attempt $attempt/5 ..."
+            # Bound each attempt with `timeout`: edt.1c.ru sometimes throttles a download
+            # to a near-stall from the Azure runner, which can otherwise hang the director
+            # for 30+ min. A killed attempt rolls back cleanly and the p2 bundle pool
+            # persists, so the retry RESUMES with the already-fetched artifacts. The ECF
+            # read/connect timeouts make a STALLED socket fail fast (p2's own retry then
+            # re-fetches that artifact) instead of blocking the whole attempt.
+            if timeout -k 30 1200 "$ECLIPSE/eclipse" -nosplash -consoleLog \
+                -application org.eclipse.equinox.p2.director \
+                -repository "$EDT_P2,$ECLIPSE_P2,$ORBIT_P2,$ORBIT_SIMREL_P2" \
+                -installIU "$IUS" \
+                -destination "$ECLIPSE" \
+                -profileProperties org.eclipse.update.install.features=true \
+                -p2.os linux -p2.ws gtk -p2.arch x86_64 -tag init \
+                -vmargs \
+                -Dorg.eclipse.equinox.p2.transport.ecf.retry=5 \
+                -Dorg.eclipse.ecf.provider.filetransfer.retrieve.readTimeout=120000 \
+                -Dorg.eclipse.ecf.provider.filetransfer.retrieve.connectTimeout=60000; then
+              ok=1; break
+            fi
+            echo "[edt] attempt $attempt failed/timed out (edt.1c.ru likely rate-limited); cooling 60s ..."
+            sleep 60
+          done
+          [ "$ok" = 1 ] || { echo "[edt] ERROR: EDT-base p2 director failed after 5 attempts"; exit 1; }
+
+      - name: "EDT setup 6/8 · SAVE base cache [CACHE MISS ONLY]"
+        if: steps.restore-edt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/edt/eclipse
+          key: ${{ steps.edtcache.outputs.key }}
+
+      - name: "EDT setup 7/8 · overlay MCP plugin [ALWAYS — fresh, local p2 + EDT repo]"
+        shell: bash
+        run: |
+          set -uxo pipefail
+          ECLIPSE="$RUNNER_TEMP/edt/eclipse"
+          test -x "$ECLIPSE/eclipse" || { echo "ERROR: EDT base missing at $ECLIPSE"; exit 1; }
+          LOCAL_REPO="file://$GITHUB_WORKSPACE/$PLUGIN_REPO"
+          ls "$GITHUB_WORKSPACE/$PLUGIN_REPO"/content.* >/dev/null 2>&1 \
+            || { echo "ERROR: plugin p2 repo not found at $PLUGIN_REPO (build it first)"; exit 1; }
+          ok=0
+          for attempt in 1 2; do
+            echo "[edt] plugin overlay attempt $attempt/2 ..."
+            # $EDT_P2 MUST be in the overlay repo list: the director re-resolves the EDT platform
+            # bundles here, and without the full EDT metadata it cannot pick a consistent
+            # servlet-api / jetty wiring for dt.html -> activedocument.ui (a felix uses-constraint
+            # conflict once the cached base carries a newer EDT point-release). The retry covers
+            # the rate-limited edt.1c.ru re-contact.
+            if "$ECLIPSE/eclipse" -nosplash -consoleLog \
+                -application org.eclipse.equinox.p2.director \
+                -repository "$LOCAL_REPO,$EDT_P2,$ECLIPSE_P2,$ORBIT_P2,$ORBIT_SIMREL_P2" \
+                -installIU "com.ditrix.edt.mcp.server.feature.feature.group" \
+                -destination "$ECLIPSE" \
+                -profileProperties org.eclipse.update.install.features=true \
+                -p2.os linux -p2.ws gtk -p2.arch x86_64 -tag mcp-plugin \
+                -vmargs -Dorg.eclipse.equinox.p2.transport.ecf.retry=5; then
+              ok=1; break
+            fi
+            echo "[edt] plugin overlay attempt $attempt failed; retrying ..."; sleep 10
+          done
+          [ "$ok" = 1 ] || { echo "[edt] ERROR: plugin overlay failed"; exit 1; }
+
+      - name: "EDT setup 8/8 · boot headless + wait :8765 [ALWAYS — index NOT cached]"
+        shell: bash
+        run: |
+          set -uo pipefail
+          ECLIPSE="$RUNNER_TEMP/edt/eclipse"
+          WS="$RUNNER_TEMP/edt-ws"
+          LOG="$RUNNER_TEMP/edt.log"
+          mkdir -p "$WS"
+          echo "edt_log=$LOG" >> "$GITHUB_ENV"
+          export EDT_MCP_AUTO_START=true
+          export EDT_MCP_PORT="$MCP_PORT"
+          # Destructive-consent gate bypass for automation: the e2e harness is HTTP-only and cannot set
+          # a server preference, so the bypass lives on the EDT PROCESS. Without it the destructive e2e
+          # tests (delete_metadata / rename_metadata_object / delete_project / delete_infobase /
+          # update_database / a type-change modify_metadata) would HANG forever on the default ASK dialog.
+          export EDT_MCP_DESTRUCTIVE_CONSENT=allow
+          # Three fixture projects, one per EDT project KIND: the base configuration, the
+          # extension, and the external-objects project (issue #309 - a project whose roots are
+          # its own external data processors / reports, which resolves nothing like the other two).
+          export EDT_MCP_IMPORT_PROJECTS="$GITHUB_WORKSPACE/tests/TestConfiguration:$GITHUB_WORKSPACE/tests/tests:$GITHUB_WORKSPACE/tests/ExternalObjects"
+          echo "[edt] importing: $EDT_MCP_IMPORT_PROJECTS"
+          # EDT runs Apache Ignite (BM store) which needs java.nio/sun.nio.ch opened and the
+          # module system relaxed — exactly the flags EDT's own 1cedt.ini ships (the set is
+          # unchanged in 2026.2; only requiredJavaVersion moved 17 → 25). A command-line
+          # -vmargs REPLACES the eclipse.ini block, so repeat the osgi flags too.
+          xvfb-run -a -s "-screen 0 1920x1080x24" \
+            "$ECLIPSE/eclipse" -data "$WS" -clean -nosplash -consoleLog \
+            --launcher.suppressErrors \
+            -vmargs \
+            "-javaagent:$JACOCO_AGENT=output=tcpserver,address=127.0.0.1,port=6300,includes=com.ditrix.edt.mcp.*" \
+            -Xmx4g \
+            "-Dosgi.requiredJavaVersion=$EDT_JAVA" \
+            -Dorg.osgi.framework.bundle.parent=ext \
+            -Dosgi.module.lock.timeout=240 \
+            -Dlog4j.formatMsgNoLookups=true \
+            -Dlog4j2.formatMsgNoLookups=true \
+            --add-modules=ALL-SYSTEM \
+            --add-opens=java.base/java.lang=ALL-UNNAMED \
+            --add-opens=java.base/java.lang.constant=ALL-UNNAMED \
+            --add-opens=java.base/java.lang.ref=ALL-UNNAMED \
+            --add-opens=java.base/java.nio=ALL-UNNAMED \
+            --add-opens=java.base/java.time=ALL-UNNAMED \
+            --add-opens=java.base/sun.nio.ch=ALL-UNNAMED \
+            --add-opens=java.base/java.net=ALL-UNNAMED \
+            > "$LOG" 2>&1 &
+          echo "edt_pid=$!" >> "$GITHUB_ENV"
+          echo "[edt] waiting for MCP server on :$MCP_PORT ..."
+          for i in $(seq 1 120); do
+            if curl -sf "http://127.0.0.1:$MCP_PORT/health" >/dev/null 2>&1; then
+              echo "[edt] MCP server UP on $MCP_PORT"; exit 0
+            fi
+            sleep 5
+          done
+          echo "[edt] ERROR: MCP server did not come up within ~10 min."
+          tail -n 200 "$LOG" || true
+          exit 1
+      # ── end EDT setup ────────────────────────────────────────────────────────────
+
+      - name: Run E2E tests
+        env:
+          # Cold cloud runner indexes the whole config from scratch (the EDT INSTALL is
+          # cached, the workspace index is not), so give readiness a generous ceiling
+          # before run_all aborts with a single clear error.
+          E2E_PROJECT_READY_TIMEOUT: "1200"
+          # Per-CALL socket timeout. A cascading rename_metadata_object can enter EDT's
+          # refactoring while the derived-data pipeline still has work; the refactoring then
+          # waits for that pipeline from inside its own BM batch session and takes ~301s
+          # (measured: "Completed tools/call: rename_metadata_object in 301090ms, outcome=ok"
+          # right after "Client connection lost: Broken pipe"). The tool now drains the
+          # pipeline first, so that path should not be reached — but 300 sat EXACTLY on the
+          # boundary, which is why every collision cost a run. Keep the budget clear of it,
+          # and below the per-test timeout below.
+          MCP_CALL_TIMEOUT: "600"
+          # Bound what reset_model may spend BEFORE and AFTER its clean_project. Left to default
+          # it inherits E2E_PROJECT_READY_TIMEOUT (1200 above, sized for the COLD first index),
+          # and reset_model can spend it twice per test - which alone exceeds the per-test cap and
+          # turns a legitimately slow cleanup into a reported hang. A post-write settle is not a
+          # cold index; 600 is generous for it.
+          E2E_MODEL_SETTLE_TIMEOUT: "600"
+          # Unbuffer stdout: otherwise Python block-buffers in CI (stdout is a pipe), so
+          # the readiness-wait countdown only appears when the process exits — which looks
+          # like a hang during the (long) index wait. -u/PYTHONUNBUFFERED stream it live.
+          PYTHONUNBUFFERED: "1"
+        run: |
+          # The divisor comes from strategy.job-total, so the matrix list above is the single
+          # place a shard count is written. Report and artifact names carry the shard number
+          # because they are collected from every runner into one place.
+          WS="$RUNNER_TEMP/edt-ws"
+          export EDT_MCP_EDT_WORKSPACE="$WS"
+          python -u tests/e2e/run_all.py \
+            --project TestConfiguration \
+            --shard "${{ matrix.shard }}/${{ strategy.job-total }}" \
+            --junit-xml "tests/e2e/e2e-results-${{ matrix.shard }}.xml"
+
+      # Coverage: dump the in-memory JaCoCo data out of the still-running EDT JVM (the
+      # agent is in tcpserver mode), then upload it for the Coverage workflow to merge
+      # with the unit .exec. Runs even on test failure, but BEFORE "Stop EDT".
+      - name: "Coverage · dump JaCoCo exec from the EDT JVM"
+        if: always()
+        shell: bash
+        run: |
+          set -uxo pipefail
+          # The FILE name carries the shard, not just the artifact name. coverage.yml downloads
+          # every e2e-jacoco-exec-* with merge-multiple:true, which flattens them into one
+          # directory - four artifacts all containing "e2e-jacoco.exec" would overwrite each other
+          # there and three quarters of the e2e coverage would vanish without a single error.
+          java -jar "$JACOCO_CLI" dump \
+            --address 127.0.0.1 --port 6300 \
+            --destfile "$RUNNER_TEMP/e2e-jacoco-${{ matrix.shard }}.exec" \
+            || echo "[coverage] jacoco dump failed (agent unreachable / EDT not up)"
+          ls -la "$RUNNER_TEMP/e2e-jacoco-${{ matrix.shard }}.exec" 2>/dev/null \
+            || echo "[coverage] no e2e exec produced"
+
+      - name: "Coverage · upload e2e JaCoCo exec"
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-jacoco-exec-${{ inputs.edt }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/e2e-jacoco-${{ matrix.shard }}.exec
+          if-no-files-found: warn
+
+      - name: Dump EDT IDE log (the real boot/index log — separate from this console)
+        if: always()
+        run: |
+          LOG="${edt_log:-$RUNNER_TEMP/edt.log}"
+          echo "===== EDT IDE log: $LOG ====="
+          if [ -f "$LOG" ]; then
+            echo "----- error/build/index markers -----"
+            grep -niE "error|exception|build|index|not_available|ready|McpServer|could not resolve" "$LOG" | tail -n 120 || true
+            echo "----- last 250 lines -----"
+            tail -n 250 "$LOG" || true
+          else
+            echo "(no EDT IDE log at $LOG)"
+          fi
+
+      # Each shard only UPLOADS its report; the single combined check is published once, by the
+      # report job below. Publishing per shard would have four jobs racing to write one check
+      # name, and whichever finished last would decide what the PR says.
+      - name: Upload test report
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: e2e-test-results-${{ inputs.edt }}-${{ matrix.shard }}
+          path: tests/e2e/e2e-results-${{ matrix.shard }}.xml
+          if-no-files-found: ignore
+
+      - name: Upload EDT log
+        if: ${{ always() && env.edt_log != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-edt-log-${{ inputs.edt }}-${{ matrix.shard }}
+          path: ${{ env.edt_log }}
+          if-no-files-found: ignore
+
+      - name: Stop EDT
+        if: always()
+        run: kill "${edt_pid:-0}" 2>/dev/null || true
+
+  # ONE check for the whole gate, assembled after every shard has reported. The shards are four
+  # jobs, but the question a reader has is one question - "did the e2e suite pass?" - and the
+  # check name is unchanged from the pre-sharding gate so any branch protection keeps working.
+  #
+  # always(): a shard that FAILED is exactly the run whose report matters most. The job's own
+  # success does not decide the gate either way - the shard jobs are the gate, and a red shard
+  # keeps the workflow red on its own.
+  report:
+    needs: e2e
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    steps:
+      # continue-on-error so that "no artifact matched the pattern" reaches the counting step
+      # below, which says WHICH reports are missing, instead of dying in the action with a generic
+      # "unable to find any artifacts". The shard jobs are the gate; this job only reports.
+      - name: Download every shard's report
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: e2e-test-results-${{ inputs.edt }}-*
+          path: shard-reports
+          merge-multiple: true
+
+      - name: List what arrived
+        shell: bash
+        run: |
+          # A missing shard report is not a pass. It means a runner died before writing one, and
+          # the combined check would then quietly describe a fraction of the suite.
+          #
+          # The directory is CREATED first, not assumed. When every shard dies the download step
+          # fails - which its continue-on-error explicitly permits - and may never create its
+          # destination; the count then reaches zero correctly, but the redirect below has nowhere
+          # to write, dies under -e, and the synthetic failing report never appears. The worst case
+          # is exactly the one where the red check matters most, so nothing on that path may assume
+          # a previous step succeeded.
+          mkdir -p shard-reports
+          ls -la shard-reports || true
+          # Counted with nullglob, NOT `ls *.xml | wc -l`. GitHub runs `shell: bash` as
+          # `bash -eo pipefail`, so with zero reports the ls fails, pipefail propagates it out of
+          # the command substitution, and -e kills the step - taking with it the very diagnostic
+          # this step exists to print. The empty case is the one it was written for, so it is the
+          # one case it must survive; an unmatched glob has to expand to nothing, not to an error.
+          shopt -s nullglob
+          reports=(shard-reports/*.xml)
+          COUNT=${#reports[@]}
+          EXPECTED=$(echo '${{ inputs.shards }}' | tr -d '[] ' | tr ',' '\n' | grep -c .)
+          echo "shard reports: $COUNT of $EXPECTED expected"
+          if [ "$COUNT" -lt "$EXPECTED" ]; then
+            echo "::warning::only $COUNT of $EXPECTED shard reports arrived; the combined result covers less than the whole suite"
+            # A warning is not enough. The publisher would take the surviving subset and put a
+            # GREEN check under the gate's own name - "E2E Test Results" saying pass while a
+            # quarter of the suite never reported. The matrix job going red is a different
+            # signal in a different place, and anything reading THIS check by name would be
+            # misled. So the shortfall enters the report as a failing case and the check goes
+            # red for the reason it actually is.
+            {
+              echo '<?xml version="1.0" encoding="UTF-8"?>'
+              echo '<testsuite name="edt-mcp-e2e-shards" tests="1" failures="1">'
+              echo "  <testcase name=\"shards::all_reported\"><failure>only $COUNT of $EXPECTED"
+              echo "  shard reports arrived - a shard died before writing one, so these results"
+              echo "  describe part of the suite, not all of it</failure></testcase>"
+              echo '</testsuite>'
+            } > shard-reports/zz-missing-shards.xml
+          fi
+
+      - name: Publish E2E Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        continue-on-error: true
+        with:
+          check_name: "E2E Test Results (EDT ${{ inputs.edt }})"
+          files: shard-reports/*.xml

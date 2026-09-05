@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""
+Generate per-tool documentation from the LIVE MCP server — the single source of truth.
+
+Each tool's doc is exactly what `get_tool_guide` renders (name + description +
+Parameters table from the input schema + the in-code Guide), so the docs never drift
+from the Java tools: re-run this whenever tools change.
+
+Outputs:
+  docs/tools/<tool>.md     one rendered guide per tool
+  docs/tools/README.md     an index grouped by toolset (from list_toolsets), linking
+                           to each tool doc
+
+Usage (needs a live server, e.g. the dev EDT on :8765):
+  python docs/generate_tool_docs.py [--host 127.0.0.1] [--port 8765]
+
+Python stdlib only.
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(HERE, "tools")
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Generate per-tool docs from the live MCP server")
+    ap.add_argument("--host", default=os.environ.get("MCP_HOST", "127.0.0.1"))
+    ap.add_argument("--port", default=os.environ.get("MCP_PORT", "8765"))
+    return ap.parse_args()
+
+
+def rpc(url, method, params=None):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
+                       "params": params or {}}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "MCP-Protocol-Version": "2025-11-25",
+    })
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    if "error" in payload:
+        raise RuntimeError("%s -> %s" % (method, payload["error"]))
+    return payload.get("result", {})
+
+
+def call_text(url, name, arguments):
+    """Return the textual payload of a tools/call (handles content[].text and the
+    embedded-resource shape get_tool_guide uses)."""
+    res = rpc(url, "tools/call", {"name": name, "arguments": arguments})
+    for item in res.get("content", []):
+        if item.get("type") == "resource":
+            txt = (item.get("resource") or {}).get("text")
+            if txt:
+                return txt
+        if item.get("text"):
+            return item["text"]
+    return ""
+
+
+def call_structured(url, name, arguments):
+    res = rpc(url, "tools/call", {"name": name, "arguments": arguments})
+    if isinstance(res.get("structuredContent"), dict):
+        return res["structuredContent"]
+    for item in res.get("content", []):
+        if item.get("text"):
+            try:
+                return json.loads(item["text"])
+            except ValueError:
+                pass
+    return {}
+
+
+def main():
+    args = parse_args()
+    url = "http://%s:%s/mcp" % (args.host, args.port)
+
+    tools = rpc(url, "tools/list").get("tools", [])
+    if not tools:
+        print("No tools returned by tools/list — is the server up?", file=sys.stderr)
+        sys.exit(1)
+    tools_by_name = {t["name"]: t for t in tools}
+
+    # Toolset grouping for the index (best-effort: if list_toolsets is hidden/absent,
+    # fall back to a single flat group).
+    #
+    # list_toolsets also names tools that tools/list does NOT return: a toolset that is OFF by
+    # default (today: `git`) stays hidden until the user enables it. Generating solely from
+    # tools/list therefore silently dropped such a tool from a reference that calls itself full -
+    # the count read one short and the page did not exist at all. Their names are collected here
+    # and their pages are generated from get_tool_guide, which answers for a hidden tool too, so
+    # nothing has to be enabled on the server to document it.
+    groups = []  # list of (title, description, [tool names])
+    hidden = set()
+    # Absence from tools/list has TWO different causes and only one of them means "disabled":
+    # with progressive disclosure ON the server hides every non-core toolset until enable_toolset
+    # reveals it, so labelling those "not enabled by default" would tell readers that the metadata /
+    # debug / code tools are off - which they are not. The flag says which world we are in; when it
+    # is on, the run cannot tell the two apart, so it labels nothing.
+    disclosure = False
+    try:
+        ts = call_structured(url, "list_toolsets", {})
+        disclosure = bool(ts.get("progressiveDisclosure"))
+        for toolset in ts.get("toolsets", []):
+            tnames = sorted(toolset.get("tools", []))
+            hidden.update(n for n in tnames if n not in tools_by_name)
+            if tnames:
+                groups.append((toolset.get("title") or toolset.get("id"),
+                               toolset.get("description") or "", tnames))
+    except Exception as e:  # noqa: BLE001
+        print("list_toolsets unavailable (%s) — using a flat index" % e, file=sys.stderr)
+
+    names = sorted(set(tools_by_name) | hidden)
+    # Only a tool missing from tools/list while progressive disclosure is OFF is genuinely disabled.
+    default_disabled = set() if disclosure else set(hidden)
+    if hidden:
+        print("tools absent from tools/list (documented anyway): %s%s"
+              % (", ".join(sorted(hidden)),
+                 " [progressive disclosure is ON - not labelling them as disabled]"
+                 if disclosure else ""))
+    grouped = {n for _t, _d, ns in groups for n in ns}
+    ungrouped = [n for n in names if n not in grouped]
+    if ungrouped:
+        groups.append(("Other", "", ungrouped))
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+    written = 0
+    guide_summary = {}
+    for name in names:
+        md = call_text(url, "get_tool_guide", {"toolName": name})
+        if name in hidden and md:
+            # First non-heading, non-empty line of the guide: the tool's own description.
+            for line in md.replace("\r\n", "\n").split("\n"):
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    guide_summary[name] = stripped
+                    break
+        if not md:
+            md = "# %s\n\n%s\n" % (name, tools_by_name[name].get("description", ""))
+        # Footer: these are generated; point readers at the generator.
+        md = md.rstrip() + ("\n\n---\n*Generated from the live MCP server "
+                            "(`get_tool_guide`) by `docs/generate_tool_docs.py`. "
+                            "Do not edit this file. Edit the tool's description/schema in its Java "
+                            "source and its guide body in "
+                            "`mcp/bundles/com.ditrix.edt.mcp.server/guides/<tool>.md`.*\n")
+        # Normalize to LF regardless of the server's line endings and the host platform
+        # (text mode on Windows would otherwise emit CRLF / mixed endings into the repo).
+        md = md.replace("\r\n", "\n").replace("\r", "\n")
+        with open(os.path.join(OUT_DIR, name + ".md"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(md)
+        written += 1
+
+    # Grouped index table — reused for the docs/tools/ index and (with a path prefix)
+    # for the README block, so there is ONE generated source for both.
+    def index_lines(link_prefix, heading_level):
+        out = []
+        for title, desc, ns in groups:
+            out.append("%s %s" % ("#" * heading_level, title))
+            if desc:
+                out += ["", "> %s" % desc]
+            out += ["", "| Tool | Description |", "|------|-------------|"]
+            for n in ns:
+                d = (tools_by_name.get(n, {}).get("description") or "").replace("\n", " ").strip()
+                if not d:
+                    # A tool hidden from tools/list has no description there; take the guide's
+                    # opening line, which IS the description.
+                    d = guide_summary.get(n, "")
+                if len(d) > 160:
+                    d = d[:157].rstrip() + "…"
+                d = d.replace("|", "\\|")
+                mark = " *(not enabled by default)*" if n in default_disabled else ""
+                out.append("| [`%s`](%s%s.md) | %s%s |" % (n, link_prefix, n, d, mark))
+            out.append("")
+        return out
+
+    # docs/tools/README.md — the folder index (links relative to this folder).
+    docs_idx = ["# EDT MCP Server — Tool Reference",
+                "",
+                "One page per tool: what it does, every parameter, and how it works. "
+                "Generated from the live server by `docs/generate_tool_docs.py` "
+                "(re-run to refresh; the source of truth is each tool's Java).",
+                "",
+                "**%d tools.**" % len(names),
+                ""]
+    docs_idx += index_lines("", 2)
+    with open(os.path.join(OUT_DIR, "README.md"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(docs_idx))
+
+    # Inject the same index into README.md between the TOOLS-INDEX markers (links from
+    # the repo root). Skipped with a notice if the markers are absent.
+    readme = os.path.join(os.path.dirname(HERE), "README.md")
+    injected = False
+    if os.path.isfile(readme):
+        text = open(readme, encoding="utf-8").read()
+        start_m, end_m = "<!-- TOOLS-INDEX:START -->", "<!-- TOOLS-INDEX:END -->"
+        si, ei = text.find(start_m), text.find(end_m)
+        if si != -1 and ei != -1 and ei > si:
+            block = "\n".join([start_m,
+                               "<!-- generated by docs/generate_tool_docs.py — do not edit by hand -->",
+                               "",
+                               "**%d tools**, grouped by toolset. Full per-tool pages under "
+                               "[docs/tools/](docs/tools/)." % len(names),
+                               ""] + index_lines("docs/tools/", 3) + [end_m])
+            text = text[:si] + block + text[ei + len(end_m):]
+            open(readme, "w", encoding="utf-8", newline="\n").write(text)
+            injected = True
+
+    print("Wrote %d tool docs + docs/tools/README.md; README index injected: %s"
+          % (written, injected))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,284 @@
+name: "Set up headless EDT + MCP server"
+description: >
+  On a STOCK GitHub-hosted Linux runner, materialize Eclipse Platform + 1C:EDT
+  (from the public p2 update-site) + the freshly-built MCP plugin, then boot EDT
+  headless under Xvfb and wait until the MCP server answers on :8765.
+  No docker image and no self-hosted runner — everything is installed on the
+  runner via the Eclipse p2 director, the same public p2 the Tycho build uses.
+
+  Prereq: the caller must already have built the MCP plugin p2 repository
+  (mvn ... in mcp/), i.e. `plugin-repo` exists. The action exports `edt_pid`
+  (the EDT process id) so the caller can stop it in an `if: always()` step.
+
+inputs:
+  port:
+    description: "MCP server port to wait for"
+    required: false
+    default: "8765"
+  import-projects:
+    description: >
+      Optional list of project directories (separated by ':') to import into the
+      fresh workspace on boot, via the plugin's EDT_MCP_IMPORT_PROJECTS bootstrap.
+      Leave empty for protocol-only conformance (no project needed); set it for the
+      e2e gate, e.g. "$GITHUB_WORKSPACE/tests/TestConfiguration:$GITHUB_WORKSPACE/tests/tests".
+    required: false
+    default: ""
+  plugin-repo:
+    description: "Path to the built MCP plugin p2 repository (file:// is added)"
+    required: false
+    default: "mcp/repositories/com.ditrix.edt.mcp.server.repository/target/repository"
+  eclipse-archive:
+    description: >
+      Eclipse Platform linux-gtk-x86_64 archive URL. MUST match the Eclipse base the
+      EDT under test is built on (EDT 2026.2 ⇒ 4.38 / 2025-12; EDT 2026.1 ⇒ 4.30 / 2023-12).
+    required: false
+    default: "https://archive.eclipse.org/eclipse/downloads/drops4/R-4.38-202512010920/eclipse-platform-4.38-linux-gtk-x86_64.tar.gz"
+  edt-p2:
+    description: "1C:EDT public p2 update-site"
+    required: false
+    default: "https://edt.1c.ru/downloads/releases/ruby/2026.2/"
+  java-runtime:
+    description: >
+      The JDK the EDT under test requires at RUNTIME (its p2 requiredJavaVersion):
+      EDT 2026.2 ⇒ 25, EDT 2026.1 ⇒ 17. The caller must have set that JDK up.
+    required: false
+    default: "25"
+  eclipse-p2:
+    description: "Eclipse release p2 (for the platform closure), matching eclipse-archive"
+    required: false
+    default: "https://download.eclipse.org/releases/2025-12/"
+  orbit-p2:
+    description: "Eclipse Orbit p2 (commons-codec etc.)"
+    required: false
+    default: "https://download.eclipse.org/tools/orbit/downloads/drops/R20211213173813/repository/"
+  orbit-simrel-p2:
+    description: "Eclipse Orbit aggregation p2 (Batik / SVG), matching eclipse-archive"
+    required: false
+    default: "https://download.eclipse.org/tools/orbit/simrel/orbit-aggregation/release/4.38.0/"
+  platform-support-iu:
+    description: >
+      EDT platform-support feature to also install (match the test config compat
+      mode). Leave EMPTY to install only the core EDT feature — protocol-only
+      conformance needs no config support, and dropping it avoids version-specific
+      install failures across an EDT matrix.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Xvfb + GTK/X runtime libraries
+      shell: bash
+      run: |
+        set -x
+        sudo apt-get update
+        # Tolerant install: package names differ across Ubuntu 22.04/24.04
+        # (the t64 ABI transition), so try each and ignore the ones absent.
+        PKGS="xvfb \
+          libgtk-3-0 libgtk-3-0t64 \
+          libxtst6 libxrender1 libxi6 libxrandr2 libxcb1 \
+          libgl1 libglu1-mesa \
+          libasound2 libasound2t64 \
+          libsecret-1-0 libnss3 \
+          libwebkit2gtk-4.1-0 libwebkit2gtk-4.0-37 \
+          fonts-dejavu"
+        for p in $PKGS; do
+          sudo apt-get install -y --no-install-recommends "$p" 2>/dev/null || true
+        done
+        # Xvfb is mandatory — fail loudly if it really didn't install.
+        sudo apt-get install -y --no-install-recommends xvfb
+
+    - name: Pin guard + compute EDT-base cache key
+      id: edtcache
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Pin the EDT build this base is validated against and FAIL if 1C shipped a newer one.
+        # The public ruby/<ver>/ channel is mutated IN PLACE on every point-release (no immutable
+        # per-release URL), so folding the SERVED build qualifier into the cache key makes the
+        # base cache track the served build — it can never go stale (the felix uses-constraint
+        # overlay flap). The channel is the ruby/<ver>/ segment of edt-p2. edt-pin.sh exits 1 on
+        # a drift, which aborts this step under `set -e` (a red gate that forces a re-pin).
+        CHANNEL="$(printf '%s' '${{ inputs.edt-p2 }}' | sed -E 's#.*/ruby/([^/]+)/?$#\1#')"
+        EDT_BUILD="$(bash "$GITHUB_WORKSPACE/.github/scripts/edt-pin.sh" "$CHANNEL" "${{ inputs.edt-p2 }}")"
+        # Key on the inputs that define the IMMUTABLE Eclipse+EDT base (NOT the plugin, which is
+        # rebuilt every run and overlaid afterwards) + the served EDT build qualifier. A new EDT
+        # build / Eclipse archive / platform-support IU ⇒ a different key ⇒ a fresh install.
+        # EVERY repository handed to the director below belongs here: one that changes without
+        # changing the key restores a base assembled from the OLD repo and skips the reinstall.
+        H=$(printf '%s|%s|%s|%s|%s|%s|%s' \
+              "${{ inputs.eclipse-archive }}" \
+              "${{ inputs.edt-p2 }}" \
+              "${{ inputs.eclipse-p2 }}" \
+              "${{ inputs.orbit-p2 }}" \
+              "${{ inputs.orbit-simrel-p2 }}" \
+              "${{ inputs.platform-support-iu }}" \
+              "$EDT_BUILD" | sha256sum | cut -c1-16)
+        echo "key=edt-base-${{ runner.os }}-$H" >> "$GITHUB_OUTPUT"
+
+    - name: Restore cached EDT base (Eclipse + 1C:EDT, no plugin)
+      id: restore-edt
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ runner.temp }}/edt/eclipse
+        key: ${{ steps.edtcache.outputs.key }}
+
+    - name: Download Eclipse Platform 4.30
+      if: steps.restore-edt.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euxo pipefail
+        curl -fSL "${{ inputs.eclipse-archive }}" -o "$RUNNER_TEMP/eclipse.tar.gz"
+        mkdir -p "$RUNNER_TEMP/edt"
+        tar -xzf "$RUNNER_TEMP/eclipse.tar.gz" -C "$RUNNER_TEMP/edt"
+        test -x "$RUNNER_TEMP/edt/eclipse/eclipse"
+
+    - name: Install the 1C:EDT base via p2 director (cache miss only)
+      if: steps.restore-edt.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -uxo pipefail
+        ECLIPSE="$RUNNER_TEMP/edt/eclipse"
+        # Install ONLY the EDT feature (+ optionally a platform-support feature) into the
+        # downloaded Eclipse. The MCP plugin is NOT installed here — it is overlaid in the
+        # next step so this cached base stays plugin-free (and thus reusable across commits).
+        IUS="com._1c.g5.v8.dt.feature.feature.group"
+        if [ -n "${{ inputs.platform-support-iu }}" ]; then
+          IUS="$IUS,${{ inputs.platform-support-iu }}"
+        fi
+        # edt.1c.ru intermittently 404s individual artifacts under the burst download of the
+        # whole EDT feature (rate-limiting; the files DO exist). A failed director transaction
+        # rolls back cleanly, so retry the whole install with a cooldown to ride out the
+        # rate-limit window; p2's own transport retry handles transient read errors within an
+        # attempt. This network-heavy step runs ONLY on a cache miss (first run per version).
+        ok=0
+        for attempt in 1 2 3 4 5; do
+          echo "[setup-edt] EDT-base p2 director attempt $attempt/5 ..."
+          # Bound each attempt with `timeout`: edt.1c.ru sometimes throttles a download to a
+          # near-stall from the Azure runner, which can otherwise hang the director for 30+
+          # min. A killed attempt rolls back cleanly and the p2 bundle pool persists, so the
+          # retry RESUMES with the already-fetched artifacts. The ECF read/connect timeouts
+          # make a STALLED socket fail fast (p2's own retry re-fetches it) instead of
+          # blocking the whole attempt.
+          if timeout -k 30 1200 "$ECLIPSE/eclipse" -nosplash -consoleLog \
+              -application org.eclipse.equinox.p2.director \
+              -repository "${{ inputs.edt-p2 }},${{ inputs.eclipse-p2 }},${{ inputs.orbit-p2 }},${{ inputs.orbit-simrel-p2 }}" \
+              -installIU "$IUS" \
+              -destination "$ECLIPSE" \
+              -profileProperties org.eclipse.update.install.features=true \
+              -p2.os linux -p2.ws gtk -p2.arch x86_64 -tag init \
+              -vmargs \
+              -Dorg.eclipse.equinox.p2.transport.ecf.retry=5 \
+              -Dorg.eclipse.ecf.provider.filetransfer.retrieve.readTimeout=120000 \
+              -Dorg.eclipse.ecf.provider.filetransfer.retrieve.connectTimeout=60000; then
+            ok=1
+            break
+          fi
+          echo "[setup-edt] EDT-base attempt $attempt failed/timed out (upstream edt.1c.ru likely rate-limited a download); cooling down 60s ..."
+          sleep 60
+        done
+        [ "$ok" = 1 ] || { echo "[setup-edt] ERROR: EDT-base p2 director failed after 5 attempts"; exit 1; }
+
+    - name: Save EDT base to cache (cache miss only)
+      if: steps.restore-edt.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ runner.temp }}/edt/eclipse
+        key: ${{ steps.edtcache.outputs.key }}
+
+    - name: Overlay the freshly-built MCP plugin via p2 director (always)
+      shell: bash
+      run: |
+        set -uxo pipefail
+        ECLIPSE="$RUNNER_TEMP/edt/eclipse"
+        test -x "$ECLIPSE/eclipse" \
+          || { echo "ERROR: EDT base missing at $ECLIPSE (restore + install both failed)"; exit 1; }
+        LOCAL_REPO="file://$GITHUB_WORKSPACE/${{ inputs.plugin-repo }}"
+        ls "$GITHUB_WORKSPACE/${{ inputs.plugin-repo }}"/content.* >/dev/null 2>&1 \
+          || { echo "ERROR: plugin p2 repository not found at ${{ inputs.plugin-repo }} (no content.* metadata) — build it first (mvn in mcp/)"; exit 1; }
+        # Install the MCP plugin feature into the (possibly cached) EDT base. The EDT p2 repo
+        # (edt-p2) MUST be passed alongside the local plugin repo + Eclipse/Orbit: the director
+        # RE-RESOLVES the EDT platform bundles at overlay time, and without the full EDT metadata
+        # it cannot pick a consistent servlet-api / jetty wiring for dt.html -> activedocument.ui
+        # (a felix uses-constraint conflict once the cached base carries a newer EDT point-release).
+        # The 2-attempt retry below covers the rate-limited edt.1c.ru re-contact.
+        ok=0
+        for attempt in 1 2; do
+          echo "[setup-edt] plugin overlay p2 director attempt $attempt/2 ..."
+          if "$ECLIPSE/eclipse" -nosplash -consoleLog \
+              -application org.eclipse.equinox.p2.director \
+              -repository "$LOCAL_REPO,${{ inputs.edt-p2 }},${{ inputs.eclipse-p2 }},${{ inputs.orbit-p2 }},${{ inputs.orbit-simrel-p2 }}" \
+              -installIU "com.ditrix.edt.mcp.server.feature.feature.group" \
+              -destination "$ECLIPSE" \
+              -profileProperties org.eclipse.update.install.features=true \
+              -p2.os linux -p2.ws gtk -p2.arch x86_64 -tag mcp-plugin \
+              -vmargs -Dorg.eclipse.equinox.p2.transport.ecf.retry=5; then
+            ok=1
+            break
+          fi
+          echo "[setup-edt] plugin overlay attempt $attempt failed; retrying ..."
+          sleep 10
+        done
+        [ "$ok" = 1 ] || { echo "[setup-edt] ERROR: plugin overlay p2 director failed"; exit 1; }
+
+    - name: Boot EDT headless (Xvfb) and wait for the MCP server
+      shell: bash
+      env:
+        MCP_PORT: ${{ inputs.port }}
+      run: |
+        set -uo pipefail
+        ECLIPSE="$RUNNER_TEMP/edt/eclipse"
+        WS="$RUNNER_TEMP/edt-ws"
+        LOG="$RUNNER_TEMP/edt.log"
+        mkdir -p "$WS"
+        echo "edt_log=$LOG" >> "$GITHUB_ENV"
+        # The plugin's headless bootstrap (McpServerStartup): force the MCP server on
+        # (the auto-start preference is off on a fresh workspace) and, when given, import
+        # the project dirs by reference so the empty workspace comes up with them open.
+        export EDT_MCP_AUTO_START=true
+        export EDT_MCP_PORT="$MCP_PORT"
+        if [ -n "${{ inputs.import-projects }}" ]; then
+          export EDT_MCP_IMPORT_PROJECTS="${{ inputs.import-projects }}"
+          echo "[setup-edt] will import projects: $EDT_MCP_IMPORT_PROJECTS"
+        fi
+        echo "[setup-edt] launching EDT under Xvfb (workspace=$WS) ..."
+        # EDT uses Apache Ignite (its BM / derived-data store), which must reflect into
+        # java.nio / sun.nio.ch (DirectByteBuffer.address) and needs the module system
+        # opened up. These --add-modules / --add-opens are exactly what EDT's own 1cedt.ini
+        # ships (unchanged in 2026.2 — only requiredJavaVersion moved 17 → 25); WITHOUT them
+        # GridUnsafe fails to initialize, the DtProject lifecycle never completes its LINKING
+        # phase, and the imported projects stay 'not_available' forever (never index). Passing
+        # -vmargs on the command line REPLACES the eclipse.ini -vmargs block, so the required
+        # osgi/log4j flags are repeated here too.
+        xvfb-run -a -s "-screen 0 1920x1080x24" \
+          "$ECLIPSE/eclipse" -data "$WS" -clean -nosplash -consoleLog \
+          --launcher.suppressErrors \
+          -vmargs \
+          -Xmx4g \
+          "-Dosgi.requiredJavaVersion=${{ inputs.java-runtime }}" \
+          -Dorg.osgi.framework.bundle.parent=ext \
+          -Dosgi.module.lock.timeout=240 \
+          -Dlog4j.formatMsgNoLookups=true \
+          -Dlog4j2.formatMsgNoLookups=true \
+          --add-modules=ALL-SYSTEM \
+          --add-opens=java.base/java.lang=ALL-UNNAMED \
+          --add-opens=java.base/java.lang.constant=ALL-UNNAMED \
+          --add-opens=java.base/java.lang.ref=ALL-UNNAMED \
+          --add-opens=java.base/java.nio=ALL-UNNAMED \
+          --add-opens=java.base/java.time=ALL-UNNAMED \
+          --add-opens=java.base/sun.nio.ch=ALL-UNNAMED \
+          --add-opens=java.base/java.net=ALL-UNNAMED \
+          > "$LOG" 2>&1 &
+        echo "edt_pid=$!" >> "$GITHUB_ENV"
+        echo "[setup-edt] waiting for MCP server on :$MCP_PORT ..."
+        for i in $(seq 1 120); do
+          if curl -sf "http://127.0.0.1:$MCP_PORT/health" >/dev/null 2>&1; then
+            echo "[setup-edt] MCP server UP on $MCP_PORT"
+            exit 0
+          fi
+          sleep 5
+        done
+        echo "[setup-edt] ERROR: MCP server did not come up within ~10 min."
+        echo "----- last 200 lines of EDT log -----"
+        tail -n 200 "$LOG" || true
+        exit 1

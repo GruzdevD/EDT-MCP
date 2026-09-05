@@ -1,0 +1,331 @@
+"""
+e2e tests for update_database (kind: action) — DESTRUCTIVE infobase mutation.
+
+update_database drives EDT's IApplicationManager.update(application, FULL|INCREMENTAL)
+against the project's infobase (the database, NOT the project source files). It is a
+JSON tool (getResponseType() == JSON): on success the data is in r.structured
+(project/applicationId/updateType/stateBefore/stateAfter/message); on failure the
+server sets isError and the message is in structured.error / r.text.
+
+============================================================================
+WHY THERE IS NO "REAL UPDATE" HAPPY PATH HERE (action-tool safety)
+============================================================================
+A genuinely-successful call performs appManager.update(...), which MUTATES the
+infobase DB. The e2e contract forbids any happy mutation that could corrupt the
+committed TestConfiguration fixture / its infobase, and a real update also needs a
+live, non-exclusive infobase + a valid applicationId we cannot guarantee headlessly.
+So we DELIBERATELY do not call the destructive update() success path.
+
+Instead the "happy"/contract coverage exercises the tool's REAL resolution chain
+end-to-end up to — but stopping short of — the destructive update(): a REAL, open
+project (TestConfiguration) plus a non-existent applicationId. That call flows
+through the full execute() pipeline (arg validation -> ProjectStateChecker ready
+gate -> ProjectContext.exists()/isOpen() -> Activator IApplicationManager ->
+appManager.getApplication(project, id)) and is rejected at getApplication() with
+"Application not found: <id>. Use get_applications ..." BEFORE update() runs. This
+is mutation-sensitive: a tool that no-op'd, succeeded blindly, or skipped resolution
+would NOT produce this exact, project-resolved rejection — and it touches no DB and
+no files. assert_no_diff() proves the fixture source is untouched.
+
+update_database never writes TestConfiguration source FILES (it targets the infobase),
+so EVERY call in this file — accepted-shape or rejected — must leave the project tree
+clean: assert_no_diff() on all paths.
+
+============================================================================
+REAL error/sentinel paths in UpdateDatabaseTool.execute() (verified vs the Java)
+============================================================================
+Targeting is XOR-ish: pass launchConfigurationName (preferred) OR projectName+applicationId.
+  - no launchConfigurationName & no projectName
+        -> "projectName is required (or pass launchConfigurationName)"
+  - no launchConfigurationName & projectName but no applicationId
+        -> "applicationId is required (or pass launchConfigurationName). Use get_applications or list_configurations."
+  - launchConfigurationName that does not exist
+        -> "Launch configuration not found: '<name>'. Use list_configurations to see what's available."
+  - projectName+applicationId, project does not exist
+        -> the readiness pre-check (ProjectStateChecker.buildingErrorOrNull) refuses ONLY the
+           transient BUILDING state and returns null for a missing project, so the call falls
+           through to updateDatabase()'s own value-naming branch (the shared
+           ProjectContext.notFoundMessage):
+           -> "Project not found: <name>. Use list_projects to see available projects."
+  - real open project + non-existent applicationId
+        -> "Application not found: <id>. Use get_applications to get valid application IDs."
+  - real open project + a SYNTHETIC launch identifier as applicationId (#379): list_configurations
+    publishes "launch:<configName>" / "attach:<configName>" under its own `applicationId` key for a
+    configuration whose application binding is absent or unreadable, and carrying that value here
+    is the mistake the key invites. Still the application-not-found branch, but the message now DIAGNOSES the value
+    instead of leaving the caller to re-read get_applications forever:
+        -> launch: "... That value has the form of the identifier list_configurations reports for
+           a launch configuration whose application binding is absent or unreadable, so it is not
+           an application id. If '<name>' is a runtime-client configuration, pass it as
+           launchConfigurationName instead. ..."
+        -> attach: names the Attach (debug-server) configuration and says update_database requires
+           a runtime-client one (advising launchConfigurationName there would only buy a second
+           refusal — the Attach type is rejected).
+    The wording says "has the form of" on purpose: the classification is made from the STRING, no
+    configuration is looked up, so it must not assert that such a configuration exists.
+
+NOT covered here (it needs a launch configuration whose ATTR_APPLICATION_ID is EMPTY, and no MCP
+tool can create one — create_launch_config always writes a real id): the #379 fallback itself,
+i.e. "config with no application binding -> the project's single application" and its ambiguity /
+no-application / unreadable-attribute refusals. UpdateDatabaseToolTest covers those DECISIONS
+against the package-private resolveLaunchConfigTarget / effectiveApplicationId /
+resolveSoleApplicationId seams with a mocked ILaunchConfiguration; what stays uncovered anywhere
+is only the launch-manager lookup and the two lines of execute() that join the seams.
+"""
+
+from harness import (
+    call,
+    assert_error,
+    assert_error_quality,
+    assert_contains,
+    assert_not_contains,
+    assert_no_diff,
+    e2e_test,
+    PROJECT,
+)
+
+
+# A sentinel applicationId guaranteed not to be a real application of the fixture.
+# Plain ASCII (no quotes/JSON delimiters) so it round-trips verbatim through the
+# JSON error payload and can be matched by assert_error_quality(names=[...]).
+BOGUS_APP_ID = "no_such_app_e2e_zzz"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# "HAPPY"/CONTRACT PATH (SAFE — real resolution, NO destructive update, NO mutation)
+# ──────────────────────────────────────────────────────────────────────────────
+@e2e_test(tool="update_database", kind="action")
+def test_real_project_unknown_application_is_resolved_and_rejected_without_mutating():
+    """SAFE end-to-end exercise of the real resolution chain that STOPS before the
+    destructive update().
+
+    A real, open project (TestConfiguration) + a non-existent applicationId passes
+    every earlier guard (arg validation, ProjectStateChecker ready gate,
+    ProjectContext.exists()/isOpen(), IApplicationManager lookup) and is rejected at
+    appManager.getApplication() with the application-not-found error — BEFORE update()
+    runs. This is the closest we can get to the success path without mutating the
+    infobase, and it is fully mutation-sensitive:
+      * a no-op tool / a tool that fabricated success would NOT return isError here;
+      * a tool that skipped real project resolution could not have reached the
+        application lookup to produce this specific, app-id-naming rejection.
+    It also proves the action does not touch the project source tree.
+    """
+    r = call("update_database", {
+        "projectName": PROJECT,
+        "applicationId": BOGUS_APP_ID,
+    })
+    e = assert_error(r, "real project + non-existent applicationId")
+    # Names the bad applicationId AND is actionable (points at get_applications).
+    assert_error_quality(e, names=[BOGUS_APP_ID], suggests=["get_applications"],
+                         ctx="application-not-found names the bad id and suggests get_applications")
+    # Proof we reached the real application-lookup stage (not an earlier generic guard):
+    # only updateDatabase()'s getApplication() branch emits "Application not found".
+    assert_contains(e, "Application not found",
+                    "must be rejected at the real application lookup, not an earlier guard")
+    assert_no_diff("a rejected update must not touch the project source on disk")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_terminate_running_clients_param_accepted_without_mutation():
+    """The terminateRunningClients opt-out is parsed by execute() and does not break the
+    resolution chain.
+
+    Passing it (false) alongside a real project + non-existent applicationId is still rejected at
+    the application lookup BEFORE the apply phase — so neither the destructive update() nor the
+    client-freeing sweep runs. This is a platform-boundary test: it proves the parameter is PARSED
+    and the resolution chain still reaches getApplication() with an un-mangled id, NOT that the
+    sweep itself works (the sweep needs a live launch + infobase and is verify-live-only). The
+    fixture source stays clean on every path.
+    """
+    r = call("update_database", {
+        "projectName": PROJECT,
+        "applicationId": BOGUS_APP_ID,
+        "terminateRunningClients": False,
+    })
+    e = assert_error(r, "real project + non-existent applicationId + terminateRunningClients=false")
+    # Same quality bar as the twin happy test: prove execution reached getApplication() with the
+    # un-mangled id (names=[BOGUS_APP_ID]) and stayed actionable (suggests=[get_applications]) —
+    # without it, any "Application not found"-ish text would pass without proving real resolution.
+    assert_error_quality(e, names=[BOGUS_APP_ID], suggests=["get_applications"],
+                         ctx="param-accepted path still names the bad id and suggests get_applications")
+    assert_contains(e, "Application not found",
+                    "the terminateRunningClients param must not change the application-lookup rejection")
+    assert_no_diff("a rejected update (even with terminateRunningClients) must not touch the project on disk")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NEGATIVE MATRIX — targeting argument validation (XOR-ish projectName+applicationId
+# vs launchConfigurationName), plus invalid targets. Every call leaves the tree clean.
+# ──────────────────────────────────────────────────────────────────────────────
+@e2e_test(tool="update_database", kind="action")
+def test_no_targeting_args_errors_clearly():
+    """Neither launchConfigurationName nor projectName: the tool cannot know what to
+    update. The first guard names the missing projectName AND offers the alternative
+    targeting route (launchConfigurationName) — that alternative IS the actionable
+    next step, so suggests=[launchConfigurationName]."""
+    r = call("update_database", {})
+    e = assert_error(r, "no targeting arguments at all")
+    assert_error_quality(e, names=["projectName"], suggests=["launchConfigurationName"],
+                         ctx="missing target names projectName and offers launchConfigurationName")
+    assert_no_diff("an invalid call must not touch the project on disk")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_project_without_application_id_errors_clearly():
+    """Partial target via the projectName route: projectName present but applicationId
+    omitted. The second guard must fire (NOT silently pick a default application). It
+    names the missing applicationId and is actionable (get_applications / list_configurations)."""
+    r = call("update_database", {
+        "projectName": PROJECT,
+    })
+    e = assert_error(r, "projectName given, applicationId missing")
+    assert_error_quality(e, names=["applicationId"], suggests=["get_applications"],
+                         ctx="missing applicationId names the param and suggests get_applications")
+    assert_no_diff("an invalid call must not touch the project on disk")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_application_id_without_project_errors_clearly():
+    """The mirror partial target: applicationId present but projectName omitted (and no
+    launchConfigurationName). Because launchConfigurationName is absent, the projectName
+    guard fires FIRST — proving applicationId alone is not enough to identify a project
+    and the tool does not coerce a default project."""
+    r = call("update_database", {
+        "applicationId": BOGUS_APP_ID,
+    })
+    e = assert_error(r, "applicationId given, projectName missing")
+    assert_error_quality(e, names=["projectName"], suggests=["launchConfigurationName"],
+                         ctx="applicationId alone is rejected for a missing projectName")
+    assert_no_diff("an invalid call must not touch the project on disk")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_nonexistent_launch_configuration_errors_and_names_value():
+    """Targeting via the preferred launchConfigurationName route, but the name does not
+    exist. LaunchConfigUtils.findLaunchConfigByName returns null -> the tool returns
+    "Launch configuration not found: '<name>'. Use list_configurations ...". Environment-
+    robust: holds whether or not the fixture has any runtime-client config, because a
+    bogus name never matches. Names the bad value AND points at list_configurations."""
+    bad = "NoSuchLaunchConfig_e2e"
+    r = call("update_database", {
+        "launchConfigurationName": bad,
+    })
+    e = assert_error(r, "non-existent launchConfigurationName")
+    assert_error_quality(e, names=[bad], suggests=["list_configurations"],
+                         ctx="launch-config-not-found names the bad value and suggests list_configurations")
+    assert_no_diff("an invalid call must not touch the project on disk")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_nonexistent_project_is_rejected_without_mutating():
+    """Valid-shaped target (projectName + applicationId) but the project does not exist.
+    The readiness pre-check (ProjectStateChecker.buildingErrorOrNull) refuses ONLY the
+    transient BUILDING state and returns null for a missing project, so the call falls
+    through to updateDatabase()'s own value-naming branch, which returns the shared
+    ProjectContext.notFoundMessage(projectName):
+    "Project not found: <name>. Use list_projects to see available projects." That
+    message ECHOES the bad project name (names=[bad]) AND appends the actionable
+    list_projects discovery tail (suggests=["list_projects"]). The call must be
+    rejected and the real fixture untouched.
+    """
+    bad = "NoSuchProject_e2e_zzz"
+    r = call("update_database", {
+        "projectName": bad,
+        "applicationId": BOGUS_APP_ID,
+    })
+    e = assert_error(r, "non-existent project")
+    assert_error_quality(e, names=[bad], suggests=["list_projects"],
+                         ctx="non-existent project surfaces the value-naming 'Project not found: <name>' with a list_projects tail")
+    # Distinguish this from the application-not-found path: a non-existent project must be
+    # stopped at the project gate, never reaching the application lookup.
+    assert_contains(e, "Project not found",
+                    "a non-existent project must hit the value-naming not-found branch")
+    assert_no_diff("a rejected update must not touch the project on disk")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_launch_prefixed_application_id_is_diagnosed_not_just_not_found():
+    """#379: the `applicationId` list_configurations publishes for a configuration whose
+    application binding is absent or unreadable is a synthetic launch identifier
+    ("launch:<configName>"), not an application id — carrying it into update_database is the
+    mistake that key invites.
+
+    The call still stops at the real application lookup (nothing is mutated), but the rejection
+    must DIAGNOSE the value: say it is not an application id and name the route that does work
+    (`launchConfigurationName`). A bare "Application not found" sends the caller back to
+    get_applications, where the value they hold will never appear.
+    """
+    bad = "launch:NoSuchLaunchConfig_e2e"
+    r = call("update_database", {
+        "projectName": PROJECT,
+        "applicationId": bad,
+    })
+    e = assert_error(r, "synthetic launch: identifier passed as applicationId")
+    assert_error_quality(e, names=[bad], suggests=["launchConfigurationName", "get_applications"],
+                         ctx="launch: id names the bad value and points at launchConfigurationName")
+    assert_contains(e, "Application not found",
+                    "it is still the application-lookup rejection, only better explained")
+    assert_contains(e, "not an application id",
+                    "the rejection must say the value is not an application id at all")
+    assert_contains(e, "NoSuchLaunchConfig_e2e",
+                    "the diagnosis must echo the configuration name encoded in the identifier")
+    assert_no_diff("a rejected update must not touch the project source on disk")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_attach_prefixed_application_id_is_not_sent_to_launch_configuration_name():
+    """The Attach twin of the test above, and the reason the two forms are diagnosed
+    separately: update_database rejects an Attach config BY TYPE, so telling the caller to
+    pass it as launchConfigurationName would only buy them a second refusal. The message must
+    name the configuration and say a runtime-client config is required instead."""
+    bad = "attach:NoSuchAttachConfig_e2e"
+    r = call("update_database", {
+        "projectName": PROJECT,
+        "applicationId": bad,
+    })
+    e = assert_error(r, "synthetic attach: identifier passed as applicationId")
+    assert_error_quality(e, names=[bad], suggests=["get_applications"],
+                         ctx="attach: id names the bad value and stays actionable")
+    assert_contains(e, "not an application id",
+                    "the rejection must say the value is not an application id at all")
+    assert_contains(e, "runtime-client configuration",
+                    "an Attach identifier must be told why it cannot be the target")
+    assert_not_contains(e, "pass it as launchConfigurationName",
+                        "an Attach config is rejected by type — that advice would fail again")
+    assert_no_diff("a rejected update must not touch the project source on disk")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_unknown_external_infobase_changes_value_is_rejected():
+    """externalInfobaseChanges answers EDT's blocking "Infobase configuration changes"
+    modal (the infobase was written outside EDT since the last EDT interaction). A typo
+    must NOT silently fall back to the default 'override' - that choice OVERWRITES the
+    infobase - so an unrecognised token is rejected up front, before any target
+    resolution, naming the bad value and listing the accepted ones."""
+    bad = "overwrite"
+    r = call("update_database", {
+        "projectName": PROJECT,
+        "applicationId": BOGUS_APP_ID,
+        "externalInfobaseChanges": bad,
+    })
+    e = assert_error(r, "unknown externalInfobaseChanges value")
+    assert_error_quality(e, names=[bad], suggests=["override", "import", "cancel"],
+                         ctx="unknown externalInfobaseChanges names the bad value and lists the accepted ones")
+    assert_no_diff("a rejected update must not touch the project on disk")
+
+
+@e2e_test(tool="update_database", kind="read")
+def test_unknown_standalone_server_port_conflict_value_is_rejected():
+    """standaloneServerPortConflict answers EDT's blocking "Standalone server port
+    conflict" modal. One of its two answers makes EDT REWRITE the server configuration,
+    so a typo must never resolve to it - nor silently fall back to the default. An
+    unrecognised token is rejected up front, naming the bad value and the accepted ones."""
+    bad = "find-free-port"
+    r = call("update_database", {
+        "projectName": PROJECT,
+        "applicationId": BOGUS_APP_ID,
+        "standaloneServerPortConflict": bad,
+    })
+    e = assert_error(r, "unknown standaloneServerPortConflict value")
+    assert_error_quality(e, names=[bad], suggests=["cancel", "reassign"],
+                         ctx="unknown standaloneServerPortConflict names the bad value and lists the accepted ones")
