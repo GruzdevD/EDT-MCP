@@ -2598,12 +2598,12 @@ public final class LaunchLifecycleUtils
                 break;
             }
         }
-        boolean settle = settledByRecompute;
-        if (!settle)
-        {
-            long preparedAge = PreLaunchChangeTracker.preparedAgeMillis(project);
-            settle = preparedAge < 0L || preparedAge < syncSettleWindowMs;
-        }
+        long preparedAge = PreLaunchChangeTracker.preparedAgeMillis(project);
+        boolean settle = settledByRecompute
+            ? true : (preparedAge < 0L || preparedAge < syncSettleWindowMs);
+        Activator.logInfo("Pre-launch: settle=" + settle + " (recomputed-as-dirty=" //$NON-NLS-1$
+            + settledByRecompute + ", preparedAge=" + preparedAge + "ms, window=" //$NON-NLS-1$
+            + syncSettleWindowMs + "ms)"); //$NON-NLS-1$
         phaseSink.accept(PHASE_DB_UPDATE);
         Optional<String> updateErr =
             updateApplicationIfNeeded(project, applicationId, appManager, settle, policy);
