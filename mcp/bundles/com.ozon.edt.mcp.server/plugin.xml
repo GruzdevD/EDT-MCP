@@ -360,6 +360,26 @@
             restorable="true">
          <description>%mcpHistory.view.description</description>
       </view>
+
+      <!-- Allure Report View (vanessa): embedded browser over the generated Allure
+           report, served by the local AllureHttpServer. -->
+      <view
+            id="com.ozon.edt.mcp.server.allure.allureView"
+            name="%allure.view.name"
+            icon="icons/restart.png"
+            category="com.ozon.edt.mcp.server.tags.viewCategory"
+            class="com.ozon.edt.mcp.server.ui.AllureReportView"
+            allowMultiple="false"
+            restorable="true">
+         <description>%allure.view.description</description>
+      </view>
+   </extension>
+
+   <!-- Add Allure Report View to Window > Show View menu -->
+   <extension point="org.eclipse.ui.perspectiveExtensions">
+      <perspectiveExtension targetID="*">
+         <viewShortcut id="com.ozon.edt.mcp.server.allure.allureView"/>
+      </perspectiveExtension>
    </extension>
 
    <!-- Add MCP History View to Window > Show View menu -->

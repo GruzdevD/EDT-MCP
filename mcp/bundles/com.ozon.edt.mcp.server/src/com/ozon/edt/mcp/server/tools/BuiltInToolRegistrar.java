@@ -112,6 +112,7 @@ import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaGetLogTool;
 import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaGetTestReportTool;
 import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaListFeaturesTool;
 import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaListLaunchesTool;
+import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaOpenAllureReportTool;
 import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaRunByTagsTool;
 import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaRunFeatureTool;
 
@@ -271,6 +272,7 @@ public final class BuiltInToolRegistrar
         catalogue.add(new VanessaGetTestReportTool());
         catalogue.add(new VanessaGetLogTool());
         catalogue.add(new VanessaGetArtifactsTool());
+        catalogue.add(new VanessaOpenAllureReportTool());
 
         registry.replaceAll(catalogue);
         Activator.logInfo("Registered " + registry.getToolCount() + " MCP tools"); //$NON-NLS-1$ //$NON-NLS-2$
