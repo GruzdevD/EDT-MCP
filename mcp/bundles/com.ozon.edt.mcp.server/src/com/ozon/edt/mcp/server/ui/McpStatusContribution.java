@@ -38,7 +38,7 @@ import com.ozon.edt.mcp.server.protocol.McpConstants;
 
 /**
  * Status bar contribution showing MCP server status.
- * Displays a colored circle (grey=stopped, green=running, yellow=executing), "MCP" text and request counter [N].
+ * Displays a colored circle (grey=stopped, green=running, yellow=executing), "ozon MCP" text and request counter [N].
  * When a tool is executing, shows tool name and blinks yellow.
  * Click on circle shows popup menu with Start/Stop/Restart options.
  */
@@ -82,7 +82,7 @@ public class McpStatusContribution extends WorkbenchWindowControlContribution
 
     /** Painted state: the indicator image, the status text and the counter text. */
     private Image currentImage;
-    private String statusText = "MCP"; //$NON-NLS-1$
+    private String statusText = "ozon MCP"; //$NON-NLS-1$
     private String counterText = "[0]"; //$NON-NLS-1$
 
     private Menu popupMenu;
@@ -650,21 +650,21 @@ public class McpStatusContribution extends WorkbenchWindowControlContribution
 
     /**
      * Updates the status label: shows the (possibly truncated) tool name when
-     * executing, otherwise "MCP" with an optional new-release hint.
+     * executing, otherwise "ozon MCP" with an optional new-release hint.
      */
     private void updateStatusLabel(boolean isExecuting, String currentTool)
     {
         if (isExecuting)
         {
-            // Add MCP: prefix and truncate tool name if too long
+            // Add ozon MCP: prefix and truncate tool name if too long
             statusText = currentTool.length() > TOOL_NAME_MAX_LENGTH
-                ? "MCP: " + currentTool.substring(0, TOOL_NAME_MAX_LENGTH - 3) + "..." //$NON-NLS-1$ //$NON-NLS-2$
-                : "MCP: " + currentTool; //$NON-NLS-1$
+                ? "ozon MCP: " + currentTool.substring(0, TOOL_NAME_MAX_LENGTH - 3) + "..." //$NON-NLS-1$ //$NON-NLS-2$
+                : "ozon MCP: " + currentTool; //$NON-NLS-1$
         }
         else
         {
             boolean updateAvail = UpdateChecker.getInstance().isUpdateAvailable();
-            statusText = updateAvail ? "MCP New release" : "MCP"; //$NON-NLS-1$ //$NON-NLS-2$
+            statusText = updateAvail ? "ozon MCP New release" : "ozon MCP"; //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
