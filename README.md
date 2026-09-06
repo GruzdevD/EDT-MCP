@@ -306,6 +306,134 @@ set VER_EDT=2025.2.3+30
 
 ---
 
+## Полный подъём с нуля (для коллег на opencode / macOS)
+
+Пошаговый рецепт «как у меня» — поднять на чистой машине форк с нуля: собрать плагин, поставить в EDT, подключить MCP к opencode, проверить BDD-инструменты и Allure-отчёт. Проверено на **2026-09-06** (мак, EDT 2026.1).
+
+### 0. Предпосылки
+
+| Компонент | Что нужно | Как проверить |
+|---|---|---|
+| JDK **17** | `brew install openjdk@17`, `export JAVA_HOME=$(/usr/libexec/java_home -v 17)` | `java -version` → 17 |
+| Maven 3.8+ | `brew install maven` | `mvn -v` |
+| git + доступ к GitLab | token / ssh | `git ls-remote git@gitlab.ozon.ru:dmigruzdev/ozon-edt-mcp.git` |
+| EDT **2026.1/2026.2** | установлена через 1CEStart | в `~/Library/Application Support/1C/1cedtstart/installations/` |
+
+Для BDD-инструментов также нужен рабочий контур Vanessa Automation (проект с `env.sh`, ИБ) и, для отчётов, [Allure commandline](#5-allure-cli-для-vanessa_open_allure_report).
+
+### 1. Клонировать форк
+
+```bash
+mkdir -p ~/git && cd ~/git
+git clone git@gitlab.ozon.ru:dmigruzdev/ozon-edt-mcp.git edt-mcp-vanessa
+cd edt-mcp-vanessa
+git checkout feature/vanessa-mcp-tools
+```
+
+> [!NOTE]
+> **Форк vs апстрим.** Этот репозиторий — форк [DitriXNew/EDT-MCP](https://github.com/DitriXNew/EDT-MCP) с перебрендингом `com.ditrix.* → com.ozon.*`. Пулл-реквесты в апстрим не идут; история для публикации пересобирается под корпоративное правило авторов (`dmigruzdev@ozon.ru`, без `ditrixnew@gmail.com`). Если форкаетесь сами — не тяните upstream-историю целиком.
+
+### 2. Собрать плагин (Tycho)
+
+```bash
+cd ~/git/edt-mcp-vanessa/mcp
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+mvn -Djava.io.tmpdir=$TMPDIR clean verify
+```
+
+- Таргет-платформа: `mcp/targets/default/default.target` (EDT 2026.1, Java 17). Один артефакт резолвится и на 2026.2.
+- Результат: `mcp/repositories/com.ozon.edt.mcp.server.repository/target/repository/plugins/com.ozon.edt.mcp.server_1.0.0.<квалиф>.jar` (версия уникальна на каждую сборку — это ключ самóобновления).
+- Юнит-тесты и часть e2e гоняются прямо в этом шаге (`BuiltInToolTestCoverageTest` — у каждого тула обязан быть `XxxToolTest`; `ToolContractConsistencyTest` — параметры lowerCamelCase).
+
+> [!NOTE]
+> **Корпоративная специфика разрешения таргета.** Из песочницы p2-HTTP до `edt.1c.ru` может не доходить → полный `verify` с резолвом таргета выполняется вне песочницы. Кэш `~/.m2/repository/.cache/tycho` не удалять.
+
+### 3. Установить плагин в EDT (корпоративный деплой)
+
+Штатный p2 «Install New Software» против приватного GitLab у нас **не работает** (аутентификация только через git smart-HTTP), поэтому деплой — прямой: скопировать jar в shared-pool и прописать его в `bundles.info`. Это байт-в-байт то, что делает `InstallBundleAction`.
+
+1. **Закрыть EDT.**
+2. Скопировать jar в общий p2-pool:
+   ```bash
+   cp mcp/repositories/com.ozon.edt.mcp.server.repository/target/repository/plugins/com.ozon.edt.mcp.server_*.jar \
+      ~/.p2/pool/plugins/
+   ```
+3. Прописать бандл в конфигурации EDT (путь к вашей установке — `1CEStart`, версия 2026.1):
+   ```bash
+   BI="$HOME/Library/Application Support/1C/1cedtstart/installations/1C_EDT 2026.1/1cedt.app/Contents/Eclipse/configuration/org.eclipse.equinox.simpleconfigurator/bundles.info"
+   # путь до jar — такой же относительный, как у соседних записей pool (от каталога configuration)
+   R=$( cd "$HOME" && printf '../../../../../../../../../.p2/pool/plugins/com.ozon.edt.mcp.server_1.0.0.'*.jar )
+   printf 'com.ozon.edt.mcp.server,1.0.0.%s,%s,4,false\n' "$QUAL" "$R" >> "$BI"
+   ```
+   Итоговая строка выглядит так:
+   `com.ozon.edt.mcp.server,1.0.0.202609060930,../../../../../../../../../.p2/pool/plugins/com.ozon.edt.mcp.server_1.0.0.202609060930.jar,4,false`
+4. **Перезапустить EDT** и дождаться, пока поднимется MCP-сервер (обычно ~90 c):
+   ```bash
+   until nc -z 127.0.0.1 8765; do sleep 5; done
+   ```
+
+> [!IMPORTANT]
+> **Порт = 8765.** Новый (перебрендённый) бандл читает `com.ozon.edt.mcp.server.prefs` (дефолт 8765), а не legacy `8766`. Конфиг MCP-клиентов на 8766 надо перенацелить.
+
+Дальнейшие обновления не требуют ручного копирования — есть тулы `plugin_check_for_update` / `plugin_update`.
+
+### 4. Подключить MCP к opencode
+
+opencode читает глобальный конфиг `~/.config/opencode/opencode.json`. Добавьте MCP-сервер на loopback-порт EDT:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "edt": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp",
+      "enabled": true
+    }
+  }
+}
+```
+
+Проверка, что сервер живой и инструменты на месте:
+
+```bash
+curl -s http://127.0.0.1:8765/mcp            # должен ответить 2xx на /mcp
+# tools/list должен включать vanessa_run_feature, va*инструменты, plugin_check_for_update...
+```
+
+> [!NOTE]
+> **Другие клиенты.** Для VS Code/GitHub Copilot, Cursor, Claude Code и т.д. конфиги — в разделе «Подключение ИИ‑ассистентов» ниже. Везде один адрес: `http://127.0.0.1:8765/mcp`.
+
+### 5. Allure CLI (для `vanessa_open_allure_report`)
+
+Инструмент открытия отчёта сначала генерирует статический отчёт через Allure commandline. Установите CLI локально (без brew-формулы и без `sudo`):
+
+```bash
+ALLURE=~/.1c-tools/allure/allure-2.46.1
+mkdir -p "$(dirname "$ALLURE")"
+curl -L -o /tmp/allure.zip \
+  https://github.com/allure-framework/allure2/releases/download/2.46.1/allure-2.46.1.zip
+unzip -q /tmp/allure.zip -d ~/.1c-tools/allure
+mv ~/.1c-tools/allure/allure-2.46.1 "$ALLURE" 2>/dev/null || true
+"$ALLURE/bin/allure" --version   # → Allure 2.46.1
+```
+
+Плагин находит CLI по `~/.1c-tools/allure/allure-*/bin/allure` (или через параметр `allureBin` / PATH). Генерация идёт субпроцессом с явным `JAVA_HOME` плагина.
+
+### 6. Smoke-проверка BDD-цикла (опционально)
+
+1. В `~/.1c-tools/vanessa/projects/<project>/env.sh` настроены ИБ, пользователь/пароль, launch-конфиг, каталог фич, **порт MCP**.
+2. `vanessa_run_feature` (project + feature) → `launchId`;
+3. `vanessa_get_execution_status`, затем `vanessa_get_test_report` (JUnit);
+4. `vanessa_open_allure_report` (`outDir` = `<project>/out/<project>` или `launchId`) → откроет вью «Allure Report» в EDT (или внешний браузер при `detached: true`).
+
+Утилиты самопроверки — см. раздел «Сборка и тестирование» и методику уровней Tier-1…Tier-4. Перед внесением изменений в плагин прочитайте `CLAUDE.md` (транзакции BM, двуязычная ru/en модель, каскадные переименования) и скиллы `.claude/skills/`.
+
+> [!TIP]
+> **Быстрая итерация разработчика: хот-свап `.class` (и грабли!).** Вместо полной сборки можно распаковать установленный jar, перезаписать перекомпилированный `.class`, пере-зазиповать и вернуть в pool. **НО** это обновляет только классы — `plugin.xml`/`plugin.properties` из нового исходника в jar не попадают. Меняли расширения (view/command/menu) — обязательно перевкладывайте и `plugin.xml` с properties, иначе расширение «тихо» не появится (классический симптом: `PartInitException: Не удалось создать панель` на вью, которой нет в реестре). После любого swap нужен перезапуск EDT (Equinox читает всё при старте).
+
+---
+
 ## Лицензия
 
 Проект распространяется под [AGPL-3.0-or-later](LICENSE) (как и апстрим).
