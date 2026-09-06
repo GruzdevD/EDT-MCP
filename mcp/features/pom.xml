@@ -17,7 +17,7 @@
   <name>Features</name>
 
   <modules>
-    <module>com.ditrix.edt.mcp.server.feature</module>
+    <module>com.ozon.edt.mcp.server.feature</module>
   </modules>
 
 </project>

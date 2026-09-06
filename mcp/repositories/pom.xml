@@ -17,7 +17,7 @@
   <name>Repositories</name>
 
   <modules>
-    <module>com.ditrix.edt.mcp.server.repository</module>
+    <module>com.ozon.edt.mcp.server.repository</module>
   </modules>
 
 </project>

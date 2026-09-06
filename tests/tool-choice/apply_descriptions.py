@@ -21,7 +21,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-IMPL = os.path.join(ROOT, "mcp/bundles/com.ditrix.edt.mcp.server/src/com/ditrix/edt/mcp/server/tools/impl")
+IMPL = os.path.join(ROOT, "mcp/bundles/com.ozon.edt.mcp.server/src/com/ozon/edt/mcp/server/tools/impl")
 TEXT = json.load(open(os.path.join(HERE, "v4_final.json"), encoding="utf-8"))
 
 # Tool name is a NAME constant on the class; a couple of classes still inline it.

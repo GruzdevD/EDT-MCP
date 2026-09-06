@@ -12,7 +12,7 @@ It publishes its entry point as an ordinary OSGi service under the JDK type
 `edt.mcp.bridge=v1`: `apply(toolName, argumentsJson)` returns the MCP `tools/call` response.
 `Supplier<String>` with the same property lists every tool. Nothing here is improvised
 Java API - every type is JDK or standard OSGi, and the contract is fixed by
-`mcp/bundles/com.ditrix.edt.mcp.server/src/com/ditrix/edt/mcp/server/bridge/IEdtMcpBridge.java`
+`mcp/bundles/com.ozon.edt.mcp.server/src/com/ozon/edt/mcp/server/bridge/IEdtMcpBridge.java`
 in this workspace.
 
 You do not need `JShellSession` or `JShellManual` for this, and you may not have them:

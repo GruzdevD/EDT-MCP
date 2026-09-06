@@ -3,9 +3,9 @@
 **/.classpath
 **/.settings/
 
-/mcp/bundles/com.ditrix.edt.mcp.server/target
-/mcp/tests/com.ditrix.edt.mcp.server.tests/target
-/mcp/tests/com.ditrix.edt.mcp.server.tests/bin
+/mcp/bundles/com.ozon.edt.mcp.server/target
+/mcp/tests/com.ozon.edt.mcp.server.tests/target
+/mcp/tests/com.ozon.edt.mcp.server.tests/bin
 nulq
 nul
 /source/*
@@ -17,7 +17,7 @@ log.log
 !.claude/skills/
 !.claude/hooks/
 !.claude/settings.json
-/mcp/repositories/com.ditrix.edt.mcp.server.repository/target
+/mcp/repositories/com.ozon.edt.mcp.server.repository/target
 /tests/e2e/__pycache__/
 # grade.py now imports a sibling module, so this directory grows one too.
 /tests/tool-choice/__pycache__/

@@ -96,7 +96,7 @@ set VER_EDT=2025.2.3+30
 "\path\to\EDT\components\1c-edt-%VER_EDT%-x86_64\1cedt.exe" -nosplash ^
     -application org.eclipse.equinox.p2.director ^
     -repository https://ditrixnew.github.io/EDT-MCP/ ^
-    -installIU com.ditrix.edt.mcp.server.feature.feature.group ^
+    -installIU com.ozon.edt.mcp.server.feature.feature.group ^
     -profileProperties org.eclipse.update.reconcile=true
 ```
 
@@ -104,9 +104,9 @@ set VER_EDT=2025.2.3+30
 
 Ручной деплой сборки в установку EDT:
 
-1. Положить jar `com.ditrix.edt.mcp.server_<версия>.jar` в `~/.p2/pool/plugins/`
+1. Положить jar `com.ozon.edt.mcp.server_<версия>.jar` в `~/.p2/pool/plugins/`
 2. Прописать в `bundles.info` строку вида
-   `com.ditrix.edt.mcp.server,<версия>,<абс. путь к jar>,4,false`
+   `com.ozon.edt.mcp.server,<версия>,<абс. путь к jar>,4,false`
    (файл: `<установка EDT>/configuration/org.eclipse.equinox.simpleconfigurator/bundles.info`)
 3. Перезапустить EDT.
 
@@ -291,7 +291,7 @@ set VER_EDT=2025.2.3+30
 
 Когда 1C:Workmate (`com.e1c.edt.ai*` 1.0.5) запущен в той же JVM EDT, интеграция двусторонняя:
 - `ask_workmate` запускает полный цикл диалога/инструментов Workmate в ограниченном фоновом задании и возвращает `jobId` (поллится через общий `get_job_status`). Инструмент **поставляется отключённым** — включает его владелец EDT в *Preferences → EDT MCP Server → Tools*.
-- OSGi‑сервис `com.ditrix.edt.mcp.server.bridge.IEdtMcpBridge` позволяет Workmate/JShell вызывать EDT‑MCP инструменты без импорта пакетов плагина.
+- OSGi‑сервис `com.ozon.edt.mcp.server.bridge.IEdtMcpBridge` позволяет Workmate/JShell вызывать EDT‑MCP инструменты без импорта пакетов плагина.
 
 ---
 

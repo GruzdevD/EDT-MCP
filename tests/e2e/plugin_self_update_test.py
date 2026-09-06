@@ -44,7 +44,7 @@ GIT_CONFIG_GLOBAL = os.path.join(HOME, ".1c-tools/gitlab-config")
 
 REMOTE = "https://gitlab.ozon.ru/dmigruzdev/ozon-edt-mcp.git"
 BRANCH = "update-site"
-SYM = "com.ditrix.edt.mcp.server"
+SYM = "com.ozon.edt.mcp.server"
 JAR_PREFIX = SYM + "_"
 
 POOL_DIR = os.path.join(HOME, ".p2", "pool", "plugins")

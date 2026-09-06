@@ -21,7 +21,7 @@ The ratchet first makes the server write a run-unique line of its own and refuse
 anything unless it finds that line back. Locating a workspace does not establish that its logs
 are the ones this server writes; a live workspace can belong to a different EDT instance.
 
-Only entries whose plugin is `com.ditrix.edt.mcp.server` at severity 4 (ERROR), and only
+Only entries whose plugin is `com.ozon.edt.mcp.server` at severity 4 (ERROR), and only
 those stamped at or after this run started. Platform noise is deliberately out of scope: EDT
 logs plenty of its own errors (its Moxel editor touching a stopped namespace, its Xtext
 builder opening a nested transaction, legacy BSL checks throwing) and we neither cause nor
@@ -45,7 +45,7 @@ from harness import (
     RUN_STARTED_AT, HARNESS_DIR, E2ESkip, call, e2e_test, _fail, _workspace_dir,
 )
 
-OUR_PLUGIN = "com.ditrix.edt.mcp.server"
+OUR_PLUGIN = "com.ozon.edt.mcp.server"
 SEVERITY_ERROR = "4"
 BASELINE_FILE = os.path.join(HARNESS_DIR, "edt_log_baseline.txt")
 

@@ -18,7 +18,7 @@ SERVER_SOURCE = (
     ROOT
     / "mcp"
     / "bundles"
-    / "com.ditrix.edt.mcp.server"
+    / "com.ozon.edt.mcp.server"
     / "src"
 )
 REGISTRAR = (

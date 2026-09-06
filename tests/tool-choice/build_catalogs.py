@@ -234,7 +234,7 @@ if "--stage" in sys.argv:
 # and split the questions into batches that carry no ground truth
 import shutil
 questions = json.load(open(os.path.join(HERE, "questions.json"), encoding="utf-8"))
-plugin_guides = os.path.join(ROOT, "mcp/bundles/com.ditrix.edt.mcp.server/guides")
+plugin_guides = os.path.join(ROOT, "mcp/bundles/com.ozon.edt.mcp.server/guides")
 for arm, blind in (("V1", "arm_a"), ("V2", "arm_b"), ("V3", "arm_c"), ("V4", "arm_d")):
     d = os.path.join(HERE, "arms", blind)
     os.makedirs(d, exist_ok=True)

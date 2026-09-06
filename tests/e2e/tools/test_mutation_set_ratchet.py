@@ -40,7 +40,7 @@ import re
 from harness import MODEL_MUTATION_TOOLS, REPO_ROOT, e2e_test, _fail
 
 _TOOLS_IMPL_DIR = os.path.join(
-    REPO_ROOT, "mcp", "bundles", "com.ditrix.edt.mcp.server", "src", "com", "ditrix", "edt",
+    REPO_ROOT, "mcp", "bundles", "com.ozon.edt.mcp.server", "src", "com", "ditrix", "edt",
     "mcp", "server", "tools", "impl")
 
 # How a tool declares, in Java, that it writes. THREE signals, because one was not enough: the
