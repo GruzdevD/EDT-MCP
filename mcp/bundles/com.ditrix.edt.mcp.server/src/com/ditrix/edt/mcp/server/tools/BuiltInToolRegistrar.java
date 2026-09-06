@@ -105,9 +105,14 @@ import com.ditrix.edt.mcp.server.tools.impl.WaitForBreakTool;
 import com.ditrix.edt.mcp.server.tools.impl.WriteModuleSourceTool;
 import com.ditrix.edt.mcp.server.tools.impl.selfupdate.PluginCheckForUpdateTool;
 import com.ditrix.edt.mcp.server.tools.impl.selfupdate.PluginUpdateTool;
+import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaGetArtifactsTool;
 import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaGetExecutionStatusTool;
+import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaGetFeatureTool;
+import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaGetLogTool;
 import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaGetTestReportTool;
+import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaListFeaturesTool;
 import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaListLaunchesTool;
+import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaRunByTagsTool;
 import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaRunFeatureTool;
 
 /**
@@ -258,9 +263,14 @@ public final class BuiltInToolRegistrar
 
         // Vanessa Automation BDD tools (edt-mcp-vanessa)
         catalogue.add(new VanessaListLaunchesTool());
+        catalogue.add(new VanessaListFeaturesTool());
+        catalogue.add(new VanessaGetFeatureTool());
         catalogue.add(new VanessaRunFeatureTool());
+        catalogue.add(new VanessaRunByTagsTool());
         catalogue.add(new VanessaGetExecutionStatusTool());
         catalogue.add(new VanessaGetTestReportTool());
+        catalogue.add(new VanessaGetLogTool());
+        catalogue.add(new VanessaGetArtifactsTool());
 
         registry.replaceAll(catalogue);
         Activator.logInfo("Registered " + registry.getToolCount() + " MCP tools"); //$NON-NLS-1$ //$NON-NLS-2$

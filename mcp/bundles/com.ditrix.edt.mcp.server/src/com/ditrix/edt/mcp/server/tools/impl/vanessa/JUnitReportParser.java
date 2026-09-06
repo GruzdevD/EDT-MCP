@@ -33,8 +33,19 @@ public final class JUnitReportParser
         // Utility class
     }
 
+    /** How much of the per-test detail to include. */
+    public enum Detail
+    {
+        /** Counts, per-suite metadata and overall verdict only — no test cases. */
+        SUMMARY,
+        /** Per-test status and message (attributes). The default. */
+        TESTS,
+        /** Everything in {@link #TESTS} plus system-out attachments and the full failure/error text. */
+        STEPS
+    }
+
     /**
-     * Parses {@code junitPath} into a flat, client-friendly JSON structure.
+     * Parses {@code junitPath} at {@link Detail#TESTS} detail.
      *
      * @param junitPath absolute path to a junit.xml produced by Vanessa
      * @return map describing the report (suites, test case counts, per-test result)
@@ -42,6 +53,21 @@ public final class JUnitReportParser
      * @throws org.xml.sax.SAXException if the file is not well-formed XML
      */
     public static Map<String, Object> parse(String junitPath) throws Exception
+    {
+        return parse(junitPath, Detail.TESTS);
+    }
+
+    /**
+     * Parses {@code junitPath} into a flat, client-friendly JSON structure at the
+     * requested detail level.
+     *
+     * @param junitPath absolute path to a junit.xml produced by Vanessa
+     * @param detail    how much of the per-test detail to include
+     * @return map describing the report (suites, test case counts, per-test result)
+     * @throws java.io.IOException    if the file is missing/unreadable
+     * @throws org.xml.sax.SAXException if the file is not well-formed XML
+     */
+    public static Map<String, Object> parse(String junitPath, Detail detail) throws Exception
     {
         File file = new File(junitPath);
         if (!file.isFile())
@@ -83,46 +109,74 @@ public final class JUnitReportParser
             totalSkipped += ((Integer) suite.get("skipped")).intValue(); //$NON-NLS-1$
 
             List<Map<String, Object>> cases = new ArrayList<>();
-            NodeList children = suiteEl.getChildNodes();
-            for (int k = 0; k < children.getLength(); k++)
+            if (detail != Detail.SUMMARY)
             {
-                Node child = children.item(k);
-                if (child.getNodeType() != Node.ELEMENT_NODE
-                    || !"testcase".equals(child.getNodeName())) //$NON-NLS-1$
+                NodeList children = suiteEl.getChildNodes();
+                for (int k = 0; k < children.getLength(); k++)
                 {
-                    continue;
-                }
-                Element tc = (Element) child;
-                Map<String, Object> c = new LinkedHashMap<>();
-                c.put("name", tc.getAttribute("name")); //$NON-NLS-1$ //$NON-NLS-2$
-                c.put("classname", tc.getAttribute("classname")); //$NON-NLS-1$ //$NON-NLS-2$
-                c.put("time", safeTime(tc.getAttribute("time"))); //$NON-NLS-1$ //$NON-NLS-2$
+                    Node child = children.item(k);
+                    if (child.getNodeType() != Node.ELEMENT_NODE
+                        || !"testcase".equals(child.getNodeName())) //$NON-NLS-1$
+                    {
+                        continue;
+                    }
+                    Element tc = (Element) child;
+                    Map<String, Object> c = new LinkedHashMap<>();
+                    c.put("name", tc.getAttribute("name")); //$NON-NLS-1$ //$NON-NLS-2$
+                    c.put("classname", tc.getAttribute("classname")); //$NON-NLS-1$ //$NON-NLS-2$
+                    c.put("time", safeTime(tc.getAttribute("time"))); //$NON-NLS-1$ //$NON-NLS-2$
 
-                String status = "passed"; //$NON-NLS-1$
-                String detail = null;
-                Element failure = firstChildElement(tc, "failure"); //$NON-NLS-1$
-                Element error = firstChildElement(tc, "error"); //$NON-NLS-1$
-                Element skipped = firstChildElement(tc, "skipped"); //$NON-NLS-1$
-                if (failure != null)
-                {
-                    status = "failed"; //$NON-NLS-1$
-                    detail = failure.getAttribute("message"); //$NON-NLS-1$
+                    String status = "passed"; //$NON-NLS-1$
+                    String message = null;
+                    String fullText = null;
+                    Element failure = firstChildElement(tc, "failure"); //$NON-NLS-1$
+                    Element error = firstChildElement(tc, "error"); //$NON-NLS-1$
+                    Element skipped = firstChildElement(tc, "skipped"); //$NON-NLS-1$
+                    if (failure != null)
+                    {
+                        status = "failed"; //$NON-NLS-1$
+                        message = failure.getAttribute("message"); //$NON-NLS-1$
+                        fullText = firstChildText(failure);
+                        // Vanessa often puts the whole failure into the text content and leaves
+                        // the message attribute empty — keep a short preview as the message.
+                        if ((message == null || message.isEmpty()) && fullText != null)
+                        {
+                            message = clip(fullText);
+                        }
+                    }
+                    else if (error != null)
+                    {
+                        status = "error"; //$NON-NLS-1$
+                        message = error.getAttribute("message"); //$NON-NLS-1$
+                        fullText = firstChildText(error);
+                        if ((message == null || message.isEmpty()) && fullText != null)
+                        {
+                            message = clip(fullText);
+                        }
+                    }
+                    else if (skipped != null)
+                    {
+                        status = "skipped"; //$NON-NLS-1$
+                    }
+                    c.put("status", status);
+                    if (message != null && !message.isEmpty())
+                    {
+                        c.put("message", message);
+                    }
+                    if (detail == Detail.STEPS)
+                    {
+                        List<String> attachments = attachments(firstChildText(tc, "system-out")); //$NON-NLS-1$
+                        if (!attachments.isEmpty())
+                        {
+                            c.put("attachments", attachments);
+                        }
+                        if (fullText != null && !fullText.isEmpty())
+                        {
+                            c.put("detail", fullText);
+                        }
+                    }
+                    cases.add(c);
                 }
-                else if (error != null)
-                {
-                    status = "error"; //$NON-NLS-1$
-                    detail = error.getAttribute("message"); //$NON-NLS-1$
-                }
-                else if (skipped != null)
-                {
-                    status = "skipped"; //$NON-NLS-1$
-                }
-                c.put("status", status);
-                if (detail != null && !detail.isEmpty())
-                {
-                    c.put("message", detail);
-                }
-                cases.add(c);
             }
             suite.put("testcases", cases);
             suites.add(suite);
@@ -183,5 +237,66 @@ public final class JUnitReportParser
             }
         }
         return null;
+    }
+
+    private static String firstChildText(Element parent)
+    {
+        return parent == null ? null : parent.getTextContent();
+    }
+
+    private static String firstChildText(Element parent, String name)
+    {
+        Element el = firstChildElement(parent, name);
+        return el == null ? null : el.getTextContent();
+    }
+
+    /** Length cap for the short message preview before the full detail text. */
+    private static final int MESSAGE_PREVIEW_LEN = 300; //$NON-NLS-1$
+
+    private static String clip(String text)
+    {
+        if (text == null)
+        {
+            return null;
+        }
+        String t = text.trim();
+        if (t.length() <= MESSAGE_PREVIEW_LEN)
+        {
+            return t;
+        }
+        return t.substring(0, MESSAGE_PREVIEW_LEN) + "…"; //$NON-NLS-1$
+    }
+
+    /**
+     * Extracts Vanessa attachment links from a {@code <system-out>} value — the
+     * {@code [[ATTACHMENT|<relative-path>]]} markers Vanessa writes for screenshots.
+     *
+     * @param systemOut the system-out text (may be null)
+     * @return the extracted attachment paths (never null, possibly empty)
+     */
+    private static List<String> attachments(String systemOut)
+    {
+        List<String> out = new ArrayList<>();
+        if (systemOut == null || systemOut.isEmpty())
+        {
+            return out;
+        }
+        String token = "[[ATTACHMENT|"; //$NON-NLS-1$
+        int idx = 0;
+        while ((idx = systemOut.indexOf(token, idx)) >= 0)
+        {
+            int end = systemOut.indexOf("]]", idx); //$NON-NLS-1$
+            if (end < 0)
+            {
+                break;
+            }
+            String v = systemOut.substring(idx + token.length(), end).trim();
+            if (!v.isEmpty())
+            {
+                out.add(v);
+            }
+            idx = end + 2;
+        }
+        return out;
     }
 }

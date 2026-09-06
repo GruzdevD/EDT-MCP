@@ -25,6 +25,7 @@ public class VanessaGetTestReportTool implements IMcpTool
 
     private static final String KEY_JUNIT_REPORT = "junitReportPath"; //$NON-NLS-1$
     private static final String KEY_LAUNCH_ID = "launchId"; //$NON-NLS-1$
+    private static final String KEY_DETAIL = "detail"; //$NON-NLS-1$
 
     @Override
     public String getName()
@@ -49,6 +50,10 @@ public class VanessaGetTestReportTool implements IMcpTool
                 "Absolute path to the junit.xml report. Either this or launchId is required.") //$NON-NLS-1$
             .integerProperty(KEY_LAUNCH_ID,
                 "A launchId from vanessa_run_feature whose recorded junitReportPath is used.") //$NON-NLS-1$
+            .enumProperty(KEY_DETAIL,
+                "How much per-test detail to include: 'summary' (counts + verdict only), 'tests' (default, " //$NON-NLS-1$
+                    + "per-test status/message), or 'steps' (tests plus attachments and the full failure text).", //$NON-NLS-1$
+                "summary", "tests", "steps") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             .build();
     }
 
@@ -90,7 +95,8 @@ public class VanessaGetTestReportTool implements IMcpTool
 
         try
         {
-            Map<String, Object> report = JUnitReportParser.parse(junitPath.trim());
+            JUnitReportParser.Detail detail = resolveDetail(params.get(KEY_DETAIL));
+            Map<String, Object> report = JUnitReportParser.parse(junitPath.trim(), detail);
             return ToolResult.success()
                 .put("report", report) //$NON-NLS-1$
                 .toJson();
@@ -99,5 +105,23 @@ public class VanessaGetTestReportTool implements IMcpTool
         {
             return ToolResult.error("Failed to parse JUnit report '" + junitPath + "': " + e.getMessage()).toJson(); //$NON-NLS-1$
         }
+    }
+
+    /** Maps the {@code detail} parameter onto {@link JUnitReportParser.Detail} (default {@code tests}). */
+    private static JUnitReportParser.Detail resolveDetail(String raw)
+    {
+        if (raw != null)
+        {
+            String v = raw.trim().toLowerCase();
+            if ("summary".equals(v)) //$NON-NLS-1$
+            {
+                return JUnitReportParser.Detail.SUMMARY;
+            }
+            if ("steps".equals(v)) //$NON-NLS-1$
+            {
+                return JUnitReportParser.Detail.STEPS;
+            }
+        }
+        return JUnitReportParser.Detail.TESTS;
     }
 }

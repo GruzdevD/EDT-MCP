@@ -72,7 +72,7 @@ public final class VanessaRunArtifacts
     }
 
     /**
-     * Generates a complete run artifact set for a feature target.
+     * Generates a complete run artifact set for a feature target with the default options.
      *
      * @param config project configuration
      * @param featureTarget absolute path to a feature file or feature directory
@@ -81,19 +81,75 @@ public final class VanessaRunArtifacts
      */
     public static Result generate(VanessaProjectConfig config, String featureTarget) throws IOException
     {
+        return generate(config, featureTarget, GenerateOptions.EMPTY);
+    }
+
+    /**
+     * Generates a complete run artifact set for a feature target.
+     *
+     * @param config project configuration
+     * @param featureTarget absolute path to a feature file or feature directory
+     * @param options per-run overrides (tags, scenarios, retries, screenshots, allure, report dir)
+     * @return the generated artifact paths, plus the out dir
+     * @throws IOException if a VAParams read or an artifact write fails
+     */
+    public static Result generate(VanessaProjectConfig config, String featureTarget,
+        GenerateOptions options) throws IOException
+    {
         Path vaDir = config.vaDir();
-        Path outDir = config.outDir();
+        Path outDir = options != null && options.reportDir != null && !options.reportDir.trim().isEmpty()
+            ? Paths.get(expand(options.reportDir))
+            : config.outDir();
         Files.createDirectories(vaDir);
         Files.createDirectories(outDir.resolve(JUNIT_DIR));
         Files.createDirectories(outDir.resolve(ALLURE_DIR));
 
         String target = expand(featureTarget);
-        String override = writeOverride(config, target, outDir, vaDir);
+        String override = writeOverride(config, target, outDir, vaDir, options);
         return new Result(override, outDir.toString());
     }
 
+    /**
+     * Optional per-run overrides that shape the VAParams override beyond the
+     * defaults {@code run-edt.sh} bakes in. Null/absent fields leave the base
+     * VAParams untouched. Field names mirror the tool parameters and the VAParams
+     * keys are applied in {@link #applyOptions}.
+     */
+    public static final class GenerateOptions
+    {
+        /** Reuse for the common case of "no overrides". */
+        public static final GenerateOptions EMPTY = new GenerateOptions();
+
+        /** {@code СписокТеговОтбор}: run only scenarios/features carrying these tags. */
+        public String tagsFilter;
+        /** {@code СписокТеговИсключение}: skip scenarios/features carrying these tags. */
+        public String tagsIgnore;
+        /** {@code СписокСценариевДляВыполнения}: run only these scenario names. */
+        public String scenarios;
+        /** {@code КоличествоПопытокВыполненияСценария}: retries on a failed scenario (&gt;1). */
+        public Integer retries;
+        /** {@code ДелатьСкриншотПриВозникновенииОшибки}. */
+        public Boolean screenshotsOnError;
+        /** {@code КаталогВыгрузкиСкриншотов}, when screenshots are enabled. */
+        public String screenshotsDir;
+        /** {@code ВыполнятьШагиАсинхронно}. */
+        public Boolean asyncSteps;
+        /** {@code ДелатьОтчетВФорматеАллюр}. */
+        public Boolean allure;
+        /** When set, replaces the project out dir (logs/junit/allure live here). */
+        public String reportDir;
+
+        /** True when no option is set — skips the override pass entirely. */
+        public boolean isEmpty()
+        {
+            return tagsFilter == null && tagsIgnore == null && scenarios == null
+                && retries == null && screenshotsOnError == null && screenshotsDir == null
+                && asyncSteps == null && allure == null && reportDir == null;
+        }
+    }
+
     private static String writeOverride(VanessaProjectConfig config, String featureTarget,
-        Path outDir, Path vaDir) throws IOException
+        Path outDir, Path vaDir, GenerateOptions options) throws IOException
     {
         JsonObject params = readBaseVAParams(config.vaparams);
 
@@ -129,10 +185,52 @@ public final class VanessaRunArtifacts
             featureTarget, config.vaLibs);
         params.add("КаталогиБиблиотек", libs); //$NON-NLS-1$
         configureTestClient(params, config);
+        applyOptions(params, options, outDir);
 
         Path override = vaDir.resolve(RUN_DIR).resolve("run.VAParams.json"); //$NON-NLS-1$
         writeJson(override, params);
         return override.toString();
+    }
+
+    private static void applyOptions(JsonObject params, GenerateOptions options, Path outDir)
+    {
+        if (options == null)
+        {
+            return;
+        }
+        if (options.tagsFilter != null)
+        {
+            params.addProperty("СписокТеговОтбор", options.tagsFilter); //$NON-NLS-1$
+        }
+        if (options.tagsIgnore != null)
+        {
+            params.addProperty("СписокТеговИсключение", options.tagsIgnore); //$NON-NLS-1$
+        }
+        if (options.scenarios != null)
+        {
+            params.addProperty("СписокСценариевДляВыполнения", options.scenarios); //$NON-NLS-1$
+        }
+        if (options.retries != null)
+        {
+            params.addProperty("КоличествоПопытокВыполненияСценария", options.retries); //$NON-NLS-1$
+        }
+        if (options.screenshotsOnError != null)
+        {
+            params.addProperty("ДелатьСкриншотПриВозникновенииОшибки", options.screenshotsOnError); //$NON-NLS-1$
+        }
+        if (options.screenshotsDir != null)
+        {
+            params.addProperty("КаталогВыгрузкиСкриншотов",
+                outDir.resolve(expand(options.screenshotsDir)).toString()); //$NON-NLS-1$
+        }
+        if (options.asyncSteps != null)
+        {
+            params.addProperty("ВыполнятьШагиАсинхронно", options.asyncSteps); //$NON-NLS-1$
+        }
+        if (options.allure != null)
+        {
+            params.addProperty("ДелатьОтчетВФорматеАллюр", options.allure); //$NON-NLS-1$
+        }
     }
 
     private static JsonObject readBaseVAParams(String vaparamsPath) throws IOException

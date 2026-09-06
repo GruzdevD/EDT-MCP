@@ -54,6 +54,20 @@ public class VanessaRunFeatureTool implements IMcpTool
     private static final String KEY_PROJECT = "project"; //$NON-NLS-1$
     private static final String KEY_FEATURE = "feature"; //$NON-NLS-1$
     private static final String KEY_LAUNCH_CONFIGURATION = "launchConfigurationName"; //$NON-NLS-1$
+    private static final String KEY_TAGS_FILTER = "tagsFilter"; //$NON-NLS-1$
+    private static final String KEY_TAGS_IGNORE = "tagsIgnore"; //$NON-NLS-1$
+    private static final String KEY_SCENARIOS = "scenarios"; //$NON-NLS-1$
+    private static final String KEY_RETRIES = "retries"; //$NON-NLS-1$
+    private static final String KEY_SCREENSHOTS_ON_ERROR = "screenshotsOnError"; //$NON-NLS-1$
+    private static final String KEY_ASYNC_STEPS = "asyncSteps"; //$NON-NLS-1$
+    private static final String KEY_ALLURE = "allure"; //$NON-NLS-1$
+    private static final String KEY_REPORT_DIR = "reportDir"; //$NON-NLS-1$
+
+    /** LowerCamelCase run_feature parameters that map onto {@link GenerateOptions}. */
+    static final String[] OPTION_KEYS = {
+        KEY_TAGS_FILTER, KEY_TAGS_IGNORE, KEY_SCENARIOS, KEY_RETRIES, KEY_SCREENSHOTS_ON_ERROR,
+        KEY_ASYNC_STEPS, KEY_ALLURE, KEY_REPORT_DIR
+    };
 
     @Override
     public String getName()
@@ -83,6 +97,22 @@ public class VanessaRunFeatureTool implements IMcpTool
             .stringProperty(KEY_LAUNCH_CONFIGURATION,
                 "Exact name of the EDT launch configuration that starts the 1C client. Defaults to the project's " //$NON-NLS-1$
                     + "EDT_LAUNCH from env.sh.") //$NON-NLS-1$
+            .stringProperty(KEY_TAGS_FILTER,
+                "Run only scenarios/features carrying these Vanessa tags (comma/space separated), e.g. 'smoke,regress'.") //$NON-NLS-1$
+            .stringProperty(KEY_TAGS_IGNORE,
+                "Skip scenarios/features carrying these Vanessa tags.") //$NON-NLS-1$
+            .stringProperty(KEY_SCENARIOS,
+                "Run only these scenario names (comma-separated), e.g. 'Создание справочника'.") //$NON-NLS-1$
+            .integerProperty(KEY_RETRIES,
+                "Retry count for a failed scenario (>=1; 2 = one retry after a failure).") //$NON-NLS-1$
+            .booleanProperty(KEY_SCREENSHOTS_ON_ERROR,
+                "Take a screenshot when a scenario step fails.") //$NON-NLS-1$
+            .booleanProperty(KEY_ASYNC_STEPS,
+                "Run steps asynchronously (slow/async mode).") //$NON-NLS-1$
+            .booleanProperty(KEY_ALLURE,
+                "Generate an Allure HTML report next to the junit one.") //$NON-NLS-1$
+            .stringProperty(KEY_REPORT_DIR,
+                "Absolute out dir for logs/junit/allure instead of the project default (~/.1c-tools/vanessa/out/<project>).") //$NON-NLS-1$
             .build();
     }
 
@@ -113,24 +143,59 @@ public class VanessaRunFeatureTool implements IMcpTool
             feature = config.defaultFeatureTarget();
         }
 
-        // Generate the run artifacts VA consumes (the same ones run-edt.sh makes).
-        VanessaRunArtifacts.Result artifacts;
-        try
-        {
-            artifacts = VanessaRunArtifacts.generate(config, feature);
-        }
-        catch (IOException e)
-        {
-            return ToolResult.error("Failed to generate Vanessa run artifacts: " + e.getMessage()).toJson(); //$NON-NLS-1$
-        }
-
-        // Launch VA_Runner through the shared EDT launch pipeline so the existing
-        // DB-update / session-handling machinery is reused, not re-implemented.
         String configName = params.get(KEY_LAUNCH_CONFIGURATION);
         if (configName == null || configName.trim().isEmpty())
         {
             configName = config.edtLaunch;
         }
+
+        final VanessaLaunchOutcome out;
+        try
+        {
+            out = launch(config, feature, buildOptions(params), configName);
+        }
+        catch (IOException e)
+        {
+            return ToolResult.error("Failed to generate Vanessa run artifacts: " + e.getMessage()).toJson(); //$NON-NLS-1$
+        }
+        if (!out.success)
+        {
+            // rawResponse already carries the LaunchTool {@code success:false} JSON.
+            return out.rawResponse;
+        }
+
+        return ToolResult.success()
+            .put("launchId", out.id) //$NON-NLS-1$
+            .put("project", out.project) //$NON-NLS-1$
+            .put("feature", out.feature) //$NON-NLS-1$
+            .put("configuration", out.configuration) //$NON-NLS-1$
+            .put("status", "launching") //$NON-NLS-1$
+            .put("outDir", out.outDir) //$NON-NLS-1$
+            .put("junitReportPath", out.junitReportPath) //$NON-NLS-1$
+            .put("options", appliedOptions(params)) //$NON-NLS-1$
+            .toJson();
+    }
+
+    /**
+     * Launches a Vanessa run for the caller-shaped pieces, shared between this
+     * tool and {@code vanessa_run_by_tags} so the pipeline is never duplicated:
+     * generates the run artifacts VA consumes, launches VA_Runner through the
+     * shared EDT launch pipeline ({@link LaunchTool}) so the existing DB-update /
+     * session-handling machinery is reused, and registers a {@link RunHandle} for
+     * the status/report tools.
+     *
+     * @param config project configuration
+     * @param feature feature file or directory to run
+     * @param options per-run overrides (may be empty)
+     * @param configName EDT launch configuration name
+     * @return the launch outcome; the handle is registered even on a rejected launch
+     * @throws IOException if artifact generation fails
+     */
+    static VanessaLaunchOutcome launch(VanessaProjectConfig config, String feature,
+        VanessaRunArtifacts.GenerateOptions options, String configName) throws IOException
+    {
+        VanessaRunArtifacts.Result artifacts =
+            VanessaRunArtifacts.generate(config, feature, options);
 
         Map<String, String> launchParams = new LinkedHashMap<>();
         launchParams.put("launchConfigurationName", configName); //$NON-NLS-1$
@@ -152,28 +217,97 @@ public class VanessaRunFeatureTool implements IMcpTool
         }
         catch (Exception e)
         {
-            return ToolResult.error("Failed to launch Vanessa run: " + e.getMessage()).toJson(); //$NON-NLS-1$
+            return new VanessaLaunchOutcome(false,
+                ToolResult.error("Failed to launch Vanessa run: " + e.getMessage()).toJson(), //$NON-NLS-1$
+                0L, config.project, feature, configName, artifacts.outDir, null);
         }
 
         // Register the handle up front (even when EDT declined the launch) so
         // vanessa_get_execution_status can report the failure back to the client.
         RunHandle handle = VanessaLaunchRunner.INSTANCE.register(
-            project.trim(), feature, artifacts.outDir);
+            config.project, feature, artifacts.outDir);
         if (isError(launchResponse))
         {
             handle.launchError = errorText(launchResponse);
-            return launchResponse;
+            return new VanessaLaunchOutcome(false, launchResponse, 0L,
+                config.project, feature, configName, artifacts.outDir, handle.junitReportPath);
         }
+        return new VanessaLaunchOutcome(true, launchResponse, handle.id,
+            config.project, feature, configName, artifacts.outDir, handle.junitReportPath);
+    }
 
-        return ToolResult.success()
-            .put("launchId", handle.id) //$NON-NLS-1$
-            .put("project", project.trim()) //$NON-NLS-1$
-            .put("feature", feature) //$NON-NLS-1$
-            .put("configuration", configName) //$NON-NLS-1$
-            .put("status", "launching") //$NON-NLS-1$
-            .put("outDir", artifacts.outDir) //$NON-NLS-1$
-            .put("junitReportPath", handle.junitReportPath) //$NON-NLS-1$
-            .toJson();
+    /** Builds the per-run {@link GenerateOptions} from the tool parameters (null = absent). */
+    private static VanessaRunArtifacts.GenerateOptions buildOptions(Map<String, String> params)
+    {
+        VanessaRunArtifacts.GenerateOptions o = new VanessaRunArtifacts.GenerateOptions();
+        o.tagsFilter = param(params, KEY_TAGS_FILTER);
+        o.tagsIgnore = param(params, KEY_TAGS_IGNORE);
+        o.scenarios = param(params, KEY_SCENARIOS);
+        o.retries = integerParam(params, KEY_RETRIES);
+        o.screenshotsOnError = boolParam(params, KEY_SCREENSHOTS_ON_ERROR);
+        o.asyncSteps = boolParam(params, KEY_ASYNC_STEPS);
+        o.allure = boolParam(params, KEY_ALLURE);
+        o.reportDir = param(params, KEY_REPORT_DIR);
+        return o;
+    }
+
+    /** Echoes back only the options that were actually passed, for transparency. */
+    private static Map<String, Object> appliedOptions(Map<String, String> params)
+    {
+        Map<String, Object> applied = new LinkedHashMap<>();
+        for (String k : new String[] { KEY_TAGS_FILTER, KEY_TAGS_IGNORE, KEY_SCENARIOS, KEY_REPORT_DIR })
+        {
+            String v = param(params, k);
+            if (v != null)
+            {
+                applied.put(k, v);
+            }
+        }
+        Integer retries = integerParam(params, KEY_RETRIES);
+        if (retries != null)
+        {
+            applied.put(KEY_RETRIES, retries);
+        }
+        for (String k : new String[] { KEY_SCREENSHOTS_ON_ERROR, KEY_ASYNC_STEPS, KEY_ALLURE })
+        {
+            Boolean b = boolParam(params, k);
+            if (b != null)
+            {
+                applied.put(k, b);
+            }
+        }
+        return applied;
+    }
+
+    private static String param(Map<String, String> p, String key)
+    {
+        String v = p.get(key);
+        return v != null && !v.trim().isEmpty() ? v.trim() : null;
+    }
+
+    private static Integer integerParam(Map<String, String> p, String key)
+    {
+        String v = param(p, key);
+        if (v == null)
+        {
+            return null;
+        }
+        try
+        {
+            return Integer.valueOf(v);
+        }
+        catch (NumberFormatException e)
+        {
+            // Malformed numeric input degrades to "absent" — the schema already told
+            // the client it must be an integer, so don't fail the run over a typo.
+            return null;
+        }
+    }
+
+    private static Boolean boolParam(Map<String, String> p, String key)
+    {
+        String v = param(p, key);
+        return v == null ? null : Boolean.valueOf(v);
     }
 
     /** True when a {@link LaunchTool} response is an error ({@code success:false}). */

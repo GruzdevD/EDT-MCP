@@ -62,6 +62,18 @@ public class VanessaRunFeatureToolTest
     }
 
     @Test
+    public void testSchemaDeclaresPerRunOptions()
+    {
+        String schema = new VanessaRunFeatureTool().getInputSchema();
+        assertNotNull(schema);
+        // New lowerCamelCase run options must be visible to schema-driven clients.
+        for (String key : VanessaRunFeatureTool.OPTION_KEYS)
+        {
+            assertTrue("schema should declare '" + key + "'", schema.contains(key)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    @Test
     public void testExecuteWithoutProjectFails()
     {
         String result = new VanessaRunFeatureTool().execute(new HashMap<>());
