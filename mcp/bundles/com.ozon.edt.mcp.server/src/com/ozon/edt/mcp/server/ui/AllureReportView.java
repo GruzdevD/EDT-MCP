@@ -20,6 +20,7 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.views.IViewDescriptor;
 import org.eclipse.ui.part.ViewPart;
 
 import com.ozon.edt.mcp.server.Activator;
@@ -166,6 +167,57 @@ public class AllureReportView extends ViewPart
                 org.eclipse.ui.views.IViewDescriptor desc = PlatformUI.getWorkbench()
                     .getViewRegistry().find(ID);
                 Activator.logInfo("Allure view: descriptor " + (desc == null ? "NOT FOUND" : "present")); //$NON-NLS-1$ //$NON-NLS-2$
+
+                // Decisive control probe (one shot): are the OTHER views of this same
+                // bundle registered at all? That tells us whether the whole
+                // org.eclipse.ui.views contribution channel works in this E4 EDT or
+                // whether NO plugin.xml <view> of ours is ever read.
+                IViewDescriptor[] all = PlatformUI.getWorkbench().getViewRegistry()
+                    .getViews();
+                Activator.logInfo("Allure view: total registry views=" + (all == null ? -1 : all.length)); //$NON-NLS-1$ //$NON-NLS-2$
+                if (all != null)
+                {
+                    int own = 0;
+                    StringBuilder others = new StringBuilder();
+                    for (IViewDescriptor v : all)
+                    {
+                        String vid = v.getId();
+                        if (vid != null && vid.startsWith("com.ozon.edt.mcp.server")) //$NON-NLS-1$
+                        {
+                            own++;
+                            Activator.logInfo("Allure view: OWN view registered -> " + vid); //$NON-NLS-1$ //$NON-NLS-2$
+                        }
+                        else if (others.length() < 1600)
+                        {
+                            others.append(vid).append(", "); //$NON-NLS-1$
+                        }
+                    }
+                    Activator.logInfo("Allure view: own views count=" + own + "; sample others: " + others); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                // What does the Equinox extension registry itself think about this point?
+                try
+                {
+                    org.eclipse.core.runtime.IConfigurationElement[] el = org.eclipse.core.runtime.Platform
+                        .getExtensionRegistry().getConfigurationElementsFor("org.eclipse.ui.views"); //$NON-NLS-1$
+                    int ozon = 0;
+                    String found = "";
+                    for (org.eclipse.core.runtime.IConfigurationElement c : el)
+                    {
+                        String clazz = c.getAttribute("class"); //$NON-NLS-1$
+                        if (clazz != null && clazz.contains("com.ozon.edt.mcp.server")) //$NON-NLS-1$
+                        {
+                            ozon++;
+                            found += " " + clazz;
+                        }
+                    }
+                    Activator.logInfo("Allure view: ext-registry org.eclipse.ui.views elements=" + el.length //$NON-NLS-1$ //$NON-NLS-2$
+                        + "; our class attrs(" + ozon + "):" + found); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                catch (Throwable t2)
+                {
+                    Activator.logError("Allure view: ext registry query failed", t2); //$NON-NLS-1$
+                }
+
                 Object probe = desc == null ? null : desc.createView();
                 Activator.logInfo("Allure view: direct descriptor.createView() -> " + probe); //$NON-NLS-1$ //$NON-NLS-2$
             }
