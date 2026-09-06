@@ -157,7 +157,22 @@ public class AllureReportView extends ViewPart
         }
         catch (PartInitException e)
         {
-            Activator.logError("Failed to open the Allure report view", e); //$NON-NLS-1$
+            // EDT's E4-compat WorkbenchPage turns a failed view creation into a
+            // cause-less PartInitException. Re-probe the view descriptor directly so
+            // the real cause is logged (createPart both throws and returns non-null
+            // on success, so a NULL here pinpoints a silent registry failure).
+            try
+            {
+                org.eclipse.ui.views.IViewDescriptor desc = PlatformUI.getWorkbench()
+                    .getViewRegistry().find(ID);
+                Activator.logInfo("Allure view: descriptor " + (desc == null ? "NOT FOUND" : "present")); //$NON-NLS-1$ //$NON-NLS-2$
+                Object probe = desc == null ? null : desc.createView();
+                Activator.logInfo("Allure view: direct descriptor.createView() -> " + probe); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Throwable t)
+            {
+                Activator.logError("Allure view: direct descriptor.createPart() failed", t); //$NON-NLS-1$
+            }
         }
     }
 }
