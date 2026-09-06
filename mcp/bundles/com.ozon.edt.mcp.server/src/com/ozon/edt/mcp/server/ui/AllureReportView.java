@@ -10,9 +10,11 @@ package com.ozon.edt.mcp.server.ui;
 
 import java.nio.file.Path;
 
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.browser.Browser;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Label;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
@@ -37,10 +39,33 @@ public class AllureReportView extends ViewPart
 
     private Browser browser;
 
+    /** URL handed to a freshly-created view; consumed by {@link #createPartControl}. */
+    private static volatile String pendingUrl;
+
     @Override
     public void createPartControl(Composite parent)
     {
-        browser = new Browser(parent, org.eclipse.swt.SWT.NONE);
+        String url = pendingUrl;
+        pendingUrl = null;
+        try
+        {
+            browser = new Browser(parent, SWT.NONE);
+            if (url != null)
+            {
+                browser.setUrl(url);
+            }
+        }
+        catch (Throwable t)
+        {
+            // The SWT browser engine is unavailable on this platform/build. Rather
+            // than fail part creation (which E4 surfaces as a cause-less
+            // "Could not create part"), log the real cause and keep the view usable
+            // by showing the served URL for manual opening.
+            Activator.logError("Allure report view: SWT browser unavailable, showing URL fallback", t); //$NON-NLS-1$
+            Label label = new Label(parent, SWT.WRAP);
+            label.setText("Allure report available at: " + (url == null ? "(none)" : url) //$NON-NLS-1$ //$NON-NLS-2$
+                + "\nOpen it manually, or call vanessa_open_allure_report with detached=true."); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     @Override
@@ -95,6 +120,9 @@ public class AllureReportView extends ViewPart
             return url;
         }
 
+        // Hand the URL to the view so createPartControl can render it (or, when the
+        // browser is unavailable, show it as a fallback) before any async navigation.
+        pendingUrl = url;
         display.asyncExec(() -> openOnUiThread(url));
         return url;
     }
