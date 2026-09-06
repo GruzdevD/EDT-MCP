@@ -319,7 +319,7 @@ set VER_EDT=2025.2.3+30
 | git + доступ к GitLab | token / ssh | `git ls-remote git@gitlab.ozon.ru:dmigruzdev/ozon-edt-mcp.git` |
 | EDT **2026.1/2026.2** | установлена через 1CEStart | в `~/Library/Application Support/1C/1cedtstart/installations/` |
 
-Для BDD-инструментов также нужен рабочий контур Vanessa Automation (проект с `env.sh`, ИБ) и, для отчётов, [Allure commandline](#5-allure-cli-для-vanessa_open_allure_report).
+Для BDD-инструментов также нужен рабочий контур Vanessa Automation — **OneScript + vrunner** + сама **Vanessa Automation** + проект с `env.sh` и `.feature`-сценариями (см. [раздел 6](#6-окружение-vanessa-automation--onescript)) — и, для отчётов, [Allure commandline](#5-allure-cli-для-vanessa_open_allure_report).
 
 ### 1. Клонировать форк
 
@@ -420,7 +420,49 @@ mv ~/.1c-tools/allure/allure-2.46.1 "$ALLURE" 2>/dev/null || true
 
 Плагин находит CLI по `~/.1c-tools/allure/allure-*/bin/allure` (или через параметр `allureBin` / PATH). Генерация идёт субпроцессом с явным `JAVA_HOME` плагина.
 
-### 6. Smoke-проверка BDD-цикла (опционально)
+### 6. Окружение Vanessa Automation / OneScript
+
+BDD-инструменты плагина не содержат саму Vanessa — они лишь запускают прогон через EDT. Поэтому нужно подготовить контур VA: **OneScript + vrunner** (движок прогона) + **Vanessa Automation** (библиотека фич/обработка) + каталог `.feature`-сценариев + `env.sh` проекта.
+
+**OneScript (oscript/opm)** — рантайм, на котором живут скрипты 1С и пакетный менеджер `opm`:
+
+```bash
+# скачать стабильный дистрибутив OneScript с GitHub (oscript-library/onescript)
+curl -L -o /tmp/onescript.zip \
+  https://github.com/oscript-library/onescript/releases/download/1.9.1/onescript-1.9.1-macos.zip
+unzip -q /tmp/onescript.zip -d ~/.local/onescript
+export PATH="$PATH:$HOME/.local/onescript/bin"
+oscript --version      # → OneScript 1.9.x
+opm --version
+```
+
+**vrunner (vanessa-runner)** — CLI-обвязка над Vanessa (запуск, статус, JUnit/Allure-вывод). Ставится пакетом OneScript:
+
+```bash
+opm install vanessa-runner
+vrunner --version      # путь в ~/.local/onescript/bin, автоконфиг через env.sh
+```
+
+> [!NOTE]
+> Сверьтесь с актуальной инструкцией проекта [Vanessa Runner](https://github.com/vanessa-runner/vanessa-runner) — там же паттерны `VAParams` и запуска. (Фич-список и версии меняются.)
+
+**Vanessa Automation** — собственно библиотека Gherkin-шагов + обработка. Скачивается с GitHub ([ivanovms/vanessa-automation](https://github.com/ivanovms/vanessa-automation)) и кладётся куда-нибудь рядом:
+
+```bash
+curl -L -o /tmp/va.zip https://github.com/ivanovms/vanessa-automation/archive/refs/heads/develop.zip
+unzip -q /tmp/va.zip -d ~/Downloads/vanessa-automation
+ls ~/Downloads/vanessa-automation/   # каталоги features/, epf/, tools/...
+```
+
+**Настройка проекта** (один раз на базу). MCP-тулы читают параметры из `~/.1c-tools/vanessa/projects/<project>/env.sh`: ИБ, пользователь/пароль БД, **порт MCP**, launch-конфиг EDT, каталог фич. Плюс локальный оверрайд `VAParams` с абсолютными путями вывода (`out/{BDD.log,BDDStatus.log,junit,allure}`). Весь прогон свёрнут у нас в `~/.1c-tools/vanessa/run.sh <project> [фича]` (вне git), а `.feature`-сценарии лежат в `~/.1c-tools/vanessa/features/<project>/`.
+
+**Известные грабли (mac):**
+- `--pathvanessa` должен указывать на **настоящий** `vanessa-automation.epf`, а не на симлинк — Vanessa ищет `locales/*.epf` рядом с файлом, и симлинк валится с «Файл не обнаружен locales/Messages.epf».
+- Резолвить `--workspace` / `--root`, иначе статус считается не туда и `vrunner` врёт по результату.
+- На mac **выключить VanessaExt** (`ИспользоватьКомпонентуVanessaExt=False` и связанные): в сборках VA нет мак-бинаря внешней компоненты → 1С всплывает «Установка внешней компоненты».
+- Скриншоты: в Windows VA по умолчанию зовёт `nircmd`; на mac в `VAParams`/скрипте заменить на `/usr/sbin/screencapture -x `.
+
+### 7. Smoke-проверка BDD-цикла (опционально)
 
 1. В `~/.1c-tools/vanessa/projects/<project>/env.sh` настроены ИБ, пользователь/пароль, launch-конфиг, каталог фич, **порт MCP**.
 2. `vanessa_run_feature` (project + feature) → `launchId`;
