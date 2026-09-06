@@ -324,10 +324,10 @@ set VER_EDT=2025.2.3+30
 
 ### Быстрый путь: установка по готовому jar (без форка и сборки)
 
-1. Достать jar `com.ozon.edt.mcp.server_<версия>.jar`:
-   - из опубликованного **install-zip** (если он есть у вас в контуре), или
-   - прямо из ветки `update-site` репозитория (файл `plugins/com.ozon.edt.mcp.server_*.jar`), или
-   - с любой машины, где плагин уже стоит (`~/.p2/pool/plugins/`).
+1. Скачать **install-zip** (jar + `INSTALL.md`) из ветки `update-site` репозитория:
+   `https://gitlab.ozon.ru/dmigruzdev/ozon-edt-mcp/-/raw/update-site/install/edt-mcp-vanessa-install-1.0.0.202609060930.zip`
+   (приватный репозиторий — нужен доступ к GitLab; внутри — только `plugins/*.jar` и `INSTALL.md`).
+   Альтернативно — взять jar из `plugins/` ветки `update-site` или с любой машины, где плагин уже стоит (`~/.p2/pool/plugins/`).
 2. Прогнать шаги **3 (установка в EDT)** и далее по этому руководству; разделы «Клонировать форк»/«Собрать плагин» — пропустить.
 
 ### 0. Предпосылки (путь разработчика)
