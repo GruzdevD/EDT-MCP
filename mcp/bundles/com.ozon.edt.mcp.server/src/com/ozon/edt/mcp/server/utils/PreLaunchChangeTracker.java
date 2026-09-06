@@ -144,6 +144,18 @@ public final class PreLaunchChangeTracker
         new QualifiedName(Activator.PLUGIN_ID, "prelaunch.contentFingerprint"); //$NON-NLS-1$
 
     /**
+     * Key of the persistent property holding the wall-clock time (epoch millis) of
+     * the last successful pre-launch preparation of a project. Written together
+     * with {@link #FINGERPRINT_PROPERTY} and cleared with it, so a project that
+     * reads as "prepared" also tells us HOW RECENTLY it was prepared. Its purpose
+     * is the conditional-settle fast path: a stale {@code UPDATED} cache flag is
+     * only plausible shortly after a preparation, so knowing the age lets the
+     * launch settle window be skipped when the project has been stable for a while.
+     */
+    static final QualifiedName PREP_TIMESTAMP_PROPERTY =
+        new QualifiedName(Activator.PLUGIN_ID, "prelaunch.preparedAtMillis"); //$NON-NLS-1$
+
+    /**
      * Name of the Git store, excluded from BOTH change signals. When a project's
      * own folder is the repository root, {@code .git} is part of the resource tree
      * (a folder, or a file in a worktree checkout) and every ordinary Git operation
@@ -201,11 +213,34 @@ public final class PreLaunchChangeTracker
         /** @return the stored fingerprint, or {@code null} when there is none */
         String load(IProject project);
 
-        /** Records {@code fingerprint} as the prepared content state of {@code project}. */
+        /**
+         * Records {@code fingerprint} as the prepared content state of
+         * {@code project} WITHOUT refreshing {@link #preparedAtMillis}. The prepared
+         * age is how the conditional-settle fast path tells "stable for a while"
+         * from "just regenerated", so it is only updated by
+         * {@link #touchPrepared} — i.e. only when the project is actually
+         * recomputed, never by an ordinary re-certification of unchanged content.
+         */
         void save(IProject project, String fingerprint);
 
         /** Drops any stored fingerprint, so the project reads as never prepared. */
         void clear(IProject project);
+
+        /**
+         * Records the current time as the moment this project's derived data was
+         * regenerated. Called alongside a {@link #save} ONLY when the project was
+         * actually recomputed in this preparation; a fast-path launch that merely
+         * re-certified unchanged content must NOT move the age clock.
+         */
+        void touchPrepared(IProject project);
+
+        /**
+         * @param project the project to query
+         * @return the wall-clock time (epoch millis) of the last
+         *         {@link #touchPrepared}, or {@code -1} when the project has no
+         *         recorded regeneration (never prepared, or cleared)
+         */
+        long preparedAtMillis(IProject project);
     }
 
     /** Live fingerprinter (production: the workspace walk below). */
@@ -385,8 +420,33 @@ public final class PreLaunchChangeTracker
             else
             {
                 store.save(project, fingerprint);
+                // A project that was DIRTY in the snapshot was actually recomputed
+                // now — record the moment, so the conditional-settle fast path can
+                // tell "just regenerated" from "stable for a while". A project that
+                // was already clean (no recompute) is merely re-certified and must
+                // NOT move the age clock, or every routine launch would reset the
+                // settle window it is trying to skip.
+                if (snapshot != null && snapshot.generations.containsKey(name))
+                {
+                    store.touchPrepared(project);
+                }
             }
         }
+    }
+
+    /**
+     * @param project the project to query ({@code null} or empty-safe)
+     * @return how long ago (in millis) this project's last successful pre-launch
+     *         preparation happened, or {@code -1} when it has no recorded
+     *         preparation. Used by the conditional-settle decision: a prepared age
+     *         that already exceeds the settle window means the project has been
+     *         stable for a while, so a cached {@code UPDATED} application state can
+     *         be trusted without re-settling.
+     */
+    public static long preparedAgeMillis(IProject project)
+    {
+        long at = store.preparedAtMillis(project);
+        return at < 0L ? -1L : System.currentTimeMillis() - at;
     }
 
     /**
@@ -708,23 +768,13 @@ public final class PreLaunchChangeTracker
         @Override
         public void save(IProject project, String fingerprint)
         {
-            write(project, fingerprint);
-        }
-
-        @Override
-        public void clear(IProject project)
-        {
-            write(project, null);
-        }
-
-        private static void write(IProject project, String value)
-        {
+            if (!writable(project))
+            {
+                return;
+            }
             try
             {
-                if (project.exists() && project.isOpen())
-                {
-                    project.setPersistentProperty(FINGERPRINT_PROPERTY, value);
-                }
+                project.setPersistentProperty(FINGERPRINT_PROPERTY, fingerprint);
             }
             catch (CoreException e)
             {
@@ -732,6 +782,74 @@ public final class PreLaunchChangeTracker
                 Activator.logError("Pre-launch: could not record the prepared-content marker of " //$NON-NLS-1$
                     + project.getName(), e);
             }
+        }
+
+        @Override
+        public void clear(IProject project)
+        {
+            if (!writable(project))
+            {
+                return;
+            }
+            try
+            {
+                project.setPersistentProperty(FINGERPRINT_PROPERTY, null);
+                project.setPersistentProperty(PREP_TIMESTAMP_PROPERTY, null);
+            }
+            catch (CoreException e)
+            {
+                // Not fatal: the next launch just recomputes this project again.
+                Activator.logError("Pre-launch: could not clear the prepared-content marker of " //$NON-NLS-1$
+                    + project.getName(), e);
+            }
+        }
+
+        @Override
+        public void touchPrepared(IProject project)
+        {
+            if (!writable(project))
+            {
+                return;
+            }
+            try
+            {
+                project.setPersistentProperty(PREP_TIMESTAMP_PROPERTY,
+                    Long.toString(System.currentTimeMillis()));
+            }
+            catch (CoreException e)
+            {
+                // Not fatal: the next launch just recomputes this project again.
+                Activator.logError("Pre-launch: could not record the prepared-at marker of " //$NON-NLS-1$
+                    + project.getName(), e);
+            }
+        }
+
+        @Override
+        public long preparedAtMillis(IProject project)
+        {
+            try
+            {
+                if (!writable(project))
+                {
+                    return -1L;
+                }
+                String value = project.getPersistentProperty(PREP_TIMESTAMP_PROPERTY);
+                return value == null ? -1L : Long.parseLong(value);
+            }
+            catch (CoreException | NumberFormatException e)
+            {
+                // A corrupt or unreadable timestamp must read as "unknown" (the
+                // caller then settles conservatively), never as a recent prepare.
+                Activator.logError("Pre-launch: could not read the prepared-at marker of " //$NON-NLS-1$
+                    + project.getName(), e);
+                return -1L;
+            }
+        }
+
+        /** @return {@code false} when the project is gone/closed and cannot hold properties */
+        private static boolean writable(IProject project)
+        {
+            return project.exists() && project.isOpen();
         }
     }
 

@@ -455,6 +455,21 @@ public class LaunchLifecycleUtilsPrepareTest
             {
                 // The prepared marker is not what these tests assert.
             }
+
+            @Override
+            public void touchPrepared(IProject project)
+            {
+                // These tests do not exercise the regenerated-age clock.
+            }
+
+            @Override
+            public long preparedAtMillis(IProject project)
+            {
+                // These tests fix the scope's prepared state via load; the age is
+                // only consulted on the conditional-settle path, which needs the
+                // prepared marker (load -> clean) to be consistent.
+                return -1L;
+            }
         });
         PreLaunchChangeTracker.setFingerprinterForTest(project -> {
             phaseDuringDetection.set(stages.isEmpty() ? null : stages.get(stages.size() - 1));
@@ -533,5 +548,135 @@ public class LaunchLifecycleUtilsPrepareTest
 
         assertTrue("a caller without a phase sink must still succeed: " + result.getError(),
             result.isOk());
+    }
+
+    // ============ conditional settle — the pre-launch fast path ============
+
+    /**
+     * Wires the change gate as CLEAN (content matches the prepared marker, no
+     * recompute) while reporting the project's last preparation as
+     * {@code preparedAgeMillis} ago. The observed difference between settle=true and
+     * settle=false is the number of {@code getUpdateState} calls: the settle path
+     * re-polls across the window, the fast path trusts the cached UPDATED at once.
+     */
+    private void wireCleanGate(long preparedAgeMillis)
+    {
+        PreLaunchChangeTracker.setDiskSyncForTest(project -> true);
+        PreLaunchChangeTracker.setFingerprinterForTest(project -> "fp");
+        PreLaunchChangeTracker.setStoreForTest(new PreLaunchChangeTracker.FingerprintStore() {
+            @Override
+            public String load(IProject project)
+            {
+                return "fp";
+            }
+
+            @Override
+            public void save(IProject project, String fingerprint)
+            {
+                // Not what these tests assert.
+            }
+
+            @Override
+            public void clear(IProject project)
+            {
+                // Not what these tests assert.
+            }
+
+            @Override
+            public void touchPrepared(IProject project)
+            {
+                // Not relevant: these tests drive the age via the wire-in parameter.
+            }
+
+            @Override
+            public long preparedAtMillis(IProject project)
+            {
+                return preparedAgeMillis < 0L
+                    ? -1L
+                    : System.currentTimeMillis() - preparedAgeMillis;
+            }
+        });
+    }
+
+    /**
+     * The delivered optimization: a STABLE project (no recompute in this call, and
+     * its last preparation is older than the settle window) must take the fast path
+     * and skip the ~5s settle — a cached UPDATED on source nobody has touched
+     * recently is authoritative. The settle window is set to 20ms in {@link #shrinkTimings},
+     * so "older than the window" is comfortably exceeded.
+     */
+    @Test
+    public void testStableProjectSkipsTheSettleWindow() throws Exception
+    {
+        wireCleanGate(30_000L); // prepared 30s ago -> well beyond the 20ms window
+
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(RUNTIME_APP_ID)))
+            .thenReturn(Optional.of(app));
+        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.UPDATED);
+
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mgr, 2, null);
+
+        assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
+        verify(mgr, org.mockito.Mockito.times(1)).getUpdateState(app);
+    }
+
+    /**
+     * A project prepared RECENTLY — even though THIS call recomputed nothing — must
+     * still settle. This is the case the unconditional window was protecting: another
+     * application of the same project may have regenerated its {@code .cfe} seconds
+     * ago, outside the per-(project, applicationId) lock, so this application's
+     * cached UPDATED can still lag that regeneration.
+     */
+    @Test
+    public void testRecentlyPreparedProjectStillSettles() throws Exception
+    {
+        wireCleanGate(10L); // prepared 10ms ago -> within the 20ms settle window
+
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(RUNTIME_APP_ID)))
+            .thenReturn(Optional.of(app));
+        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.UPDATED);
+
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mgr, 2, null);
+
+        assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
+        verify(mgr, org.mockito.Mockito.atLeast(2)).getUpdateState(app);
+    }
+
+    /**
+     * A clean project with NO recorded preparation at all must settle conservatively
+     * (there is no stable-preparation evidence to justify the fast path). This also
+     * pins the production default: a scratch project reads as never-prepared.
+     */
+    @Test
+    public void testCleanProjectWithNoRecordedPreparationStillSettles() throws Exception
+    {
+        wireCleanGate(-1L); // preparedAtMillis = -1 (no record)
+
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(RUNTIME_APP_ID)))
+            .thenReturn(Optional.of(app));
+        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.UPDATED);
+
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mgr, 2, null);
+
+        assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
+        verify(mgr, org.mockito.Mockito.atLeast(2)).getUpdateState(app);
     }
 }

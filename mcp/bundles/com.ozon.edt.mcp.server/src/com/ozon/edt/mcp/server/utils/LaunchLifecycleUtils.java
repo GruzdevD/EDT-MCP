@@ -2564,27 +2564,49 @@ public final class LaunchLifecycleUtils
             return new PreLaunchResult(true, terminated, null);
         }
 
-        // settleAfterPossibleRecompute=true: we may JUST have forced a recompute, so a
-        // cached UPDATED may lag the freshly regenerated .cfe — wait out the settle
-        // window before trusting "no update needed". The settle is kept
-        // UNCONDITIONALLY: the lagging UPDATE_STATE_CHANGED push this window
-        // exists for arrives AFTER the recompute drain (it is emitted by the
-        // applications-layer infobase-sync checker, which the drained build /
-        // derived-data job families do NOT cover), so no during-drain probe can
-        // prove it will not come. Note that "this call recomputed nothing" does NOT
-        // make the cached flag trustworthy either: the recompute may have been done
-        // seconds ago by the preparation of ANOTHER application of the same project
-        // (the per-(project, applicationId) lock does not serialise those), and this
-        // application's cached UPDATED can still be lagging that regeneration. The
-        // window costs ~5s; skipping it can cost a silently green run against a
-        // stale infobase. The plain launch path passes false because it never
-        // recomputes at all.
+        // The settle window exists for one reason: a cached UPDATED may lag a freshly
+        // regenerated .cfe, because the lagging UPDATE_STATE_CHANGED push arrives AFTER
+        // the recompute drain (it is emitted by the applications-layer infobase-sync
+        // checker, which the drained build / derived-data job families do NOT cover), so
+        // no during-drain probe can prove it will not come. We therefore keep the settle
+        // whenever the UPDATED flag could realistically be lagging, and skip it only when
+        // the project has demonstrably been stable:
+        //
+        //   1. THIS call forced a recompute (a scope project was dirty in the snapshot)
+        //        -> settle=true  (unchanged conservative path);
+        //   2. the project's last successful preparation was >= settle-window ago
+        //        -> settle=false (fast path: a stable project's cached UPDATED is
+        //             authoritative, saving ~5s on every routine launch);
+        //   3. otherwise (no recompute here, but the project was prepared recently —
+        //      possibly by ANOTHER application of the same project seconds ago, which the
+        //      per-(project, applicationId) lock does not serialise)
+        //        -> settle=true  (the lag is still plausible).
+        //
+        // "Prepared recently" is answered by the project's PREPARED-AT persistent marker
+        // (see PreLaunchChangeTracker.preparedAgeMillis); no marker / never prepared reads
+        // as young, so it conservatively settles. The plain launch path passes false
+        // because it never recomputes at all.
         // The blocking-modal arming lives in performUpdateAndAwaitApplied - the single point
         // where the update is actually issued - so every caller of the pre-launch update is
         // covered, not just this one; see the comment there.
+        boolean settledByRecompute = false;
+        for (IProject p : scopeProjects)
+        {
+            if (prepareSnapshot.isDirty(p))
+            {
+                settledByRecompute = true;
+                break;
+            }
+        }
+        boolean settle = settledByRecompute;
+        if (!settle)
+        {
+            long preparedAge = PreLaunchChangeTracker.preparedAgeMillis(project);
+            settle = preparedAge < 0L || preparedAge < syncSettleWindowMs;
+        }
         phaseSink.accept(PHASE_DB_UPDATE);
         Optional<String> updateErr =
-            updateApplicationIfNeeded(project, applicationId, appManager, true, policy);
+            updateApplicationIfNeeded(project, applicationId, appManager, settle, policy);
         if (updateErr.isPresent())
         {
             // Error path: do NOT mark prepared — the next call must recompute.

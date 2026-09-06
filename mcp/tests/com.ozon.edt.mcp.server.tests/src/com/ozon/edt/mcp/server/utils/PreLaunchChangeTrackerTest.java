@@ -716,17 +716,25 @@ public class PreLaunchChangeTrackerTest
         IProject project = mockProject("Config");
         when(project.getPersistentProperty(PreLaunchChangeTracker.FINGERPRINT_PROPERTY))
             .thenReturn("fp-1");
+        when(project.getPersistentProperty(PreLaunchChangeTracker.PREP_TIMESTAMP_PROPERTY))
+            .thenReturn("123456");
         PreLaunchChangeTracker.PersistentPropertyStore productionStore =
             new PreLaunchChangeTracker.PersistentPropertyStore();
 
         assertEquals("load must read the persistent property", "fp-1",
             productionStore.load(project));
+        assertEquals("preparedAtMillis must read the timestamp property", 123456L,
+            productionStore.preparedAtMillis(project));
 
         productionStore.save(project, "fp-2");
         verify(project).setPersistentProperty(PreLaunchChangeTracker.FINGERPRINT_PROPERTY, "fp-2");
+        verify(project).setPersistentProperty(
+            org.mockito.ArgumentMatchers.eq(PreLaunchChangeTracker.PREP_TIMESTAMP_PROPERTY),
+            org.mockito.ArgumentMatchers.matches("\\d+"));
 
         productionStore.clear(project);
         verify(project).setPersistentProperty(PreLaunchChangeTracker.FINGERPRINT_PROPERTY, null);
+        verify(project).setPersistentProperty(PreLaunchChangeTracker.PREP_TIMESTAMP_PROPERTY, null);
     }
 
     @Test
@@ -1104,6 +1112,88 @@ public class PreLaunchChangeTrackerTest
     }
 
     // =========================================================================
+    // preparedAgeMillis — the source of truth for the conditional-settle decision
+    // =========================================================================
+
+    @Test
+    public void testPreparedAgeIsMinusOneWhenNeverPrepared()
+    {
+        IProject project = mockProject("Config");
+        content.put("Config", "fp-1");
+        assertEquals("no recorded preparation must read as age -1", -1L,
+            PreLaunchChangeTracker.preparedAgeMillis(project));
+    }
+
+    @Test
+    public void testPreparedAgeIsZeroRightAfterAPrepare()
+    {
+        IProject project = mockProject("Config");
+        content.put("Config", "fp-1");
+        prepare(project);
+        long age = PreLaunchChangeTracker.preparedAgeMillis(project);
+        assertTrue("a just-prepared project must have a near-zero age", age >= 0L && age < 2000L);
+    }
+
+    @Test
+    public void testPreparedAgeGrowsAfterASuccessfulPrepare()
+    {
+        IProject project = mockProject("Config");
+        content.put("Config", "fp-1");
+        prepare(project);
+        store.agePreparation("Config", 30_000L);
+        assertTrue("an aged preparation must be reported as old",
+            PreLaunchChangeTracker.preparedAgeMillis(project) >= 30_000L);
+    }
+
+    @Test
+    public void testClearDropsThePreparedTimestamp()
+    {
+        IProject project = mockProject("Config");
+        content.put("Config", "fp-1");
+        prepare(project);
+        PreLaunchChangeTracker.markPrepared(Collections.singletonList(project), null);
+        assertEquals("a cleared preparation must read as age -1", -1L,
+            PreLaunchChangeTracker.preparedAgeMillis(project));
+    }
+
+    @Test
+    public void testADirtyPrepareRefreshesTheAge()
+    {
+        // A REAL regeneration (the project was dirty in the snapshot, so the
+        // recompute actually ran) must reset the age to ~0 — that is what makes
+        // "recently regenerated" observable to the conditional-settle decision.
+        IProject project = mockProject("Config");
+        content.put("Config", "fp-1");
+        prepare(project);           // first prepare: project was dirty -> regenerated
+        store.agePreparation("Config", 60_000L);
+
+        content.put("Config", "fp-2"); // a source change makes it dirty again
+        PreLaunchChangeTracker.markDirty("Config");
+        prepare(project);
+
+        long age = PreLaunchChangeTracker.preparedAgeMillis(project);
+        assertTrue("a freshly recomputed prepare must reset the age to near-zero",
+            age >= 0L && age < 2000L);
+    }
+
+    @Test
+    public void testACleanReCertificationDoesNotRefreshTheAge()
+    {
+        // The fast-path guarantee: re-certifying UNCHANGED content (no recompute in
+        // this call) must NOT move the prepared-age clock. Otherwise every routine
+        // launch would reset the age, the settle window would never be skippable,
+        // and the optimization would be a no-op.
+        IProject project = mockProject("Config");
+        content.put("Config", "fp-1");
+        prepare(project);           // first prepare: dirty -> regenerated, age set
+        store.agePreparation("Config", 60_000L);
+
+        prepare(project);           // clean re-certification: no recompute, no touch
+        assertTrue("an unchanged re-certification must leave the age old",
+            PreLaunchChangeTracker.preparedAgeMillis(project) >= 60_000L);
+    }
+
+    // =========================================================================
     // Helpers
     // =========================================================================
 
@@ -1224,6 +1314,7 @@ public class PreLaunchChangeTrackerTest
         implements PreLaunchChangeTracker.FingerprintStore
     {
         final Map<String, String> values = new HashMap<>();
+        final Map<String, Long> preparedAt = new HashMap<>();
 
         @Override
         public String load(IProject project)
@@ -1241,6 +1332,26 @@ public class PreLaunchChangeTrackerTest
         public void clear(IProject project)
         {
             values.remove(project.getName());
+            preparedAt.remove(project.getName());
+        }
+
+        @Override
+        public void touchPrepared(IProject project)
+        {
+            preparedAt.put(project.getName(), System.currentTimeMillis());
+        }
+
+        @Override
+        public long preparedAtMillis(IProject project)
+        {
+            Long at = preparedAt.get(project.getName());
+            return at == null ? -1L : at;
+        }
+
+        /** Moves a project's recorded preparation into the past (conditional-settle tests). */
+        void agePreparation(String name, long millis)
+        {
+            preparedAt.put(name, System.currentTimeMillis() - millis);
         }
     }
 }
