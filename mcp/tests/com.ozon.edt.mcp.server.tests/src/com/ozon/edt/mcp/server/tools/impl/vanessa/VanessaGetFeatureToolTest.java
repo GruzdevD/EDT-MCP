@@ -102,4 +102,29 @@ public class VanessaGetFeatureToolTest
         assertEquals("Первый", first.get("name").getAsString()); //$NON-NLS-1$
         assertEquals(2, first.getAsJsonArray("steps").size()); //$NON-NLS-1$
     }
+
+    /** Full Russian gherkin (1C:Enterprise / Vanessa Automation) must parse too. */
+    @Test
+    public void testParsesRussianGherkinKeywords() throws Exception
+    {
+        Path f = tmpDir.resolve("ru.feature"); //$NON-NLS-1$
+        Files.writeString(f,
+            "#language: ru\n@smoke\nФункционал: Демо RU\n" //$NON-NLS-1$
+                + "  Контекст:\n    Дано пропущено\n" //$NON-NLS-1$
+                + "  Сценарий: Первый RU\n    Когда я делаю шаг\n    И ещё шаг\n    Тогда проверю\n", //$NON-NLS-1$
+            StandardCharsets.UTF_8);
+
+        Map<String, String> params = new HashMap<>();
+        params.put("path", f.toString()); //$NON-NLS-1$
+        String result = new VanessaGetFeatureTool().execute(params);
+        assertTrue(result.contains("\"success\": true")); //$NON-NLS-1$
+
+        JsonObject o = JsonParser.parseString(result).getAsJsonObject();
+        assertEquals("Демо RU", o.get("feature").getAsString()); //$NON-NLS-1$
+        assertEquals("smoke", o.getAsJsonArray("tags").get(0).getAsString()); //$NON-NLS-1$
+        assertEquals(1, o.getAsJsonArray("scenarios").size()); //$NON-NLS-1$
+        JsonObject sc = o.getAsJsonArray("scenarios").get(0).getAsJsonObject(); //$NON-NLS-1$
+        assertEquals("Первый RU", sc.get("name").getAsString()); //$NON-NLS-1$
+        assertEquals(3, sc.getAsJsonArray("steps").size()); //$NON-NLS-1$
+    }
 }

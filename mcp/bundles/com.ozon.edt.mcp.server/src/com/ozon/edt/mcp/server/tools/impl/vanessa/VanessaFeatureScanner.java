@@ -75,11 +75,11 @@ final class VanessaFeatureScanner
             {
                 addTags(tags, line);
             }
-            else if (line.startsWith("Feature:")) //$NON-NLS-1$
+            else if (isFeature(line))
             {
-                feature = line.substring("Feature:".length()).trim(); //$NON-NLS-1$
+                feature = line.substring(line.indexOf(':') + 1).trim();
             }
-            else if (line.startsWith("Scenario")) //$NON-NLS-1$
+            else if (isScenario(line))
             {
                 break; // feature headline is over
             }
@@ -120,14 +120,14 @@ final class VanessaFeatureScanner
                 addTags(pendingTags, line);
                 continue;
             }
-            if (line.startsWith("Feature:")) //$NON-NLS-1$
+            if (isFeature(line))
             {
-                featureName = line.substring("Feature:".length()).trim(); //$NON-NLS-1$
+                featureName = line.substring(line.indexOf(':') + 1).trim();
                 featureTags.addAll(pendingTags);
                 pendingTags.clear();
                 continue;
             }
-            if (line.startsWith("Scenario")) //$NON-NLS-1$ // covers "Scenario Outline:"
+            if (isScenario(line)) // also covers "Scenario Outline:" / "Сценарий сценарий:"
             {
                 int colon = line.indexOf(':'); //$NON-NLS-1$
                 String name = colon >= 0 ? line.substring(colon + 1).trim() : ""; //$NON-NLS-1$
@@ -153,11 +153,33 @@ final class VanessaFeatureScanner
         return out;
     }
 
+    private static boolean isFeature(String line)
+    {
+        // English "Feature:"; Russian "Функционал:" (1C:Enterprise / Vanessa Automation gherkin).
+        return line.startsWith("Feature:") || line.startsWith("Функционал:"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static boolean isScenario(String line)
+    {
+        // English "Scenario" / "Scenario Outline"; Russian "Сценарий:" / "Сценарий сценарий:".
+        return line.startsWith("Scenario") || line.startsWith("Сценарий"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     private static boolean isStep(String line)
     {
-        return line.startsWith("Given ") || line.startsWith("When ") //$NON-NLS-1$ //$NON-NLS-2$
+        if (line.startsWith("Given ") || line.startsWith("When ") //$NON-NLS-1$ //$NON-NLS-2$
             || line.startsWith("Then ") || line.startsWith("And ") //$NON-NLS-1$ //$NON-NLS-2$
-            || line.startsWith("But ") || line.startsWith("* "); //$NON-NLS-1$ //$NON-NLS-2$
+            || line.startsWith("But ") || line.startsWith("* ")) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            return true;
+        }
+        // Russian gherkin (1C:Enterprise / Vanessa Automation).
+        return line.startsWith("Дано ") || line.startsWith("Допустим ") //$NON-NLS-1$ //$NON-NLS-2$
+            || line.startsWith("Пусть ") || line.startsWith("Когда ") //$NON-NLS-1$ //$NON-NLS-2$
+            || line.startsWith("Тогда ") || line.startsWith("То ") //$NON-NLS-1$ //$NON-NLS-2$
+            || line.startsWith("И ") || line.startsWith("Но ") //$NON-NLS-1$ //$NON-NLS-2$
+            || line.startsWith("А ") || line.startsWith("Если ") //$NON-NLS-1$ //$NON-NLS-2$
+            || line.startsWith("К тому же ") || line.startsWith("Также "); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void addTags(List<String> into, String line)
