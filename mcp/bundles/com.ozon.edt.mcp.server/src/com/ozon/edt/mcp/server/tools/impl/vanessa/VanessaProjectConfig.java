@@ -180,16 +180,19 @@ public final class VanessaProjectConfig
                 }
                 String key = t.substring(0, eq).trim();
                 String val = t.substring(eq + 1).trim();
-                if ((val.startsWith("\"") && val.endsWith("\"")) //$NON-NLS-1$ //$NON-NLS-2$
-                    || (val.startsWith("'") && val.endsWith("'"))) //$NON-NLS-1$ //$NON-NLS-2$
-                {
-                    val = val.substring(1, val.length() - 1);
-                }
-                // strip trailing inline comment (e.g. "key=value # comment")
+                // Strip the trailing inline comment (e.g. "key=value # comment") BEFORE
+                // removing the quotes: a quoted value followed by a " # comment" no longer
+                // ends in a quote, so the quote check below would fail and leave the quotes
+                // in the value ("VA_Runner" -> "Project not found: \"VA_Runner\"").
                 int hash = val.indexOf(" #"); //$NON-NLS-1$
                 if (hash >= 0)
                 {
                     val = val.substring(0, hash).trim();
+                }
+                if ((val.startsWith("\"") && val.endsWith("\"")) //$NON-NLS-1$ //$NON-NLS-2$
+                    || (val.startsWith("'") && val.endsWith("'"))) //$NON-NLS-1$ //$NON-NLS-2$
+                {
+                    val = val.substring(1, val.length() - 1);
                 }
                 out.put(key, expand(val, out));
             }
