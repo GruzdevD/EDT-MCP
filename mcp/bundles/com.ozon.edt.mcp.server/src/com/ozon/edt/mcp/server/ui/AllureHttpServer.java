@@ -89,6 +89,12 @@ public final class AllureHttpServer
         return port;
     }
 
+    /** @return the absolute report dir currently being served, or {@code null}. */
+    public synchronized Path root()
+    {
+        return root;
+    }
+
     /** Stops the server (if running). Safe to call repeatedly. */
     public synchronized void stop()
     {

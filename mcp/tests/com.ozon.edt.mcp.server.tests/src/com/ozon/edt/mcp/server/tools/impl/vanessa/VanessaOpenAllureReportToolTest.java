@@ -142,11 +142,23 @@ public class VanessaOpenAllureReportToolTest
     public void testSchemaParamsLowerCamelCase()
     {
         String schema = new VanessaOpenAllureReportTool().getInputSchema();
-        for (String key : new String[] { "launchId", "outDir", "detached", "allureBin", "generate" })
+        for (String key : new String[] { "launchId", "outDir", "resultsDir", "reportDir", "detached", "allureBin", "generate" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
         {
             assertTrue("expected lowerCamelCase param " + key + " in schema", //$NON-NLS-1$ //$NON-NLS-2$
-                schema.contains("\"" + key + "\"")); //$NON-NLS-1$
+                schema.contains("\"" + key + "\"")); //$NON-NLS-1$ //$NON-NLS-2$
         }
+    }
+
+    @Test
+    public void testExecuteWithResultsDirOverrideWithoutResultsFails() throws Exception
+    {
+        Path out = Files.createDirectories(tmpDir.resolve("out")); //$NON-NLS-1$
+        Path resultsOverride = Files.createDirectories(tmpDir.resolve("no-results")); //$NON-NLS-1$
+
+        Map<String, String> params = new HashMap<>();
+        params.put("outDir", out.toString()); //$NON-NLS-1$
+        params.put("resultsDir", resultsOverride.toString()); //$NON-NLS-1$
+        assertFailure(params);
     }
 
     @Test

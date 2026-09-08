@@ -83,6 +83,24 @@ public final class AllureReportService
         return null;
     }
 
+    /**
+     * Best-effort project key from an out dir path: the path segment right after
+     * a {@code .../vanessa/out/<proj>} segment, or {@code null}.
+     */
+    public static String deriveProject(Path outDir)
+    {
+        java.util.List<String> segs = new java.util.ArrayList<>();
+        outDir.toAbsolutePath().normalize().iterator().forEachRemaining(s -> segs.add(s.toString()));
+        for (int i = 0; i + 1 < segs.size(); i++)
+        {
+            if ("out".equals(segs.get(i))) //$NON-NLS-1$
+            {
+                return segs.get(i + 1);
+            }
+        }
+        return null;
+    }
+
     /** {@code true} when the dir exists and contains at least one {@code *-result.json}. */
     public static boolean isResultsDir(Path dir)
     {
@@ -165,7 +183,31 @@ public final class AllureReportService
     public static Path generate(String home, String javaHome, Path allureBin, Path resultsDir)
         throws IOException
     {
-        Path reportDir = resultsDir.getParent().resolve(REPORT_DIR);
+        return generate(home, javaHome, allureBin, resultsDir, null);
+    }
+
+    /**
+     * Generates the static report for {@code resultsDir} into {@code reportDirOverride}
+     * (or, when {@code null}, into its sibling {@code allure-report} dir) and returns
+     * that dir.
+     *
+     * @param home     user home (for the writable temp dir)
+     * @param javaHome JVM home for the subprocess, or {@code null} to use
+     *                 {@code System.getProperty("java.home")}
+     * @param allureBin the {@code allure} executable
+     * @param resultsDir raw Allure results dir
+     * @param reportDirOverride target report dir, or {@code null} to auto-detect
+     *                          (a sibling of {@code resultsDir})
+     * @return the generated report dir (with {@code index.html})
+     * @throws IOException when the binary is unusable, generation fails, or the
+     *                     report has no {@code index.html}
+     */
+    public static Path generate(String home, String javaHome, Path allureBin, Path resultsDir,
+        Path reportDirOverride) throws IOException
+    {
+        Path reportDir = reportDirOverride != null
+            ? reportDirOverride.toAbsolutePath()
+            : resultsDir.getParent().resolve(REPORT_DIR);
         Files.createDirectories(reportDir.getParent());
 
         Path tmpDir = Paths.get(home, HOME_TOOLS_REL, "tmp"); //$NON-NLS-1$
@@ -222,6 +264,77 @@ public final class AllureReportService
             throw new IOException("allure generate finished but " + INDEX + " is missing in " + reportDir); //$NON-NLS-1$
         }
         return reportDir;
+    }
+
+    /**
+     * Deletes a generated Allure report directory tree (recursively). A missing
+     * dir is a no-op, so it is safe to call before the first generation.
+     *
+     * @param reportDir the report dir to remove
+     * @throws IOException when a deletion fails
+     */
+    public static void clearReport(Path reportDir) throws IOException
+    {
+        if (reportDir == null || !Files.exists(reportDir))
+        {
+            return;
+        }
+        try (Stream<Path> s = Files.walk(reportDir))
+        {
+            // Delete children before parents: reverse lexicographic order puts
+            // deeper paths first.
+            for (Path p : s.sorted(java.util.Comparator.reverseOrder()).toList())
+            {
+                Files.deleteIfExists(p);
+            }
+        }
+    }
+
+    /**
+     * Removes the raw Allure result artifacts ({@code *-result.json},
+     * {@code *-container.json}, {@code *-attachment.*}, plus the auxiliary
+     * {@code executors.json}/{@code categories.json}/{@code environment.properties}
+     * and the {@code history} dir) from {@code resultsDir}, so a fresh run's report
+     * does not accumulate results from earlier runs. Non-Allure files are left alone.
+     *
+     * @param resultsDir raw Allure results dir
+     * @return the number of removed items (files or dirs)
+     * @throws IOException when a deletion fails
+     */
+    public static int clearResults(Path resultsDir) throws IOException
+    {
+        if (resultsDir == null || !Files.isDirectory(resultsDir))
+        {
+            return 0;
+        }
+        int removed = 0;
+        try (Stream<Path> s = Files.list(resultsDir))
+        {
+            for (Path p : s.toList())
+            {
+                String name = p.getFileName().toString();
+                boolean artifact = name.endsWith(RESULT_SUFFIX)                  //$NON-NLS-1$
+                    || name.endsWith("-container.json")                           //$NON-NLS-1$
+                    || name.contains("-attachment.")                             //$NON-NLS-1$
+                    || name.equals("executors.json")                             //$NON-NLS-1$
+                    || name.equals("categories.json")                            //$NON-NLS-1$
+                    || name.equals("environment.properties")                     //$NON-NLS-1$
+                    || name.equals("history");                                   //$NON-NLS-1$
+                if (artifact)
+                {
+                    if (Files.isDirectory(p))
+                    {
+                        clearReport(p);
+                    }
+                    else
+                    {
+                        Files.deleteIfExists(p);
+                    }
+                    removed++;
+                }
+            }
+        }
+        return removed;
     }
 
     /** Last (highest) lines of an output string, for error messages. */

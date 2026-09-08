@@ -63,6 +63,12 @@ public class PreferenceInitializer extends AbstractPreferenceInitializer
         // MCP request/response history recorder (record ON by default; file log OFF for privacy)
         HistoryConfig.initializeDefaults(store);
 
+        // Allure report dirs (empty = auto-detect from the run's out dir).
+        store.setDefault(PreferenceConstants.PREF_ALLURE_RESULTS_DIR,
+            PreferenceConstants.DEFAULT_ALLURE_RESULTS_DIR);
+        store.setDefault(PreferenceConstants.PREF_ALLURE_REPORT_DIR,
+            PreferenceConstants.DEFAULT_ALLURE_REPORT_DIR);
+
         // PII redaction rule table + pseudonymiser salt (the master toggle
         // PREF_PII_REDACTION_ENABLED stays OFF via the boolean default).
         store.setDefault(PreferenceConstants.PREF_PII_RULES_JSON,

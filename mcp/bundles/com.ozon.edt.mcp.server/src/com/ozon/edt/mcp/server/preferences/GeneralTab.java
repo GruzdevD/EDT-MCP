@@ -48,6 +48,8 @@ public class GeneralTab
     private Spinner portSpinner;
     private Button autoStartCheck;
     private Text checksFolderText;
+    private Text allureResultsDirText;
+    private Text allureReportDirText;
     private Button allowRemoteCheck;
     private Text authTokenText;
     private Button plainTextCheck;
@@ -95,6 +97,7 @@ public class GeneralTab
 
         createServerSection();
         createLimitsSection();
+        createAllureSection();
         createTagsSection();
         createConsentSection();
         createUpdateSection();
@@ -159,6 +162,58 @@ public class GeneralTab
                 if (path != null)
                 {
                     checksFolderText.setText(path);
+                }
+            }
+        });
+    }
+
+    private void createAllureSection()
+    {
+        // Separator
+        Label separator = new Label(composite, SWT.HORIZONTAL | SWT.SEPARATOR);
+        GridData sepGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        sepGd.horizontalSpan = 3;
+        sepGd.verticalIndent = 5;
+        separator.setLayoutData(sepGd);
+
+        // Section title
+        Label sectionTitle = new Label(composite, SWT.NONE);
+        sectionTitle.setText(Messages.GeneralTab_AllureSection);
+        GridData titleGd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
+        titleGd.horizontalSpan = 3;
+        sectionTitle.setLayoutData(titleGd);
+
+        // Raw results dir
+        createLabel(Messages.GeneralTab_AllureResultsDir);
+        allureResultsDirText = new Text(composite, SWT.BORDER);
+        allureResultsDirText.setText(store.getString(PreferenceConstants.PREF_ALLURE_RESULTS_DIR));
+        allureResultsDirText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        createBrowseButton(composite, allureResultsDirText, Messages.GeneralTab_SelectAllureResultsDir);
+
+        // Report output dir
+        createLabel(Messages.GeneralTab_AllureReportDir);
+        allureReportDirText = new Text(composite, SWT.BORDER);
+        allureReportDirText.setText(store.getString(PreferenceConstants.PREF_ALLURE_REPORT_DIR));
+        allureReportDirText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        createBrowseButton(composite, allureReportDirText, Messages.GeneralTab_SelectAllureReportDir);
+    }
+
+    /** A Browse button that fills {@code target} with a chosen directory. */
+    private void createBrowseButton(Composite parent, Text target, String message)
+    {
+        Button browseButton = new Button(parent, SWT.PUSH);
+        browseButton.setText(Messages.GeneralTab_Browse);
+        browseButton.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent e)
+            {
+                DirectoryDialog dialog = new DirectoryDialog(parent.getShell());
+                dialog.setMessage(message);
+                String path = dialog.open();
+                if (path != null)
+                {
+                    target.setText(path);
                 }
             }
         });
@@ -445,6 +500,8 @@ public class GeneralTab
         store.setValue(PreferenceConstants.PREF_PORT, portSpinner.getSelection());
         store.setValue(PreferenceConstants.PREF_AUTO_START, autoStartCheck.getSelection());
         store.setValue(PreferenceConstants.PREF_CHECKS_FOLDER, checksFolderText.getText());
+        store.setValue(PreferenceConstants.PREF_ALLURE_RESULTS_DIR, allureResultsDirText.getText());
+        store.setValue(PreferenceConstants.PREF_ALLURE_REPORT_DIR, allureReportDirText.getText());
         store.setValue(PreferenceConstants.PREF_PLAIN_TEXT_MODE, plainTextCheck.getSelection());
         store.setValue(PreferenceConstants.PREF_ALLOW_REMOTE_ACCESS, allowRemoteCheck.getSelection());
         store.setValue(PreferenceConstants.PREF_AUTH_TOKEN, authTokenText.getText());
@@ -479,6 +536,8 @@ public class GeneralTab
         portSpinner.setSelection(PreferenceConstants.DEFAULT_PORT);
         autoStartCheck.setSelection(PreferenceConstants.DEFAULT_AUTO_START);
         checksFolderText.setText(PreferenceConstants.DEFAULT_CHECKS_FOLDER);
+        allureResultsDirText.setText(PreferenceConstants.DEFAULT_ALLURE_RESULTS_DIR);
+        allureReportDirText.setText(PreferenceConstants.DEFAULT_ALLURE_REPORT_DIR);
         plainTextCheck.setSelection(PreferenceConstants.DEFAULT_PLAIN_TEXT_MODE);
         allowRemoteCheck.setSelection(PreferenceConstants.DEFAULT_ALLOW_REMOTE_ACCESS);
         authTokenText.setText(PreferenceConstants.DEFAULT_AUTH_TOKEN);

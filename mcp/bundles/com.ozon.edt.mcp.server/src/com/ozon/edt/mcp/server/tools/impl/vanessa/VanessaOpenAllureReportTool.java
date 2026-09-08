@@ -11,12 +11,12 @@ package com.ozon.edt.mcp.server.tools.impl.vanessa;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 
 import org.eclipse.swt.program.Program;
 
+import com.ozon.edt.mcp.server.Activator;
+import com.ozon.edt.mcp.server.preferences.PreferenceConstants;
 import com.ozon.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ozon.edt.mcp.server.protocol.ToolResult;
 import com.ozon.edt.mcp.server.tools.IMcpTool;
@@ -42,6 +42,8 @@ public class VanessaOpenAllureReportTool implements IMcpTool
 
     private static final String KEY_LAUNCH_ID = "launchId"; //$NON-NLS-1$
     private static final String KEY_OUT_DIR = "outDir"; //$NON-NLS-1$
+    private static final String KEY_RESULTS_DIR = "resultsDir"; //$NON-NLS-1$
+    private static final String KEY_REPORT_DIR = "reportDir"; //$NON-NLS-1$
     private static final String KEY_DETACHED = "detached"; //$NON-NLS-1$
     private static final String KEY_ALLURE_BIN = "allureBin"; //$NON-NLS-1$
     private static final String KEY_GENERATE = "generate"; //$NON-NLS-1$
@@ -70,6 +72,10 @@ public class VanessaOpenAllureReportTool implements IMcpTool
                 "A launchId from vanessa_run_feature whose out dir is used. Either this or outDir is required.") //$NON-NLS-1$
             .stringProperty(KEY_OUT_DIR,
                 "Absolute out dir of the run. Either this or launchId is required.") //$NON-NLS-1$
+            .stringProperty(KEY_RESULTS_DIR,
+                "Override the raw Allure results dir (default: the out dir's allure subdir, or the Preferences setting).") //$NON-NLS-1$
+            .stringProperty(KEY_REPORT_DIR,
+                "Override the dir the generated report is placed in (default: sibling of the results dir, or the Preferences setting).") //$NON-NLS-1$
             .booleanProperty(KEY_DETACHED,
                 "Open in the OS browser instead of the in-EDT view. Default false.") //$NON-NLS-1$
             .stringProperty(KEY_ALLURE_BIN,
@@ -110,18 +116,19 @@ public class VanessaOpenAllureReportTool implements IMcpTool
             return ToolResult.error("No such out dir: " + outDir).toJson(); //$NON-NLS-1$
         }
 
-        Path resultsDir = AllureReportService.findResultsDir(root);
+        Path resultsDir = resolveResultsDir(root, params.get(KEY_RESULTS_DIR));
         if (resultsDir == null)
         {
-            return ToolResult.error("No Allure results in '" + outDir //$NON-NLS-1$
-                + "' (expected *-result.json under '" + AllureReportService.ALLURE_RESULTS_DIR //$NON-NLS-1$
-                + "' or in the out dir itself). Enable Allure output для the run (ДелатьОтчетВФорматеАллюр).") //$NON-NLS-1$
-                .toJson();
+            return ToolResult.error("No Allure results found (expected *-result.json under '" //$NON-NLS-1$
+                + outDir + "/" + AllureReportService.ALLURE_RESULTS_DIR //$NON-NLS-1$
+                + "' or in the out dir itself). Enable Allure output for the run (ДелатьОтчетВФорматеАллюр), " //$NON-NLS-1$
+                + "pass resultsDir, or set it in the Preferences.").toJson(); //$NON-NLS-1$
         }
 
         boolean generate = !"false".equalsIgnoreCase(params.get(KEY_GENERATE)); //$NON-NLS-1$
         boolean detached = Boolean.parseBoolean(params.get(KEY_DETACHED));
 
+        Path reportDirOverride = reportDirOverride(params.get(KEY_REPORT_DIR));
         final Path reportDir;
         if (generate)
         {
@@ -134,7 +141,8 @@ public class VanessaOpenAllureReportTool implements IMcpTool
             try
             {
                 reportDir = AllureReportService.generate(
-                    System.getProperty("user.home"), null, Paths.get(allureBin), resultsDir); //$NON-NLS-1$
+                    System.getProperty("user.home"), null, Paths.get(allureBin), //$NON-NLS-1$
+                    resultsDir, reportDirOverride);
             }
             catch (Exception e)
             {
@@ -143,7 +151,9 @@ public class VanessaOpenAllureReportTool implements IMcpTool
         }
         else
         {
-            reportDir = resultsDir.getParent().resolve(AllureReportService.REPORT_DIR);
+            reportDir = reportDirOverride != null
+                ? reportDirOverride
+                : resultsDir.getParent().resolve(AllureReportService.REPORT_DIR);
             if (!Files.isRegularFile(reportDir.resolve(AllureReportService.INDEX)))
             {
                 return ToolResult.error("No existing report at " + reportDir //$NON-NLS-1$
@@ -196,21 +206,57 @@ public class VanessaOpenAllureReportTool implements IMcpTool
     }
 
     /**
-     * Best-effort project key from an out dir path: the path segment right after
-     * a {@code .../vanessa/out/<proj>} segment, or {@code null}.
+     * Resolves the raw Allure results dir: explicit parameter → Preferences setting
+     * → auto-detect from the run's out dir. Returns {@code null} when none holds
+     * {@code *-result.json}.
      */
+    private static Path resolveResultsDir(Path root, String explicit)
+    {
+        String value = nonEmpty(explicit);
+        if (value == null)
+        {
+            value = preference(PreferenceConstants.PREF_ALLURE_RESULTS_DIR);
+        }
+        if (value != null)
+        {
+            Path p = Paths.get(value);
+            return AllureReportService.isResultsDir(p) ? p.toAbsolutePath() : null;
+        }
+        return AllureReportService.findResultsDir(root);
+    }
+
+    /**
+     * Resolves the target report dir: explicit parameter → Preferences setting,
+     * else {@code null} (auto-detect a sibling of the results dir).
+     */
+    private static Path reportDirOverride(String explicit)
+    {
+        String value = nonEmpty(explicit);
+        if (value == null)
+        {
+            value = preference(PreferenceConstants.PREF_ALLURE_REPORT_DIR);
+        }
+        return value == null ? null : Paths.get(value).toAbsolutePath();
+    }
+
+    /** A preference string from the plugin store, or {@code null} when unavailable (e.g. headless). */
+    private static String preference(String key)
+    {
+        try
+        {
+            Activator activator = Activator.getDefault();
+            return activator == null ? null : activator.getPreferenceStore().getString(key);
+        }
+        catch (Throwable t)
+        {
+            return null;
+        }
+    }
+
+    /** Best-effort project key (shared; see {@link AllureReportService#deriveProject}). */
     static String deriveProject(Path outDir)
     {
-        List<String> segs = new ArrayList<>();
-        outDir.toAbsolutePath().normalize().iterator().forEachRemaining(s -> segs.add(s.toString()));
-        for (int i = 0; i + 1 < segs.size(); i++)
-        {
-            if ("out".equals(segs.get(i))) //$NON-NLS-1$
-            {
-                return segs.get(i + 1);
-            }
-        }
-        return null;
+        return AllureReportService.deriveProject(outDir);
     }
 
     private static String nonEmpty(String value)
