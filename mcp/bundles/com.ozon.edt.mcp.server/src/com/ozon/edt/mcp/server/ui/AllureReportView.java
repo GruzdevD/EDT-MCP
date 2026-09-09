@@ -155,6 +155,21 @@ public class AllureReportView extends ViewPart
      */
     public static String open(Path reportDir)
     {
+        return open(reportDir, null);
+    }
+
+    /**
+     * {@link #open(Path)} variant that also records the raw Allure {@code resultsDir}
+     * the report was generated from, so the view's <b>Load report</b> button can
+     * regenerate from the same results without a Preferences setting.
+     *
+     * @param reportDir  the generated report (must contain {@code index.html})
+     * @param resultsDir the raw Allure results dir the report came from, or {@code null}
+     * @return the served base URL (already open), or {@code null} when there is no
+     *         UI available to host the view
+     */
+    public static String open(Path reportDir, Path resultsDir)
+    {
         final String url;
         try
         {
@@ -162,6 +177,10 @@ public class AllureReportView extends ViewPart
             if (reportDir != null)
             {
                 currentReportDir = reportDir.toAbsolutePath();
+            }
+            if (resultsDir != null)
+            {
+                currentResultsDir = resultsDir.toAbsolutePath();
             }
         }
         catch (Exception e)
@@ -247,7 +266,7 @@ public class AllureReportView extends ViewPart
         Path results = resolveResultsDir();
         if (results == null || !AllureReportService.isResultsDir(results))
         {
-            refreshStatus(false);
+            setStatus(Messages.AllureView_NoReportToLoad);
             return;
         }
 
@@ -362,7 +381,13 @@ public class AllureReportView extends ViewPart
         }, "Allure report reset").start(); //$NON-NLS-1$
     }
 
-    /** The raw results dir: the configured directory if it holds results, else the last opened one. */
+    /**
+     * The raw results dir to load a report from, in order: the configured
+     * directory (if it holds results), the last opened/served ones, or a results
+     * dir auto-detected as a sibling of the last report (by default a report is
+     * generated into {@code resultsDir.getParent()/allure-report}, so the results
+     * sit next to it).
+     */
     private static Path resolveResultsDir()
     {
         String pref = preference(PreferenceConstants.PREF_ALLURE_RESULTS_DIR);
@@ -374,7 +399,15 @@ public class AllureReportView extends ViewPart
                 return p.toAbsolutePath();
             }
         }
-        return currentResultsDir;
+        if (currentResultsDir != null)
+        {
+            return currentResultsDir;
+        }
+        if (currentReportDir != null)
+        {
+            return AllureReportService.findResultsDir(currentReportDir.getParent());
+        }
+        return null;
     }
 
     /** An explicit preference path override, or the supplied fallback. */

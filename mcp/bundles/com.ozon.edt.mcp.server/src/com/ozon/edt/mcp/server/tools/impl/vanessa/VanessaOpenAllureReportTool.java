@@ -180,7 +180,7 @@ public class VanessaOpenAllureReportTool implements IMcpTool
         }
         else
         {
-            url = AllureReportView.open(reportDir);
+            url = AllureReportView.open(reportDir, resultsDir);
             if (url == null)
             {
                 return ToolResult.error("No EDT UI available to show the view - retry with detached=true " //$NON-NLS-1$
