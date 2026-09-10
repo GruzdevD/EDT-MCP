@@ -298,7 +298,7 @@ does not start user services without an active login, enable lingering once with
 
 ## Development
 
-Sources live under `proxy/src/main/java/com/ozon/edt/mcp/proxy/`; the only
+Sources live under `proxy/src/main/java/com/ditrix/edt/mcp/proxy/`; the only
 dependency is Gson. Unit tests and in-process integration tests (fake backends on
 ephemeral ports — no EDT required) both run with:
 

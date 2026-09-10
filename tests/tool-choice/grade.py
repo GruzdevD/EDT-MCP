@@ -30,7 +30,7 @@ ARMS = {"arm_a": "V1 (текущая)", "arm_b": "V2 (короткие опис�
         "arm_c": "V3 (короткие + голая схема)",
         "arm_d": "V4 (V3 + несущие клаузы в описании)"}
 ORDER = ["arm_a", "arm_b", "arm_c", "arm_d"]
-GUIDE_DIR = os.path.join(ROOT, "mcp/bundles/com.ozon.edt.mcp.server/guides")
+GUIDE_DIR = os.path.join(ROOT, "mcp/bundles/com.ditrix.edt.mcp.server/guides")
 BASELINE = os.path.join(HERE, "tools_list.v1_baseline.json")
 
 

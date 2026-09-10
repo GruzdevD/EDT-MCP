@@ -4,7 +4,7 @@
  * Licensed under AGPL-3.0-or-later
  */
 
-package com.ozon.edt.mcp.proxy;
+package com.ditrix.edt.mcp.proxy;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -19,7 +19,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
 
-import com.ozon.edt.mcp.proxy.ProxyRoutingIT.ProxyFixture;
+import com.ditrix.edt.mcp.proxy.ProxyRoutingIT.ProxyFixture;
 
 /**
  * End-to-end coverage of the CLI subcommands added by the issue #253 follow-up spec: {@code

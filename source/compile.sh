@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DEFAULT_PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DEFAULT_OUTPUT_DIR="$SCRIPT_DIR/dist"
-DEFAULT_REPO_SUBPATH="mcp/repositories/com.ozon.edt.mcp.server.repository/target/repository"
+DEFAULT_REPO_SUBPATH="mcp/repositories/com.ditrix.edt.mcp.server.repository/target/repository"
 DEFAULT_ARCHIVE_PREFIX="MCP-EDT.v"
 
 usage() {

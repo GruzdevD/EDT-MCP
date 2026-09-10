@@ -4,7 +4,7 @@
  * Licensed under AGPL-3.0-or-later
  */
 
-package com.ozon.edt.mcp.proxy;
+package com.ditrix.edt.mcp.proxy;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -88,7 +88,7 @@ public final class ProxyServer
      * <p>Binds loopback only ({@link InetAddress#getLoopbackAddress()}) unless
      * {@code cfg.allowRemote} is set, in which case it binds {@code cfg.bindHost} instead -
      * mirroring the EDT-MCP plugin's own loopback-by-default policy (see
-     * {@code com.ozon.edt.mcp.server.McpServer#start}). The proxy has no authentication in
+     * {@code com.ditrix.edt.mcp.server.McpServer#start}). The proxy has no authentication in
      * v1, so a remote bind is logged as a security warning.
      *
      * @throws UncheckedIOException when the port cannot be bound (e.g. already in use)

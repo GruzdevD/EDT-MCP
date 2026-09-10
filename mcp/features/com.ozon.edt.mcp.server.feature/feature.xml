@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <feature
-    id="com.ozon.edt.mcp.server.feature"
+    id="com.ditrix.edt.mcp.server.feature"
     label="%featureName"
     version="1.0.0.qualifier"
     provider-name="%providerName">
@@ -23,7 +23,7 @@
     </url>
 
     <plugin
-        id="com.ozon.edt.mcp.server"
+        id="com.ditrix.edt.mcp.server"
         download-size="0"
         install-size="0"
         version="0.0.0"

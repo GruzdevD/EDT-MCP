@@ -4,7 +4,7 @@
  * Licensed under AGPL-3.0-or-later
  */
 
-package com.ozon.edt.mcp.proxy;
+package com.ditrix.edt.mcp.proxy;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -51,8 +51,8 @@ public final class McpProxyHandler implements HttpHandler
     private static final Logger LOG = Logger.getLogger(McpProxyHandler.class.getName());
 
     // ------------------------------------------------------------------------------------
-    // HTTP wire constants (mirrors com.ozon.edt.mcp.server.transport.McpHttpHandler /
-    // com.ozon.edt.mcp.server.protocol.McpConstants — the proxy module has no compile
+    // HTTP wire constants (mirrors com.ditrix.edt.mcp.server.transport.McpHttpHandler /
+    // com.ditrix.edt.mcp.server.protocol.McpConstants — the proxy module has no compile
     // dependency on the plugin, so the literal values are duplicated here).
     // ------------------------------------------------------------------------------------
 

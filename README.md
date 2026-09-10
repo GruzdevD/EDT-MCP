@@ -45,10 +45,10 @@ MCP (Model Context Protocol) сервер-плагин для **1C:EDT**. Поз
 | `plugin_check_for_update` | Сверяет доступную сборку (ветка `update-site` личного репозитория) с установленной версией запущенного бандла. Отдаёт `availableVersion / installedVersion / updateAvailable / jar / source / branch`. |
 | `plugin_update` | Копирует свежий jar в пул `~/.p2/pool/plugins` (снося старые) и **сам переписывает строку** в `bundles.info`. Возвращает `restartRequired: true`. |
 
-**Почему git, а не p2‑HTTP:** на корпоративном GitLab приватный репозиторий аутентифицируется только через git smart‑HTTP (как push), анонимный HTTP не проходит, поэтому нативный «Check for Updates» не достаёт приватный репозиторий. Вместо этого готовый jar коммитится в ветку `update-site` репозитория плагина, а инструменты подтягивают её с git‑креденшелами проекта.
+**Почему git, а не p2‑HTTP:** вместо нативного «Check for Updates», которому нужен p2‑HTTP, готовый jar коммитится в ветку `update-site` репозитория плагина, а инструменты подтягивают её по git (над публичным репозиторием — без аутентификации; над приватным — с git‑креденшелами проекта).
 
-- Репозиторий по умолчанию: `https://gitlab.ozon.ru/dmigruzdev/ozon-edt-mcp.git`, ветка `update-site`.
-- Для аутентификации используется git‑конфиг `~/.1c-tools/gitlab-config` (token‑helper), `GIT_TERMINAL_PROMPT=0`.
+- Репозиторий по умолчанию: `https://github.com/<your-github-account>/EDT-MCP.git`, ветка `update-site`.
+- Для аутентификации используется git‑конфиг `~/.1c-tools/gitlab-config` (token‑helper), `GIT_TERMINAL_PROMPT=0` (для публичного репозитория не требуется).
 - `runtimeBundlesInfo()` ищет `bundles.info` по `osgi.configuration.area` → `osgi.install.area` → `Platform`, по односегментному пути `…/configuration/org.eclipse.equinox.simpleconfigurator/bundles.info` (НЕ разбивая имя каталога по точкам).
 
 ### 3. README на русском
@@ -99,17 +99,17 @@ set VER_EDT=2025.2.3+30
 "\path\to\EDT\components\1c-edt-%VER_EDT%-x86_64\1cedt.exe" -nosplash ^
     -application org.eclipse.equinox.p2.director ^
     -repository https://ditrixnew.github.io/EDT-MCP/ ^
-    -installIU com.ozon.edt.mcp.server.feature.feature.group ^
+    -installIU com.ditrix.edt.mcp.server.feature.feature.group ^
     -profileProperties org.eclipse.update.reconcile=true
 ```
 
-### Корпоративная установка из своих сборок (Ozon)
+### Установка из своих сборок
 
 Ручной деплой сборки в установку EDT:
 
-1. Положить jar `com.ozon.edt.mcp.server_<версия>.jar` в `~/.p2/pool/plugins/`
+1. Положить jar `com.ditrix.edt.mcp.server_<версия>.jar` в `~/.p2/pool/plugins/`
 2. Прописать в `bundles.info` строку вида
-   `com.ozon.edt.mcp.server,<версия>,<абс. путь к jar>,4,false`
+   `com.ditrix.edt.mcp.server,<версия>,<абс. путь к jar>,4,false`
    (файл: `<установка EDT>/configuration/org.eclipse.equinox.simpleconfigurator/bundles.info`)
 3. Перезапустить EDT.
 
@@ -294,7 +294,7 @@ set VER_EDT=2025.2.3+30
 
 Когда 1C:Workmate (`com.e1c.edt.ai*` 1.0.5) запущен в той же JVM EDT, интеграция двусторонняя:
 - `ask_workmate` запускает полный цикл диалога/инструментов Workmate в ограниченном фоновом задании и возвращает `jobId` (поллится через общий `get_job_status`). Инструмент **поставляется отключённым** — включает его владелец EDT в *Preferences → EDT MCP Server → Tools*.
-- OSGi‑сервис `com.ozon.edt.mcp.server.bridge.IEdtMcpBridge` позволяет Workmate/JShell вызывать EDT‑MCP инструменты без импорта пакетов плагина.
+- OSGi‑сервис `com.ditrix.edt.mcp.server.bridge.IEdtMcpBridge` позволяет Workmate/JShell вызывать EDT‑MCP инструменты без импорта пакетов плагина.
 
 ---
 
@@ -323,13 +323,13 @@ set VER_EDT=2025.2.3+30
 | **Разрабатывать** плагин (править Java/расширения, юнит/e2e) | форк репы + JDK/Maven + Tycho | **Путь разработчика** → п. 0 предпосылки → п. 2 (форк) → п. 3 (сборка) → установка |
 
 > [!NOTE]
-> **Форк репозитория и сборка не нужны, чтобы просто установить и пользоваться.** Бандл — это один самодостаточный `com.ozon.edt.mcp.server_<ver>.jar`; остальное (попы/poms/`.vscode`/README) в установке не участвует. Ветка `update-site` репозитория несёт **только** готовые jar — по сути «склад бинарников». Возьмите jar оттуда (или из п. 1) — и вперёд.
+> **Форк репозитория и сборка не нужны, чтобы просто установить и пользоваться.** Бандл — это один самодостаточный `com.ditrix.edt.mcp.server_<ver>.jar`; остальное (попы/poms/`.vscode`/README) в установке не участвует. Ветка `update-site` репозитория несёт **только** готовые jar — по сути «склад бинарников». Возьмите jar оттуда (или из п. 1) — и вперёд.
 
 ### Быстрый путь: установка по готовому jar (без форка и сборки)
 
 1. Скачать **install-zip** (jar + `INSTALL.md`) из ветки `update-site` репозитория:
-   `https://gitlab.ozon.ru/dmigruzdev/ozon-edt-mcp/-/raw/update-site/install/edt-mcp-vanessa-install-1.0.0.202609060930.zip`
-   (приватный репозиторий — нужен доступ к GitLab; внутри — только `plugins/*.jar` и `INSTALL.md`).
+   `https://github.com/<your-github-account>/EDT-MCP/raw/update-site/install/edt-mcp-vanessa-install-1.0.0.202609060930.zip`
+   (внутри — только `plugins/*.jar` и `INSTALL.md`).
    Альтернативно — взять jar из `plugins/` ветки `update-site` или с любой машины, где плагин уже стоит (`~/.p2/pool/plugins/`).
 2. Прогнать шаги **3 (установка в EDT)** и далее по этому руководству; разделы «Клонировать форк»/«Собрать плагин» — пропустить.
 
@@ -339,7 +339,7 @@ set VER_EDT=2025.2.3+30
 |---|---|---|
 | JDK **17** | `brew install openjdk@17`, `export JAVA_HOME=$(/usr/libexec/java_home -v 17)` | `java -version` → 17 |
 | Maven 3.8+ | `brew install maven` | `mvn -v` |
-| git + доступ к GitLab | token / ssh | `git ls-remote git@gitlab.ozon.ru:dmigruzdev/ozon-edt-mcp.git` |
+| git + доступ к GitHub | ssh | `git ls-remote git@github.com:<your-github-account>/EDT-MCP.git` |
 | EDT **2026.1/2026.2** | установлена через 1CEStart | в `~/Library/Application Support/1C/1cedtstart/installations/` |
 
 Для BDD-инструментов также нужен рабочий контур Vanessa Automation — **OneScript + vrunner** + сама **Vanessa Automation** + проект с `env.sh` и `.feature`-сценариями (см. [раздел 6](#6-окружение-vanessa-automation--onescript)) — и, для отчётов, [Allure commandline](#5-allure-cli-для-vanessa_open_allure_report).
@@ -348,13 +348,13 @@ set VER_EDT=2025.2.3+30
 
 ```bash
 mkdir -p ~/git && cd ~/git
-git clone git@gitlab.ozon.ru:dmigruzdev/ozon-edt-mcp.git edt-mcp-vanessa
+git clone git@github.com:<your-github-account>/EDT-MCP.git edt-mcp-vanessa
 cd edt-mcp-vanessa
-git checkout feature/vanessa-mcp-tools
+git checkout github-fork
 ```
 
 > [!NOTE]
-> **Форк vs апстрим.** Этот репозиторий — форк [DitriXNew/EDT-MCP](https://github.com/DitriXNew/EDT-MCP) с перебрендингом `com.ditrix.* → com.ozon.*`. Пулл-реквесты в апстрим не идут; история для публикации пересобирается под корпоративное правило авторов (`dmigruzdev@ozon.ru`, без `ditrixnew@gmail.com`). Если форкаетесь сами — не тяните upstream-историю целиком.
+> **Форк vs апстрим.** Этот репозиторий — публичный форк [DitriXNew/EDT-MCP](https://github.com/DitriXNew/EDT-MCP), сохраняющий его пространство имён `com.ditrix.edt.mcp.server` (ребрендинг не применялся) и дополненный набором собственных фич: BDD‑инструменты Vanessa Automation, Allure‑отчёт, git‑самообновление и провижининг VA «под ключ». Пулл‑реквесты в апстрим не идут.
 
 ### 2. Собрать плагин (Tycho)
 
@@ -365,7 +365,7 @@ mvn -Djava.io.tmpdir=$TMPDIR clean verify
 ```
 
 - Таргет-платформа: `mcp/targets/default/default.target` (EDT 2026.1, Java 17). Один артефакт резолвится и на 2026.2.
-- Результат: `mcp/repositories/com.ozon.edt.mcp.server.repository/target/repository/plugins/com.ozon.edt.mcp.server_1.0.0.<квалиф>.jar` (версия уникальна на каждую сборку — это ключ самóобновления).
+- Результат: `mcp/repositories/com.ditrix.edt.mcp.server.repository/target/repository/plugins/com.ditrix.edt.mcp.server_1.0.0.<квалиф>.jar` (версия уникальна на каждую сборку — это ключ самóобновления).
 - Юнит-тесты и часть e2e гоняются прямо в этом шаге (`BuiltInToolTestCoverageTest` — у каждого тула обязан быть `XxxToolTest`; `ToolContractConsistencyTest` — параметры lowerCamelCase).
 
 > [!NOTE]
@@ -378,25 +378,25 @@ mvn -Djava.io.tmpdir=$TMPDIR clean verify
 1. **Закрыть EDT.**
 2. Скопировать jar в общий p2-pool:
    ```bash
-   cp mcp/repositories/com.ozon.edt.mcp.server.repository/target/repository/plugins/com.ozon.edt.mcp.server_*.jar \
+   cp mcp/repositories/com.ditrix.edt.mcp.server.repository/target/repository/plugins/com.ditrix.edt.mcp.server_*.jar \
       ~/.p2/pool/plugins/
    ```
 3. Прописать бандл в конфигурации EDT (путь к вашей установке — `1CEStart`, версия 2026.1):
    ```bash
    BI="$HOME/Library/Application Support/1C/1cedtstart/installations/1C_EDT 2026.1/1cedt.app/Contents/Eclipse/configuration/org.eclipse.equinox.simpleconfigurator/bundles.info"
    # путь до jar — такой же относительный, как у соседних записей pool (от каталога configuration)
-   R=$( cd "$HOME" && printf '../../../../../../../../../.p2/pool/plugins/com.ozon.edt.mcp.server_1.0.0.'*.jar )
-   printf 'com.ozon.edt.mcp.server,1.0.0.%s,%s,4,false\n' "$QUAL" "$R" >> "$BI"
+   R=$( cd "$HOME" && printf '../../../../../../../../../.p2/pool/plugins/com.ditrix.edt.mcp.server_1.0.0.'*.jar )
+   printf 'com.ditrix.edt.mcp.server,1.0.0.%s,%s,4,false\n' "$QUAL" "$R" >> "$BI"
    ```
    Итоговая строка выглядит так:
-   `com.ozon.edt.mcp.server,1.0.0.202609060930,../../../../../../../../../.p2/pool/plugins/com.ozon.edt.mcp.server_1.0.0.202609060930.jar,4,false`
+   `com.ditrix.edt.mcp.server,1.0.0.202609060930,../../../../../../../../../.p2/pool/plugins/com.ditrix.edt.mcp.server_1.0.0.202609060930.jar,4,false`
 4. **Перезапустить EDT** и дождаться, пока поднимется MCP-сервер (обычно ~90 c):
    ```bash
    until nc -z 127.0.0.1 8765; do sleep 5; done
    ```
 
 > [!IMPORTANT]
-> **Порт = 8765.** Новый (перебрендённый) бандл читает `com.ozon.edt.mcp.server.prefs` (дефолт 8765), а не legacy `8766`. Конфиг MCP-клиентов на 8766 надо перенацелить.
+> **Порт = 8765.** Новый (перебрендённый) бандл читает `com.ditrix.edt.mcp.server.prefs` (дефолт 8765), а не legacy `8766`. Конфиг MCP-клиентов на 8766 надо перенацелить.
 
 Дальнейшие обновления не требуют ручного копирования — есть тулы `plugin_check_for_update` / `plugin_update`.
 

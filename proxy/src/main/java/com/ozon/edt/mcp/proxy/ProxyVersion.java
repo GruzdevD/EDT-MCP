@@ -4,7 +4,7 @@
  * Licensed under AGPL-3.0-or-later
  */
 
-package com.ozon.edt.mcp.proxy;
+package com.ditrix.edt.mcp.proxy;
 
 /**
  * The proxy's own version string, shared by everything that needs to report it: the MCP

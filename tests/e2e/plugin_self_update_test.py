@@ -42,9 +42,9 @@ PORT = os.environ.get("MCP_PORT", "8766")
 MCP_SH = os.path.join(HOME, ".1c-tools/vanessa/mcp.sh")
 GIT_CONFIG_GLOBAL = os.path.join(HOME, ".1c-tools/gitlab-config")
 
-REMOTE = "https://gitlab.ozon.ru/dmigruzdev/ozon-edt-mcp.git"
+REMOTE = "https://github.com/<your-github-account>/EDT-MCP.git"
 BRANCH = "update-site"
-SYM = "com.ozon.edt.mcp.server"
+SYM = "com.ditrix.edt.mcp.server"
 JAR_PREFIX = SYM + "_"
 
 POOL_DIR = os.path.join(HOME, ".p2", "pool", "plugins")
@@ -143,11 +143,11 @@ def publish(version_bytes, version):
     with open(os.path.join(plugins, JAR_PREFIX + version + ".jar"), "wb") as fh:
         fh.write(version_bytes)
     git("add", "-A", cwd=clone)
-    # force a clean author so the corporative GitLab accepts the push
-    env_author = {"GIT_AUTHOR_NAME": "dmigruzdev",
-                  "GIT_AUTHOR_EMAIL": "dmigruzdev@ozon.ru",
-                  "GIT_COMMITTER_NAME": "dmigruzdev",
-                  "GIT_COMMITTER_EMAIL": "dmigruzdev@ozon.ru"}
+    # force a clean author for the test commit
+    env_author = {"GIT_AUTHOR_NAME": "edt-mcp-vanessa",
+                  "GIT_AUTHOR_EMAIL": "edt-mcp-vanessa@example.com",
+                  "GIT_COMMITTER_NAME": "edt-mcp-vanessa",
+                  "GIT_COMMITTER_EMAIL": "edt-mcp-vanessa@example.com"}
     code, _, err = shell(["git", "commit", "-q", "-m",
                           "edt-mcp-vanessa: publish plugin build %s.jar" % version],
                          cwd=clone, env_extra=env_author)

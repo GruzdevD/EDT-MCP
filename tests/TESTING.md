@@ -14,7 +14,7 @@ bash source/compile.sh --java-home /usr/lib/jvm/java-17-openjdk-amd64   # adjust
 ```
 Outputs:
 - update-site zip: `source/dist/MCP-EDT.v<version>.zip`
-- p2 repository: `mcp/repositories/com.ozon.edt.mcp.server.repository/target/repository`
+- p2 repository: `mcp/repositories/com.ditrix.edt.mcp.server.repository/target/repository`
 
 To run only the unit tests (without packaging the archive) you can invoke Maven directly:
 ```bash
@@ -25,7 +25,7 @@ mvn clean verify
 
 ### 1. Unit Tests (Tycho Surefire)
 
-Located in `mcp/tests/com.ozon.edt.mcp.server.tests/`
+Located in `mcp/tests/com.ditrix.edt.mcp.server.tests/`
 
 These are JUnit 4 tests that run inside the Eclipse/Tycho build without requiring a running EDT instance. They cover:
 
@@ -35,7 +35,7 @@ These are JUnit 4 tests that run inside the Eclipse/Tycho build without requirin
 
 Unit tests run automatically during the build (see **0. Build**). Results are in:
 ```
-mcp/tests/com.ozon.edt.mcp.server.tests/target/surefire-reports/
+mcp/tests/com.ditrix.edt.mcp.server.tests/target/surefire-reports/
 ```
 
 ### 2. E2E Tests (Python HTTP client)
@@ -56,7 +56,7 @@ plugin must be installed by hand before running E2E:
 
 1. In EDT: **Help → Install New Software… → Add… → Archive…**, select
    `source/dist/MCP-EDT.v<version>.zip` (or **Local…** → the `repository` folder),
-   install `com.ozon.edt.mcp.server.feature`, restart EDT.
+   install `com.ditrix.edt.mcp.server.feature`, restart EDT.
 2. Import the `TestConfiguration` project into the EDT workspace and wait until
    derived data is built.
 3. Make sure the MCP server is listening on port 8765 (the plugin starts it
@@ -128,10 +128,10 @@ For fully automated E2E on GitHub Actions, the plan is:
 EDT-MCP/
 ├── mcp/
 │   ├── bundles/
-│   │   └── com.ozon.edt.mcp.server/        # Main plugin
+│   │   └── com.ditrix.edt.mcp.server/        # Main plugin
 │   ├── tests/
 │   │   ├── pom.xml                             # Tests parent
-│   │   └── com.ozon.edt.mcp.server.tests/   # Unit test fragment
+│   │   └── com.ditrix.edt.mcp.server.tests/   # Unit test fragment
 │   │       ├── META-INF/MANIFEST.MF
 │   │       ├── pom.xml
 │   │       └── src/                            # JUnit tests

@@ -4,7 +4,7 @@
  * Licensed under AGPL-3.0-or-later
  */
 
-package com.ozon.edt.mcp.proxy;
+package com.ditrix.edt.mcp.proxy;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Test;
 
-import com.ozon.edt.mcp.proxy.ProjectRouter.RouteResult;
+import com.ditrix.edt.mcp.proxy.ProjectRouter.RouteResult;
 import com.google.gson.JsonObject;
 
 /**

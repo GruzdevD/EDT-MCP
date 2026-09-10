@@ -4,16 +4,16 @@
  * Licensed under AGPL-3.0-or-later
  */
 
-package com.ozon.edt.mcp.proxy;
+package com.ditrix.edt.mcp.proxy;
 
-import static com.ozon.edt.mcp.proxy.ProxyRoutingIT.PROJECT_A;
-import static com.ozon.edt.mcp.proxy.ProxyRoutingIT.PROJECT_B;
-import static com.ozon.edt.mcp.proxy.ProxyRoutingIT.TOOL_ECHO_PORT;
-import static com.ozon.edt.mcp.proxy.ProxyRoutingIT.errorText;
-import static com.ozon.edt.mcp.proxy.ProxyRoutingIT.isToolError;
-import static com.ozon.edt.mcp.proxy.ProxyRoutingIT.projectArgs;
-import static com.ozon.edt.mcp.proxy.ProxyRoutingIT.reserveFreePorts;
-import static com.ozon.edt.mcp.proxy.ProxyRoutingIT.stopQuietly;
+import static com.ditrix.edt.mcp.proxy.ProxyRoutingIT.PROJECT_A;
+import static com.ditrix.edt.mcp.proxy.ProxyRoutingIT.PROJECT_B;
+import static com.ditrix.edt.mcp.proxy.ProxyRoutingIT.TOOL_ECHO_PORT;
+import static com.ditrix.edt.mcp.proxy.ProxyRoutingIT.errorText;
+import static com.ditrix.edt.mcp.proxy.ProxyRoutingIT.isToolError;
+import static com.ditrix.edt.mcp.proxy.ProxyRoutingIT.projectArgs;
+import static com.ditrix.edt.mcp.proxy.ProxyRoutingIT.reserveFreePorts;
+import static com.ditrix.edt.mcp.proxy.ProxyRoutingIT.stopQuietly;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -25,8 +25,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
 
-import com.ozon.edt.mcp.proxy.ProxyRoutingIT.McpTestClient;
-import com.ozon.edt.mcp.proxy.ProxyRoutingIT.ProxyFixture;
+import com.ditrix.edt.mcp.proxy.ProxyRoutingIT.McpTestClient;
+import com.ditrix.edt.mcp.proxy.ProxyRoutingIT.ProxyFixture;
 import com.google.gson.JsonObject;
 
 /**
