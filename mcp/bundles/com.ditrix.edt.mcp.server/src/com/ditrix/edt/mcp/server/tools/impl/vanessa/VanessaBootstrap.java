@@ -67,8 +67,7 @@ import com.ditrix.edt.mcp.server.utils.ProjectContext;
  * and the network download touch the platform.</p>
  *
  * <p>The pinned VA release is the public, actively maintained publishing repo for
- * the {@code vanessa-automation.epf} (the {@code ivanovms/vanessa-automation} GitLab
- * repo is mirrored to GitHub under {@code Pr-Mex/vanessa-automation}); the zip holds
+ * the {@code vanessa-automation.epf} (GitHub: {@code Pr-Mex/vanessa-automation}); the zip holds
  * the epf next to its {@code locales/}, exactly the layout our local run recipe needs.
  * The Allure CLI pins {@code allure-framework/allure2}.</p>
  */

@@ -29,8 +29,8 @@ import org.osgi.framework.FrameworkUtil;
 /**
  * The mechanics behind {@code plugin_check_for_update} and {@code plugin_update}.
  *
- * <p>Why git and not a p2-HTTP update site: on the corporate GitLab the only
- * transport that authenticates a private repo is git smart-HTTP (the same one we
+ * <p>Why git and not a p2-HTTP update site: over git the only transport that
+ * authenticates a private repo is git smart-HTTP (the same one we
  * push with) — anonymous HTTP returns a login redirect, so the native "Check for
  * Updates" cannot reach a private repo. Instead the built plugin jar is committed
  * into an {@code update-site} branch of the plugin's own git repo; these tools
@@ -62,7 +62,8 @@ public final class PluginSelfUpdate
     /** Filename prefix of built bundle jars, {@code <sym>_<version>.jar}. */
     public static final String JAR_PREFIX = SYMBOLIC_NAME + "_"; //$NON-NLS-1$
 
-    /** The out-of-repo git credential config that authenticates gitlab (issue-free for a private repo). */
+    /** The out-of-repo git credential config that authenticates the private remote (issue-free
+     *  for a private repo). Override the built-in path by pointing {@code HOME} at a profile. */
     private static final String GIT_CONFIG_REL = ".1c-tools/gitlab-config"; //$NON-NLS-1$
     /** Local clone of the artifact branch. */
     private static final String CLONE_SUBDIR = ".1c-tools/vanessa/update-site"; //$NON-NLS-1$
