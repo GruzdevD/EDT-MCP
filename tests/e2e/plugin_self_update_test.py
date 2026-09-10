@@ -42,7 +42,7 @@ PORT = os.environ.get("MCP_PORT", "8766")
 MCP_SH = os.path.join(HOME, ".1c-tools/vanessa/mcp.sh")
 GIT_CONFIG_GLOBAL = os.path.join(HOME, ".1c-tools/gitlab-config")
 
-REMOTE = "https://github.com/<your-github-account>/EDT-MCP.git"
+REMOTE = "https://github.com/GruzdevD/EDT-MCP.git"
 BRANCH = "update-site"
 SYM = "com.ditrix.edt.mcp.server"
 JAR_PREFIX = SYM + "_"

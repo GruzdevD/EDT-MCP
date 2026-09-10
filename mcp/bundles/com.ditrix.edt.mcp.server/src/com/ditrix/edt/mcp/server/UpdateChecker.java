@@ -46,7 +46,7 @@ public final class UpdateChecker // NOSONAR intentional singleton (Eclipse servi
 
     /** Repo page URL opened in a browser on "Download" (set to the public fork). */
     public static final String RELEASES_PAGE_URL =
-        "https://github.com/<your-github-account>/EDT-MCP"; //$NON-NLS-1$
+        "https://github.com/GruzdevD/EDT-MCP"; //$NON-NLS-1$
 
     /** Initial delay before the very first check (ms). */
     private static final long INITIAL_DELAY_MS = 10_000L;

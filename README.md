@@ -47,7 +47,7 @@ MCP (Model Context Protocol) сервер-плагин для **1C:EDT**. Поз
 
 **Почему git, а не p2‑HTTP:** вместо нативного «Check for Updates», которому нужен p2‑HTTP, готовый jar коммитится в ветку `update-site` репозитория плагина, а инструменты подтягивают её по git (над публичным репозиторием — без аутентификации; над приватным — с git‑креденшелами проекта).
 
-- Репозиторий по умолчанию: `https://github.com/<your-github-account>/EDT-MCP.git`, ветка `update-site`.
+- Репозиторий по умолчанию: `https://github.com/GruzdevD/EDT-MCP.git`, ветка `update-site`.
 - Для аутентификации используется git‑конфиг `~/.1c-tools/gitlab-config` (token‑helper), `GIT_TERMINAL_PROMPT=0` (для публичного репозитория не требуется).
 - `runtimeBundlesInfo()` ищет `bundles.info` по `osgi.configuration.area` → `osgi.install.area` → `Platform`, по односегментному пути `…/configuration/org.eclipse.equinox.simpleconfigurator/bundles.info` (НЕ разбивая имя каталога по точкам).
 
@@ -328,7 +328,7 @@ set VER_EDT=2025.2.3+30
 ### Быстрый путь: установка по готовому jar (без форка и сборки)
 
 1. Скачать **install-zip** (jar + `INSTALL.md`) из ветки `update-site` репозитория:
-   `https://github.com/<your-github-account>/EDT-MCP/raw/update-site/install/edt-mcp-vanessa-install-1.0.0.202609060930.zip`
+   `https://github.com/GruzdevD/EDT-MCP/raw/update-site/install/edt-mcp-vanessa-install-1.0.0.202609060930.zip`
    (внутри — только `plugins/*.jar` и `INSTALL.md`).
    Альтернативно — взять jar из `plugins/` ветки `update-site` или с любой машины, где плагин уже стоит (`~/.p2/pool/plugins/`).
 2. Прогнать шаги **3 (установка в EDT)** и далее по этому руководству; разделы «Клонировать форк»/«Собрать плагин» — пропустить.
@@ -339,7 +339,7 @@ set VER_EDT=2025.2.3+30
 |---|---|---|
 | JDK **17** | `brew install openjdk@17`, `export JAVA_HOME=$(/usr/libexec/java_home -v 17)` | `java -version` → 17 |
 | Maven 3.8+ | `brew install maven` | `mvn -v` |
-| git + доступ к GitHub | ssh | `git ls-remote git@github.com:<your-github-account>/EDT-MCP.git` |
+| git + доступ к GitHub | ssh | `git ls-remote git@github.com:GruzdevD/EDT-MCP.git` |
 | EDT **2026.1/2026.2** | установлена через 1CEStart | в `~/Library/Application Support/1C/1cedtstart/installations/` |
 
 Для BDD-инструментов также нужен рабочий контур Vanessa Automation — **OneScript + vrunner** + сама **Vanessa Automation** + проект с `env.sh` и `.feature`-сценариями (см. [раздел 6](#6-окружение-vanessa-automation--onescript)) — и, для отчётов, [Allure commandline](#5-allure-cli-для-vanessa_open_allure_report).
@@ -348,7 +348,7 @@ set VER_EDT=2025.2.3+30
 
 ```bash
 mkdir -p ~/git && cd ~/git
-git clone git@github.com:<your-github-account>/EDT-MCP.git edt-mcp-vanessa
+git clone git@github.com:GruzdevD/EDT-MCP.git edt-mcp-vanessa
 cd edt-mcp-vanessa
 git checkout github-fork
 ```

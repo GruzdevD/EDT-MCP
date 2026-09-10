@@ -54,7 +54,7 @@ public final class PluginSelfUpdate
      * artifact branch {@code update-site} must hold the built {@code plugins/*.jar}).
      */
     public static final String DEFAULT_REPO =
-        "https://github.com/<your-github-account>/EDT-MCP.git"; //$NON-NLS-1$
+        "https://github.com/GruzdevD/EDT-MCP.git"; //$NON-NLS-1$
     /** Branch holding the built {@code plugins/*.jar}. */
     public static final String DEFAULT_BRANCH = "update-site"; //$NON-NLS-1$
     /** Bundle symbolic name of this plugin. */
