@@ -373,12 +373,32 @@
             restorable="true">
          <description>%allure.view.description</description>
       </view>
+
+      <!-- Test Selection View (vanessa): choose and run YAxUnit modules / Vanessa BDD
+           features, with an embedded JUnit-Markdown report pane. -->
+      <view
+            id="com.ozon.edt.mcp.server.tests.testSelectionView"
+            name="%testSelection.view.name"
+            icon="icons/restart.png"
+            category="com.ozon.edt.mcp.server.tags.viewCategory"
+            class="com.ozon.edt.mcp.server.ui.TestSelectionView"
+            allowMultiple="false"
+            restorable="true">
+         <description>%testSelection.view.description</description>
+      </view>
    </extension>
 
    <!-- Add Allure Report View to Window > Show View menu -->
    <extension point="org.eclipse.ui.perspectiveExtensions">
       <perspectiveExtension targetID="*">
          <viewShortcut id="com.ozon.edt.mcp.server.allure.allureView"/>
+      </perspectiveExtension>
+   </extension>
+
+   <!-- Add Test Selection View to Window > Show View menu -->
+   <extension point="org.eclipse.ui.perspectiveExtensions">
+      <perspectiveExtension targetID="*">
+         <viewShortcut id="com.ozon.edt.mcp.server.tests.testSelectionView"/>
       </perspectiveExtension>
    </extension>
 

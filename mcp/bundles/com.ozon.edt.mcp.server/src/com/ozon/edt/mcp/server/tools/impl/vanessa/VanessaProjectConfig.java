@@ -13,26 +13,42 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.IPath;
+
 import com.ozon.edt.mcp.server.protocol.ToolResult;
+import com.ozon.edt.mcp.server.utils.ProjectContext;
 
 /**
  * The runtime parameters needed to launch a Vanessa Automation BDD run on a
- * project, read from the project's out-of-repo {@code env.sh} (the same source
+ * project, read from the project's {@code env.sh} (the same source
  * {@code run-edt.sh} uses).
  *
- * <p>Layout: {@code workspace/.1c-tools/vanessa/projects/&lt;project&gt;/env.sh}
- * under the user home is NOT a git repo; the values there (infobase, binary,
- * VAParams, launch config, VA_Runner) are the operator-edited source of truth
- * for every project. This class parses the simple {@code KEY="value"} lines and
- * expands {@code $HOME} (and already-parsed variables referenced with {@code $X}).
+ * <p><b>Primary (provisioned) layout:</b> {@code &lt;EDT-project-root&gt;/.vanessa/env.sh} -
+ * the plugin creates this directory at activation ({@code VanessaBootstrap}) so the VA
+ * environment travels with the project. <b>Legacy fallback:</b>
+ * {@code ~/.1c-tools/vanessa/projects/&lt;project&gt;/env.sh} is still honoured for
+ * previously-configured projects. The values (infobase, binary, VAParams, launch config,
+ * VA_Runner) are the operator-edited source of truth. This class parses the simple
+ * {@code KEY="value"} lines and expands {@code $HOME} (and already-parsed variables
+ * referenced with {@code $X}).</p>
+ *
+ * <p>The candidate-priority logic is pure ({@link #resolveEnvCandidates}) so the ordering
+ * and fallback are unit-testable without an EDT runtime; the workspace lookup for the project
+ * root is isolated in {@link #projectRoot} and degrades gracefully to the legacy layout.</p>
  */
 public final class VanessaProjectConfig
 {
-    /** Prefix of the out-of-git config directory the operator keeps per project. */
+    /** Prefix of the out-of-git config directory the operator keeps per project (legacy). */
     private static final String VANESSA_WS = ".1c-tools/vanessa"; //$NON-NLS-1$
+
+    /** Per-project VA directory the plugin provisions in the EDT project root (primary). */
+    static final String VANESSA_DIR = ".vanessa"; //$NON-NLS-1$
 
     private static final String KEY_PROJ = "PROJ"; //$NON-NLS-1$
     private static final String KEY_IB_BASE = "IB_BASE"; //$NON-NLS-1$
@@ -124,28 +140,118 @@ public final class VanessaProjectConfig
     }
 
     /**
-     * Path to the out-of-git {@code env.sh} for a project.
+     * The active {@code env.sh} for a project: the first existing candidate in priority
+     * order ({@code <projectRoot>/.vanessa/env.sh} preferred, then the legacy
+     * {@code ~/.1c-tools/vanessa/projects/<project>/env.sh}). When neither exists, the most
+     * preferred candidate path is returned so callers report the location to provide.
+     *
+     * @param project project key
+     * @return the active env.sh path (never {@code null})
      */
     static Path envPath(String project)
     {
-        String home = System.getProperty("user.home"); //$NON-NLS-1$
-        return Paths.get(home, VANESSA_WS, "projects", project, "env.sh"); //$NON-NLS-1$ //$NON-NLS-2$
+        List<Path> candidates = resolveEnvCandidates(
+            projectRoot(project), project, System.getProperty("user.home")); //$NON-NLS-1$
+        for (Path candidate : candidates)
+        {
+            if (candidate != null && Files.isRegularFile(candidate))
+            {
+                return candidate;
+            }
+        }
+        return candidates.isEmpty() ? null : candidates.get(0);
     }
 
     /**
-     * Path to the {@code va/<project>} directory holding generated run artifacts.
+     * Ordered {@code env.sh} candidates for a project, most-preferred first. Pure: no
+     * filesystem access, no workspace - the caller picks which candidate exists.
+     *
+     * @param projectRoot the on-disk EDT project root, or {@code null}
+     * @param project the project key
+     * @param userHome the user home directory
+     * @return the candidate paths in priority order (never {@code null}, never empty)
+     */
+    static List<Path> resolveEnvCandidates(Path projectRoot, String project, String userHome)
+    {
+        List<Path> candidates = new ArrayList<>();
+        if (projectRoot != null)
+        {
+            candidates.add(projectRoot.resolve(VANESSA_DIR).resolve("env.sh")); //$NON-NLS-1$
+        }
+        if (userHome != null)
+        {
+            candidates.add(
+                Paths.get(userHome, VANESSA_WS, "projects", project, "env.sh")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return candidates;
+    }
+
+    /**
+     * On-disk root of the EDT project, or {@code null} when the project does not resolve
+     * (e.g. headless context, or a Vanessa project key that is not an EDT project name).
+     *
+     * @param project project key
+     * @return the absolute project root, or {@code null}
+     */
+    static Path projectRoot(String project)
+    {
+        try
+        {
+            IProject p = ProjectContext.of(project).project();
+            if (p == null)
+            {
+                return null;
+            }
+            IPath location = p.getLocation();
+            return location == null ? null : location.toFile().toPath();
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            // No EDT workspace here (pure unit run): callers fall back to the legacy layout.
+            return null;
+        }
+    }
+
+    /**
+     * The per-project {@code .vanessa/} directory under an EDT project root - the
+     * provisioned home of env.sh / VAParams.json / features / run artifacts.
+     *
+     * @param projectRoot the on-disk EDT project root (non-null)
+     * @return the {@code .vanessa} directory path
+     */
+    static Path vanessaDir(Path projectRoot)
+    {
+        return projectRoot.resolve(VANESSA_DIR);
+    }
+
+    /**
+     * Path to the {@code va/<project>} directory holding generated run artifacts -
+     * {@code <projectRoot>/.vanessa/va/<project>} for a resolvable EDT project, else the
+     * legacy {@code ~/.1c-tools/vanessa/va/<project>}.
      */
     public Path vaDir()
     {
+        Path projectRoot = projectRoot(project);
+        if (projectRoot != null)
+        {
+            return projectRoot.resolve(VANESSA_DIR).resolve("va").resolve(project); //$NON-NLS-1$
+        }
         String home = System.getProperty("user.home"); //$NON-NLS-1$
         return Paths.get(home, VANESSA_WS, "va", project); //$NON-NLS-1$
     }
 
     /**
-     * Path to the {@code out/<project>} directory holding logs + reports.
+     * Path to the {@code out/<project>} directory holding logs + reports -
+     * {@code <projectRoot>/.vanessa/out/<project>} for a resolvable EDT project, else the
+     * legacy {@code ~/.1c-tools/vanessa/out/<project>}.
      */
     public Path outDir()
     {
+        Path projectRoot = projectRoot(project);
+        if (projectRoot != null)
+        {
+            return projectRoot.resolve(VANESSA_DIR).resolve("out").resolve(project); //$NON-NLS-1$
+        }
         String home = System.getProperty("user.home"); //$NON-NLS-1$
         return Paths.get(home, VANESSA_WS, "out", project); //$NON-NLS-1$
     }
@@ -232,8 +338,9 @@ public final class VanessaProjectConfig
      */
     public static String notFoundMessage(String project)
     {
-        return "No Vanessa project config for '" + project + "'. Expected env.sh at " //$NON-NLS-1$ //$NON-NLS-2$
-            + envPath(project).toAbsolutePath() + " (see ~/.1c-tools/vanessa/projects/<proj>/env.sh)."; //$NON-NLS-1$
+        return "No Vanessa project config for '" + project + "'. Provide env.sh at " //$NON-NLS-1$ //$NON-NLS-2$
+            + envPath(project).toAbsolutePath() + " (preferred: <project>/.vanessa/env.sh via " //$NON-NLS-1$
+            + "vanessa_setup; legacy: ~/.1c-tools/vanessa/projects/<proj>/env.sh)."; //$NON-NLS-1$
     }
 
     /**

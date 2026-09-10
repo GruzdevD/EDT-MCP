@@ -75,6 +75,7 @@ import com.ozon.edt.mcp.server.tools.impl.GitTool;
 import com.ozon.edt.mcp.server.tools.impl.ListGitBranchesTool;
 import com.ozon.edt.mcp.server.tools.impl.ListConfigurationsTool;
 import com.ozon.edt.mcp.server.tools.impl.ListModulesTool;
+import com.ozon.edt.mcp.server.tools.impl.ListYaxunitTestsTool;
 import com.ozon.edt.mcp.server.tools.impl.ListProjectsTool;
 import com.ozon.edt.mcp.server.tools.impl.ListSubsystemsTool;
 import com.ozon.edt.mcp.server.tools.impl.ListToolsetsTool;
@@ -115,6 +116,8 @@ import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaListLaunchesTool;
 import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaOpenAllureReportTool;
 import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaRunByTagsTool;
 import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaRunFeatureTool;
+import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaDoctorTool;
+import com.ozon.edt.mcp.server.tools.impl.vanessa.VanessaSetupTool;
 
 /**
  * Registers all built-in MCP tools into an {@link McpToolRegistry}.
@@ -201,6 +204,7 @@ public final class BuiltInToolRegistrar
         catalogue.add(new CreateLaunchConfigTool());
         catalogue.add(new DeleteLaunchConfigTool());
         catalogue.add(new RunYaxunitTestsTool());
+        catalogue.add(new ListYaxunitTestsTool());
         catalogue.add(new AskWorkmateTool());
         catalogue.add(new GetJobStatusTool());
         catalogue.add(new CancelJobTool());
@@ -273,6 +277,8 @@ public final class BuiltInToolRegistrar
         catalogue.add(new VanessaGetLogTool());
         catalogue.add(new VanessaGetArtifactsTool());
         catalogue.add(new VanessaOpenAllureReportTool());
+        catalogue.add(new VanessaDoctorTool());
+        catalogue.add(new VanessaSetupTool());
 
         registry.replaceAll(catalogue);
         Activator.logInfo("Registered " + registry.getToolCount() + " MCP tools"); //$NON-NLS-1$ //$NON-NLS-2$

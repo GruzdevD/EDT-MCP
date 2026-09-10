@@ -68,7 +68,7 @@ public class VanessaGetLogToolTest
     public void testExecuteWithoutSelectorsFails()
     {
         assertTrue(new VanessaGetLogTool().execute(new HashMap<>()) //$NON-NLS-1$
-            .contains("\"success\": false")); //$NON-NLS-1$
+            .contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -77,7 +77,7 @@ public class VanessaGetLogToolTest
         Map<String, String> params = new HashMap<>();
         params.put("logPath", "/no/such/log"); //$NON-NLS-1$
         assertTrue(new VanessaGetLogTool().execute(params) //$NON-NLS-1$
-            .contains("\"success\": false")); //$NON-NLS-1$
+            .contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test

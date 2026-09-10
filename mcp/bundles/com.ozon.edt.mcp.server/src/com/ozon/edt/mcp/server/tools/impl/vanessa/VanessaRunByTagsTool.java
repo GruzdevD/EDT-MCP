@@ -91,6 +91,14 @@ public class VanessaRunByTagsTool implements IMcpTool
             return ToolResult.error(VanessaProjectConfig.notFoundMessage(project.trim())).toJson(); //$NON-NLS-1$
         }
 
+        // Lazy provisioning: start the VA runtime download if it is missing (see run_feature).
+        String pending = VanessaBootstrap.lazyEpfPending(NAME,
+            VanessaProjectConfig.projectRoot(project.trim()), project.trim());
+        if (pending != null)
+        {
+            return ToolResult.error(pending).toJson(); //$NON-NLS-1$
+        }
+
         String feature = params.get(KEY_FEATURE_DIR);
         if (feature == null || feature.trim().isEmpty())
         {

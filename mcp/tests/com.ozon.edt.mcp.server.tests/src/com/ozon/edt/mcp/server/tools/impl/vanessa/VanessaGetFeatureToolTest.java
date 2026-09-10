@@ -67,7 +67,7 @@ public class VanessaGetFeatureToolTest
     public void testExecuteWithoutPathFails()
     {
         assertTrue(new VanessaGetFeatureTool().execute(new HashMap<>())
-            .contains("\"success\": false")); //$NON-NLS-1$
+            .contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -76,7 +76,7 @@ public class VanessaGetFeatureToolTest
         Map<String, String> params = new HashMap<>();
         params.put("path", "/no/such/path.feature"); //$NON-NLS-1$
         assertTrue(new VanessaGetFeatureTool().execute(params)
-            .contains("\"success\": false")); //$NON-NLS-1$
+            .contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -92,7 +92,7 @@ public class VanessaGetFeatureToolTest
         Map<String, String> params = new HashMap<>();
         params.put("path", f.toString()); //$NON-NLS-1$
         String result = new VanessaGetFeatureTool().execute(params);
-        assertTrue(result.contains("\"success\": true")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":true")); //$NON-NLS-1$
 
         JsonObject o = JsonParser.parseString(result).getAsJsonObject();
         assertEquals("Демо", o.get("feature").getAsString()); //$NON-NLS-1$
@@ -117,7 +117,7 @@ public class VanessaGetFeatureToolTest
         Map<String, String> params = new HashMap<>();
         params.put("path", f.toString()); //$NON-NLS-1$
         String result = new VanessaGetFeatureTool().execute(params);
-        assertTrue(result.contains("\"success\": true")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":true")); //$NON-NLS-1$
 
         JsonObject o = JsonParser.parseString(result).getAsJsonObject();
         assertEquals("Демо RU", o.get("feature").getAsString()); //$NON-NLS-1$

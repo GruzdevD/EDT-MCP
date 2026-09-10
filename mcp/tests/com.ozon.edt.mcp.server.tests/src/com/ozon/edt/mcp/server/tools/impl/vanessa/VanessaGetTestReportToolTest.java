@@ -67,7 +67,7 @@ public class VanessaGetTestReportToolTest
     {
         String result = new VanessaGetTestReportTool().execute(new HashMap<>());
         assertNotNull(result);
-        assertTrue(result.contains("\"success\": false")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -77,7 +77,7 @@ public class VanessaGetTestReportToolTest
         params.put("launchId", "999999"); //$NON-NLS-1$
         String result = new VanessaGetTestReportTool().execute(params);
         assertNotNull(result);
-        assertTrue(result.contains("\"success\": false")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -87,6 +87,6 @@ public class VanessaGetTestReportToolTest
         params.put("junitReportPath", "/no/such/path/junit.xml"); //$NON-NLS-1$
         String result = new VanessaGetTestReportTool().execute(params);
         assertNotNull(result);
-        assertTrue(result.contains("\"success\": false")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":false")); //$NON-NLS-1$
     }
 }

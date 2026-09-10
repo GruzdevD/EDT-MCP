@@ -12,7 +12,9 @@ import static org.junit.Assert.assertNotNull;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Comparator;
+import java.util.List;
 
 import org.junit.After;
 import org.junit.Before;
@@ -84,6 +86,25 @@ public class VanessaProjectConfigTest
         assertNotNull(config);
         assertEquals("mom", config.project); //$NON-NLS-1$
         assertEquals("VA_Runner", config.edtProj); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testResolveEnvCandidatesPreferenceAndFallback()
+    {
+        // A resolvable EDT project root prefers the provisioned .vanessa/env.sh.
+        List<Path> withRoot =
+            VanessaProjectConfig.resolveEnvCandidates(Paths.get("/proj/afm"), "afm", "/home/u"); //$NON-NLS-1$
+        assertNotNull(withRoot);
+        assertEquals(2, withRoot.size());
+        assertEquals(Paths.get("/proj/afm/.vanessa/env.sh"), withRoot.get(0)); //$NON-NLS-1$
+        assertEquals(Paths.get("/home/u/.1c-tools/vanessa/projects/afm/env.sh"), withRoot.get(1)); //$NON-NLS-1$
+
+        // No project root (headless / non-EDT project key) -> only the legacy candidate, so
+        // previously-configured projects keep resolving exactly where they always did.
+        List<Path> noRoot =
+            VanessaProjectConfig.resolveEnvCandidates(null, "afm", "/home/u"); //$NON-NLS-1$
+        assertEquals(1, noRoot.size());
+        assertEquals(Paths.get("/home/u/.1c-tools/vanessa/projects/afm/env.sh"), noRoot.get(0)); //$NON-NLS-1$
     }
 
     private void writeEnv(String content) throws Exception

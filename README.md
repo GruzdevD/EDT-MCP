@@ -16,7 +16,7 @@ MCP (Model Context Protocol) сервер-плагин для **1C:EDT**. Поз
 
 ### 1. BDD-инструменты Vanessa Automation
 
-Набор из **4 MCP‑инструментов**, который превращает плагин из «наблюдателя за EDT» ещё и в **запускатор и анализатор BDD/VA‑прогонов**. Полный живой цикл: запустил фичу → отследил статус → получил структурированный отчёт (JUnit XML).
+Набор MCP‑инструментов, который превращает плагин из «наблюдателя за EDT» ещё и в **запускатор и анализатор BDD/VA‑прогонов**, с **провижинингом VA «под ключ»**. Полный живой цикл: установил/провижинил (`vanessa_setup`, готовность `vanessa_doctor`) → запустил фичу (`vanessa_run_feature`) → отследил статус → получил структурированный отчёт (JUnit XML).
 
 | Инструмент | Что делает |
 |---|---|
@@ -24,9 +24,12 @@ MCP (Model Context Protocol) сервер-плагин для **1C:EDT**. Поз
 | `vanessa_get_execution_status` | Статус прогона по `launchId`: `running` / `passed` / `failed`. |
 | `vanessa_get_test_report` | Структурированный отчёт (`verdict`, сюиты, тест‑кейсы, статусы, время) — по `launchId` или по готовому JUnit XML. |
 | `vanessa_list_launches` | Список известных прогонов VA. |
+| `vanessa_doctor` *(новое)* | Read‑only отчёт готовности проекта к VA: наличие `.vanessa/`, `env.sh`, `VAParams.json`, рантайма `.epf`, Allure. Ничего не качает. |
+| `vanessa_setup` *(новое)* | Явный провижининг «под ключ»: создаёт `.vanessa/` и лениво докачивает `.epf`-рантайм (опц. Allure) как фоновое задание `get_job_status`; интерфейс для харнесса. |
 
 **Как устроено:**
-- Параметры проекта читаются из `~/.1c-tools/vanessa/projects/<project>/env.sh` (ИБ, пользователь/пароль БД, порт MCP, launch‑конфиг EDT, каталог фич).
+- Параметры проекта читаются из `<EDT-проект>/.vanessa/env.sh` (провижинится плагином), с фолбэком на `~/.1c-tools/vanessa/projects/<project>/env.sh` (ИБ, пользователь/пароль БД, порт MCP, launch‑конфиг EDT, каталог фич).
+- **Провижининг «под ключ».** При активации плагин создаёт `.vanessa/` (env.sh, VAParams.json, `features/`, `out/`) всем проектам EDT; тяжёлый рантайм `vanessa-automation.epf` качается лениво при первом VA‑прогоне в общий кэш `~/.1c-tools/vanessa/va/<ver>/`. Готовность проекта показывает `vanessa_doctor`, явная установка — `vanessa_setup` (доступно харнессу).
 - Запуск идёт через общий `LaunchTool` с `startupOption = StartFeaturePlayer;VAParams=<override>`.
 - Терминальное состояние прогона определяется по **артефактам на диске** (status/логи/JUnit в `out/<project>/`), а не только по выходу процесса — так статус корректен для длинных UI‑прогонов.
 
@@ -201,7 +204,7 @@ set VER_EDT=2025.2.3+30
 | **Refactoring** | Создание, переименование, удаление, свойства метаданных и СКД | `rename_metadata_object`, `delete_metadata`, `create_metadata`, `modify_metadata`, `adopt_metadata_object` |
 | **Translation** | Синхронизация переводов (LanguageTool) | `generate_translation_strings`, `translate_configuration`, `get_translation_project_info` |
 | **Comparison** | Трёхстороннее сравнение конфигураций | `compare_configurations`, `get_comparison_node`, `merge_rules` |
-| **Vanessa / BDD** *(форк)* | Запуск и анализ Vanessa Automation | `vanessa_run_feature`, `vanessa_get_execution_status`, `vanessa_get_test_report`, `vanessa_list_launches` |
+| **Vanessa / BDD** *(форк)* | Запуск и анализ Vanessa Automation + провижининг | `vanessa_run_feature`, `vanessa_get_execution_status`, `vanessa_get_test_report`, `vanessa_list_launches`, `vanessa_doctor`, `vanessa_setup` |
 | **Self-update** *(форк)* | Самообновление плагина | `plugin_check_for_update`, `plugin_update` |
 
 Включение/отключение — во вкладке **Tools** (**Window → Preferences → MCP Server**). Отключённые инструменты исключаются из `tools/list`; при прямом вызове через `tools/call` сервер сообщит, что инструмент отключён.

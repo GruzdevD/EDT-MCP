@@ -137,6 +137,15 @@ public class VanessaRunFeatureTool implements IMcpTool
             return ToolResult.error(VanessaProjectConfig.notFoundMessage(project.trim())).toJson(); //$NON-NLS-1$
         }
 
+        // Lazy provisioning: if the VA runtime epf is not installed yet, start its download
+        // and tell the caller to retry once it lands (do not run without the runtime).
+        String pending = VanessaBootstrap.lazyEpfPending(NAME,
+            VanessaProjectConfig.projectRoot(project.trim()), project.trim());
+        if (pending != null)
+        {
+            return ToolResult.error(pending).toJson(); //$NON-NLS-1$
+        }
+
         String feature = params.get(KEY_FEATURE);
         if (feature == null || feature.trim().isEmpty())
         {

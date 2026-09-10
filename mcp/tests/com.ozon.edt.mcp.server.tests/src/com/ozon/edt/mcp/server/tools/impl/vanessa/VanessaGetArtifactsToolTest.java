@@ -67,7 +67,7 @@ public class VanessaGetArtifactsToolTest
     public void testExecuteWithoutSelectorsFails()
     {
         assertTrue(new VanessaGetArtifactsTool().execute(new HashMap<>()) //$NON-NLS-1$
-            .contains("\"success\": false")); //$NON-NLS-1$
+            .contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -76,7 +76,7 @@ public class VanessaGetArtifactsToolTest
         Map<String, String> params = new HashMap<>();
         params.put("outDir", "/no/such/dir"); //$NON-NLS-1$
         assertTrue(new VanessaGetArtifactsTool().execute(params) //$NON-NLS-1$
-            .contains("\"success\": false")); //$NON-NLS-1$
+            .contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test

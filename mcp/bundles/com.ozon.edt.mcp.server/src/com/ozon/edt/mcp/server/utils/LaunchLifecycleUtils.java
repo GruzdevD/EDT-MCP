@@ -345,8 +345,18 @@ public final class LaunchLifecycleUtils
     /** Production default for {@link #syncSettleWindowMs}: 5 seconds. */
     static final long DEFAULT_SYNC_SETTLE_WINDOW_MS = 5000L;
 
-    /** Production default for {@link #syncApplyTimeoutMs}: 120 seconds. */
-    static final long DEFAULT_SYNC_APPLY_TIMEOUT_MS = 120_000L;
+    /**
+     * Production default for {@link #syncApplyTimeoutMs}: 30 minutes.
+     *
+     * <p>This is a {@linkplain #awaitUpdateState backstop} only, not a target wait: the
+     * wait is event-driven and returns as soon as the IB is observed {@code UPDATED}, so a
+     * light project starts almost immediately and a heavy one is given the minutes a real DB
+     * update needs. The bound exists solely so a genuinely-stuck update (never lands,
+     * never fires the update event) does not hold a background prep job - and with it the
+     * PREP_INFLIGHT entry and the per-IB lock - forever with no escape. The wait is
+     * interrupt-aware ({@code cancel_job} / EDT shutdown abort it regardless of this bound).</p>
+     */
+    static final long DEFAULT_SYNC_APPLY_TIMEOUT_MS = 1_800_000L;
 
     /** Production default for {@link #syncPollIntervalMs}: 500 ms. */
     static final long DEFAULT_SYNC_POLL_INTERVAL_MS = 500L;

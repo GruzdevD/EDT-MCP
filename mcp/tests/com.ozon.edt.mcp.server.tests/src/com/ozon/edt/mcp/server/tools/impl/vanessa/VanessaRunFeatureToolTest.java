@@ -78,7 +78,7 @@ public class VanessaRunFeatureToolTest
     {
         String result = new VanessaRunFeatureTool().execute(new HashMap<>());
         assertNotNull(result);
-        assertTrue(result.contains("\"success\": false")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -90,6 +90,6 @@ public class VanessaRunFeatureToolTest
         params.put("project", "no_such_vanessa_project"); //$NON-NLS-1$
         String result = new VanessaRunFeatureTool().execute(params);
         assertNotNull(result);
-        assertTrue(result.contains("\"success\": false")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":false")); //$NON-NLS-1$
     }
 }

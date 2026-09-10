@@ -67,7 +67,7 @@ public class VanessaRunByTagsToolTest
         Map<String, String> params = new HashMap<>();
         params.put("tags", "smoke"); //$NON-NLS-1$
         assertTrue(new VanessaRunByTagsTool().execute(params)
-            .contains("\"success\": false")); //$NON-NLS-1$
+            .contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -76,7 +76,7 @@ public class VanessaRunByTagsToolTest
         Map<String, String> params = new HashMap<>();
         params.put("project", "afm"); //$NON-NLS-1$
         assertTrue(new VanessaRunByTagsTool().execute(params)
-            .contains("\"success\": false")); //$NON-NLS-1$
+            .contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -86,6 +86,6 @@ public class VanessaRunByTagsToolTest
         params.put("project", "no_such_vanessa_project"); //$NON-NLS-1$
         params.put("tags", "smoke"); //$NON-NLS-1$
         assertTrue(new VanessaRunByTagsTool().execute(params)
-            .contains("\"success\": false")); //$NON-NLS-1$
+            .contains("\"success\":false")); //$NON-NLS-1$
     }
 }

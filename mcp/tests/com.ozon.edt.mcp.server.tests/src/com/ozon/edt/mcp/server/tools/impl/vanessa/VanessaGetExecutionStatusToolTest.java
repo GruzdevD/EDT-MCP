@@ -66,7 +66,7 @@ public class VanessaGetExecutionStatusToolTest
     {
         String result = new VanessaGetExecutionStatusTool().execute(new HashMap<>());
         assertNotNull(result);
-        assertTrue(result.contains("\"success\": false")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -76,7 +76,7 @@ public class VanessaGetExecutionStatusToolTest
         params.put("launchId", "not-a-number"); //$NON-NLS-1$
         String result = new VanessaGetExecutionStatusTool().execute(params);
         assertNotNull(result);
-        assertTrue(result.contains("\"success\": false")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -86,6 +86,6 @@ public class VanessaGetExecutionStatusToolTest
         params.put("launchId", "999999"); //$NON-NLS-1$
         String result = new VanessaGetExecutionStatusTool().execute(params);
         assertNotNull(result);
-        assertTrue(result.contains("\"success\": false")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":false")); //$NON-NLS-1$
     }
 }

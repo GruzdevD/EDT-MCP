@@ -91,7 +91,7 @@ public class VanessaListFeaturesToolTest
     {
         String result = new VanessaListFeaturesTool().execute(new HashMap<>());
         assertNotNull(result);
-        assertTrue(result.contains("\"success\": false")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -99,7 +99,7 @@ public class VanessaListFeaturesToolTest
     {
         Map<String, String> params = new HashMap<>();
         params.put("project", "no_such_vanessa_project"); //$NON-NLS-1$
-        assertTrue(new VanessaListFeaturesTool().execute(params).contains("\"success\": false")); //$NON-NLS-1$
+        assertTrue(new VanessaListFeaturesTool().execute(params).contains("\"success\":false")); //$NON-NLS-1$
     }
 
     @Test
@@ -108,7 +108,7 @@ public class VanessaListFeaturesToolTest
         Map<String, String> params = new HashMap<>();
         params.put("project", "testproj"); //$NON-NLS-1$
         String result = new VanessaListFeaturesTool().execute(params);
-        assertTrue(result.contains("\"success\": true")); //$NON-NLS-1$
+        assertTrue(result.contains("\"success\":true")); //$NON-NLS-1$
 
         JsonObject o = JsonParser.parseString(result).getAsJsonObject();
         assertEquals(1, o.get("count").getAsInt()); //$NON-NLS-1$
