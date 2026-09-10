@@ -25,7 +25,8 @@ public enum ToolGroup
         "get_configuration_properties", //$NON-NLS-1$
         "clean_project", "revalidate_objects", "resync_to_disk", "get_check_description", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "export_configuration_to_xml", "import_configuration_from_xml", //$NON-NLS-1$ //$NON-NLS-2$
-        "delete_project", "create_project", "get_event_log", "get_mcp_history"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "delete_project", "create_project", "get_event_log", "get_mcp_history", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "plugin_check_for_update", "plugin_update"), //$NON-NLS-1$ //$NON-NLS-2$
 
     PROBLEMS("problems", "Errors & Problems", //$NON-NLS-1$ //$NON-NLS-2$
         "Error reporting, validation, and workspace markers (bookmarks, tasks)", //$NON-NLS-1$
@@ -47,11 +48,13 @@ public enum ToolGroup
             + "background jobs, and Workmate", //$NON-NLS-1$
         "get_applications", "list_configurations", "create_launch_config", "delete_launch_config", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "create_infobase", "delete_infobase", "update_database", "launch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "terminate_launch", "run_yaxunit_tests", "ask_workmate", "get_job_status", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "terminate_launch", "run_yaxunit_tests", "list_yaxunit_tests", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "ask_workmate", "get_job_status", //$NON-NLS-1$ //$NON-NLS-2$
         "cancel_job", "build_external_objects", "set_infobase_credentials", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "vanessa_list_launches", "vanessa_list_features", "vanessa_get_feature", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "vanessa_run_feature", "vanessa_run_by_tags", "vanessa_get_execution_status", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "vanessa_get_test_report", "vanessa_get_log", "vanessa_get_artifacts"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "vanessa_get_test_report", "vanessa_get_log", "vanessa_get_artifacts", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "vanessa_doctor", "vanessa_setup", "vanessa_open_allure_report"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
     DEBUG("debug", "Debugging", //$NON-NLS-1$ //$NON-NLS-2$
         "Breakpoints, stepping, variables, expression evaluation, and profiling", //$NON-NLS-1$
