@@ -132,6 +132,20 @@ public final class PreferenceConstants
     /** Default auth token (empty = authentication disabled) */
     public static final String DEFAULT_AUTH_TOKEN = ""; //$NON-NLS-1$
 
+    // === Allure report preferences (edt-mcp-vanessa) ===
+
+    /** Raw Allure results dir used by the in-EDT Allure view (empty = auto-detect from the run's out dir). */
+    public static final String PREF_ALLURE_RESULTS_DIR = "allure.resultsDir"; //$NON-NLS-1$
+
+    /** Dir the generated Allure report is placed in (empty = auto-detect, a sibling of the results dir). */
+    public static final String PREF_ALLURE_REPORT_DIR = "allure.reportDir"; //$NON-NLS-1$
+
+    /** Default: auto-detect both dirs (current behaviour). */
+    public static final String DEFAULT_ALLURE_RESULTS_DIR = ""; //$NON-NLS-1$
+
+    /** Default: auto-detect both dirs (current behaviour). */
+    public static final String DEFAULT_ALLURE_REPORT_DIR = ""; //$NON-NLS-1$
+
     // === Destructive-operation consent preferences ===
 
     /**

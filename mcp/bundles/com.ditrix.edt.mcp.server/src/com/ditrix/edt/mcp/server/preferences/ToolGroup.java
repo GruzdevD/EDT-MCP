@@ -48,7 +48,10 @@ public enum ToolGroup
         "get_applications", "list_configurations", "create_launch_config", "delete_launch_config", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "create_infobase", "delete_infobase", "update_database", "launch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "terminate_launch", "run_yaxunit_tests", "ask_workmate", "get_job_status", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "cancel_job", "build_external_objects", "set_infobase_credentials"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "cancel_job", "build_external_objects", "set_infobase_credentials", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "vanessa_list_launches", "vanessa_list_features", "vanessa_get_feature", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "vanessa_run_feature", "vanessa_run_by_tags", "vanessa_get_execution_status", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "vanessa_get_test_report", "vanessa_get_log", "vanessa_get_artifacts"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
     DEBUG("debug", "Debugging", //$NON-NLS-1$ //$NON-NLS-2$
         "Breakpoints, stepping, variables, expression evaluation, and profiling", //$NON-NLS-1$

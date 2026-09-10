@@ -68,6 +68,8 @@ public class GeneralTab
     private Button startButton;
     private Button stopButton;
     private Button restartButton;
+    private Text allureResultsDirText;
+    private Text allureReportDirText;
 
     /** Track created images for disposal */
     private final List<org.eclipse.swt.graphics.Image> managedImages = new ArrayList<>();
@@ -107,6 +109,7 @@ public class GeneralTab
         createConsentSection();
         createUpdateSection();
         createServerControlSection();
+        createAllureSection();
     }
 
     public Composite getControl()
@@ -479,6 +482,59 @@ public class GeneralTab
     }
 
     /**
+     * Allure report directory preferences (edt-mcp-vanessa): raw results input dir and the
+     * generated-report output dir, both empty by default (= auto-detect from a run's out dir).
+     */
+    private void createAllureSection()
+    {
+        // Separator
+        Label separator = new Label(composite, SWT.HORIZONTAL | SWT.SEPARATOR);
+        GridData sepGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        sepGd.horizontalSpan = 3;
+        sepGd.verticalIndent = 5;
+        separator.setLayoutData(sepGd);
+        // Section title
+        Label sectionTitle = new Label(composite, SWT.NONE);
+        sectionTitle.setText(Messages.GeneralTab_AllureSection);
+        GridData titleGd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
+        titleGd.horizontalSpan = 3;
+        sectionTitle.setLayoutData(titleGd);
+        // Raw results dir
+        createLabel(Messages.GeneralTab_AllureResultsDir);
+        allureResultsDirText = new Text(composite, SWT.BORDER);
+        allureResultsDirText.setText(store.getString(PreferenceConstants.PREF_ALLURE_RESULTS_DIR));
+        allureResultsDirText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        createBrowseButton(composite, allureResultsDirText, Messages.GeneralTab_SelectAllureResultsDir);
+        // Report output dir
+        createLabel(Messages.GeneralTab_AllureReportDir);
+        allureReportDirText = new Text(composite, SWT.BORDER);
+        allureReportDirText.setText(store.getString(PreferenceConstants.PREF_ALLURE_REPORT_DIR));
+        allureReportDirText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        createBrowseButton(composite, allureReportDirText, Messages.GeneralTab_SelectAllureReportDir);
+    }
+
+    /** A Browse button that fills {@code target} with a chosen directory. */
+    private void createBrowseButton(Composite parent, Text target, String message)
+    {
+        Button browseButton = new Button(parent, SWT.PUSH);
+        browseButton.setText(Messages.GeneralTab_Browse);
+        browseButton.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent e)
+            {
+                DirectoryDialog dialog = new DirectoryDialog(parent.getShell());
+                dialog.setMessage(message);
+                String path = dialog.open();
+                if (path != null)
+                {
+                    target.setText(path);
+                }
+            }
+        });
+    }
+
+    /**
      * The address an MCP client connects to.
      * <p>
      * The port is the one a client can reach RIGHT NOW: a running server keeps serving the port it
@@ -694,6 +750,9 @@ public class GeneralTab
         {
             store.setValue(PreferenceConstants.PREF_DESTRUCTIVE_CONSENT_LEVEL, CONSENT_LEVELS[consentIdx][1]);
         }
+
+        store.setValue(PreferenceConstants.PREF_ALLURE_RESULTS_DIR, allureResultsDirText.getText());
+        store.setValue(PreferenceConstants.PREF_ALLURE_REPORT_DIR, allureReportDirText.getText());
     }
 
     /**
@@ -739,6 +798,9 @@ public class GeneralTab
                 break;
             }
         }
+
+        allureResultsDirText.setText(PreferenceConstants.DEFAULT_ALLURE_RESULTS_DIR);
+        allureReportDirText.setText(PreferenceConstants.DEFAULT_ALLURE_REPORT_DIR);
     }
 
     /**

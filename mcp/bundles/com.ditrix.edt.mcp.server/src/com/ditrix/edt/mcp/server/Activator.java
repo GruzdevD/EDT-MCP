@@ -40,6 +40,7 @@ import com.ditrix.edt.mcp.server.groups.IGroupService;
 import com.ditrix.edt.mcp.server.bridge.EdtMcpBridge;
 import com.ditrix.edt.mcp.server.bridge.IEdtMcpBridge;
 import com.ditrix.edt.mcp.server.history.McpCallHistoryFileLog;
+import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaBootstrap;
 import com.ditrix.edt.mcp.server.utils.BackgroundJobs;
 import com.ditrix.edt.mcp.server.utils.Log;
 import com.ditrix.edt.mcp.server.utils.NativeRenderModeProbe;
@@ -124,6 +125,12 @@ public class Activator extends AbstractUIPlugin
         // Run startup orchestration (group service + UI integrations) in the
         // same order as before.
         orchestrator.start(headless);
+
+        // First-run VA provisioning (turnkey, "Package A"): on a background job, create
+        // .vanessa/{env.sh,VAParams.json,features,out} for every open project, so the VA
+        // tools have a per-project home without any harness-side setup. The heavy runtime
+        // (epf) is NOT fetched here — it is downloaded lazily at first use.
+        VanessaBootstrap.scheduleProvisionLayouts();
 
         logInfo("EDT MCP Server plugin started"); //$NON-NLS-1$
     }

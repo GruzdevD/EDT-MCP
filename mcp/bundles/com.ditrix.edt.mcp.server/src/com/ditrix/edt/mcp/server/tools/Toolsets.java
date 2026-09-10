@@ -157,7 +157,11 @@ public final class Toolsets
 
         assign(TESTING,
             "run_yaxunit_tests", "debug_yaxunit_tests", "ask_workmate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "get_job_status", "cancel_job"); //$NON-NLS-1$ //$NON-NLS-2$
+            "get_job_status", "cancel_job", //$NON-NLS-1$ //$NON-NLS-2$
+            "vanessa_list_launches", "vanessa_run_feature", //$NON-NLS-1$ //$NON-NLS-2$
+            "vanessa_get_execution_status", "vanessa_get_test_report", //$NON-NLS-1$ //$NON-NLS-2$
+            "vanessa_list_features", "vanessa_get_feature", //$NON-NLS-1$ //$NON-NLS-2$
+            "vanessa_run_by_tags", "vanessa_get_log", "vanessa_get_artifacts"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
         assign(PROFILING,
             "start_profiling", "stop_profiling", "get_profiling_results"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
