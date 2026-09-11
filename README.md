@@ -29,13 +29,15 @@ MCP (Model Context Protocol) server plugin for 1C:EDT, enabling AI assistants (C
 
 > [!IMPORTANT]
 > **EDT version compatibility:**
-> Supports 1C:EDT **2026.1 and 2026.2** (Ruby) from a single build. The plugin is
+> Supports 1C:EDT **2025.2, 2026.1 and 2026.2** (Ruby) from a single build. The plugin is
 > COMPILED against the 2026.2 target platform but **to Java 17** (`release 17` plus
-> `Bundle-RequiredExecutionEnvironment: JavaSE-17`), so one artifact resolves on both —
-> 2026.1 is Eclipse 4.30 / Java 17, 2026.2 is Eclipse 4.38 / Java 25. Building it needs a
-> JDK 25 (Tycho 5 reads the platform's Java 25 class files); that is the JDK that *runs*
-> the build, not the level it emits. The e2e + protocol-conformance gates run it on
-> **2026.2**.
+> `Bundle-RequiredExecutionEnvironment: JavaSE-17`), and its `Import-Package` /
+> `Require-Bundle` declarations are intentionally left **unversioned**, so one artifact
+> resolves on every supported EDT — 2026.1 is Eclipse 4.30 / Java 17, 2026.2 is
+> Eclipse 4.38 / Java 25, 2025.2 is Java 17. Building it needs a JDK 25 (Tycho 5 reads
+> the platform's Java 25 class files); that is the JDK that *runs* the build, not the
+> level it emits. The e2e + protocol-conformance gates run it on **2026.2**; older
+> releases are verified by live install/smoke only.
 
 ## Features
 
