@@ -2,9 +2,9 @@ Manifest-Version: 1.0
 Bundle-ManifestVersion: 2
 Bundle-Name: EDT MCP Server Tests
 Bundle-SymbolicName: com.ditrix.edt.mcp.server.tests
-Bundle-Version: 3.0.0.qualifier
+Bundle-Version: 3.0.1.qualifier
 Bundle-Vendor: DitriX
-Fragment-Host: com.ditrix.edt.mcp.server;bundle-version="3.0.0"
+Fragment-Host: com.ditrix.edt.mcp.server;bundle-version="3.0.1"
 Bundle-RequiredExecutionEnvironment: JavaSE-17
 Automatic-Module-Name: com.ditrix.edt.mcp.server.tests
 Import-Package: com._1c.g5.v8.dt.dcs.typedvalue,
