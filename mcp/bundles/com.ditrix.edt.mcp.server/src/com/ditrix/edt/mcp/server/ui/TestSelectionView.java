@@ -127,6 +127,14 @@ public class TestSelectionView extends ViewPart
         fillBddProjects();
         loadYaxunitConfigs();
         loadBddConfigs();
+        // A launch configuration or EDT project created after the view opened only
+        // reaches a combo after it is reloaded. Reload each dropdown's list right
+        // before the user opens it, so a freshly created config/project shows up
+        // without reopening the view.
+        refreshOnOpen(projectCombo, this::refreshProjects);
+        refreshOnOpen(yaxunitConfigCombo, this::loadYaxunitConfigs);
+        refreshOnOpen(bddProjectCombo, this::refreshBddProjects);
+        refreshOnOpen(bddConfigCombo, this::loadBddConfigs);
     }
 
     // ------------------------------------------------------------------- tabs
@@ -471,11 +479,7 @@ public class TestSelectionView extends ViewPart
                     names.add(p.getName());
                 }
             }
-            projectCombo.setItems(names.toArray(new String[0]));
-            if (!names.isEmpty())
-            {
-                projectCombo.select(0);
-            }
+            fillCombo(projectCombo, names);
             // Re-scope the launch-configuration dropdown when the EDT project changes.
             projectCombo.addSelectionListener(new SelectionAdapter()
             {
@@ -499,11 +503,7 @@ public class TestSelectionView extends ViewPart
         {
             return;
         }
-        bddProjectCombo.setItems(projects.toArray(new String[0]));
-        if (!projects.isEmpty())
-        {
-            bddProjectCombo.select(0);
-        }
+        fillCombo(bddProjectCombo, projects);
     }
 
     private void loadYaxunitConfigs()
@@ -565,6 +565,51 @@ public class TestSelectionView extends ViewPart
         {
             combo.select(0);
         }
+    }
+
+    /**
+     * Refreshes a dropdown-reachable list just before the user opens it, so a launch
+     * configuration or EDT project created since the view last loaded it shows up
+     * without reopening the view. SWT has no "about to drop down" event, so both
+     * focus-in and mouse-down are used: together they cover the arrow click even when
+     * the combo is already focused, and never fire while the popup is open (item picks
+     * land on the popup, not on the combo). The reloader must not reset a current
+     * selection; {@link #fillCombo} preserves it and the config loaders go through it.
+     */
+    private static void refreshOnOpen(Combo combo, Runnable reloader)
+    {
+        combo.addListener(SWT.FocusIn, e -> reloader.run());
+        combo.addListener(SWT.MouseDown, e -> reloader.run());
+    }
+
+    private void refreshProjects()
+    {
+        try
+        {
+            IProject[] projects = ProjectContext.allProjects();
+            List<String> names = new ArrayList<>();
+            for (IProject p : projects)
+            {
+                if (p != null && p.getName() != null)
+                {
+                    names.add(p.getName());
+                }
+            }
+            fillCombo(projectCombo, names);
+        }
+        catch (RuntimeException e)
+        {
+            Activator.logError("Failed to enumerate projects for the test view", e); //$NON-NLS-1$
+        }
+    }
+
+    private void refreshBddProjects()
+    {
+        if (bddProjectCombo == null || bddProjectCombo.isDisposed())
+        {
+            return;
+        }
+        fillCombo(bddProjectCombo, TestSelectionSupport.listVanessaProjects());
     }
 
     private void loadYaxunitSuites()
