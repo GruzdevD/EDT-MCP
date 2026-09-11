@@ -92,6 +92,18 @@ public class VanessaOpenAllureReportTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the call succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("resultsDir", "Absolute Allure results dir, when applicable") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("reportDir", "Absolute generated report dir, when applicable") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("url", "Served Allure report URL, when served") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("port", "Port the report is served on, when served") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         String outDir = nonEmpty(params.get(KEY_OUT_DIR));

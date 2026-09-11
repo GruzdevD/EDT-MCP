@@ -59,6 +59,20 @@ public class VanessaGetExecutionStatusTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the call succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("launchId", "Numeric launch id polled") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("project", "Project key of the launch") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("feature", "Feature path of the launch") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("status", "Run state (launching/running/done/failed/...)") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("junitReportPath", "Path of the JUnit report, when present") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("error", "Run error, when the run failed") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         Long id = VanessaLaunchRunner.parseLaunchId(params.get(KEY_LAUNCH_ID));

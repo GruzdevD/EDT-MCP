@@ -64,6 +64,15 @@ public class VanessaGetTestReportTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the call succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("report", "The rendered Markdown JUnit report, or an error note") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         String junitPath = params.get(KEY_JUNIT_REPORT);

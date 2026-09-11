@@ -68,6 +68,17 @@ public class VanessaGetArtifactsTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the call succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("outDir", "Absolute out dir that was scanned") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("count", "Number of artifacts listed") //$NON-NLS-1$ //$NON-NLS-2$
+            .objectArrayProperty("artifacts", "The run artifacts (path, size, kind)") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         String outDir = params.get(KEY_OUT_DIR);

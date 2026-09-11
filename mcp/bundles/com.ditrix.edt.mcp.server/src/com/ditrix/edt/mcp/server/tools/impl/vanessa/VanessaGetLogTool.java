@@ -74,6 +74,20 @@ public class VanessaGetLogTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the call succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("path", "Absolute log path read") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("totalLines", "Total lines in the log") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("offset", "Line the returned window starts at") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("returned", "Number of lines returned in this window") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("more", "Whether more lines follow this window") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringArrayProperty("lines", "The requested window of log lines") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         String logPath = params.get(KEY_LOG_PATH);

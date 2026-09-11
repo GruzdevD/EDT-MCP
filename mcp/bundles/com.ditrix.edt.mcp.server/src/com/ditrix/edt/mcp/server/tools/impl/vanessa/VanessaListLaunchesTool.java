@@ -64,6 +64,16 @@ public class VanessaListLaunchesTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the call succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("count", "Number of launch configurations listed") //$NON-NLS-1$ //$NON-NLS-2$
+            .objectArrayProperty("launches", "Launch configurations (name, project, vanessa)") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         ILaunchManager manager = DebugPlugin.getDefault() == null

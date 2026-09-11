@@ -66,6 +66,17 @@ public class VanessaListFeaturesTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the call succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("root", "Feature tree root that was scanned") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("count", "Number of features found") //$NON-NLS-1$ //$NON-NLS-2$
+            .objectArrayProperty("features", "Features found (path, featureName, tags)") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         String project = params.get(KEY_PROJECT);

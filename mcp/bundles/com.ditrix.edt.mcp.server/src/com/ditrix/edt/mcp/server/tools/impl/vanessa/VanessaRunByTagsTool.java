@@ -72,6 +72,22 @@ public class VanessaRunByTagsTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the call succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("launchId", "Numeric launch id to poll with vanessa_get_execution_status") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("project", "Project key the run started for") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("feature", "Feature that was run") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("tags", "Tags the run selected by") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("configuration", "EDT launch configuration used") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("status", "'launching' while the run starts") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("outDir", "Out dir the run's artifacts will land in") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("junitReportPath", "Path of the JUnit report, when known") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         String project = params.get(KEY_PROJECT);

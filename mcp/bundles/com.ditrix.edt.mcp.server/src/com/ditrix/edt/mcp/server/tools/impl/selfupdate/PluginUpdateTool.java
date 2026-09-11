@@ -62,6 +62,21 @@ public class PluginUpdateTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the call succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("installedVersion", "Version installed before the update") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("newVersion", "Version that was installed") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("jar", "Updated jar file name") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("target", "Absolute path the jar was written to") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("bundlesInfo", "Note about the bundles.info registration") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("restartRequired", "Whether EDT must restart to apply the build") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("message", "Human-readable outcome") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         String home = System.getProperty("user.home"); //$NON-NLS-1$

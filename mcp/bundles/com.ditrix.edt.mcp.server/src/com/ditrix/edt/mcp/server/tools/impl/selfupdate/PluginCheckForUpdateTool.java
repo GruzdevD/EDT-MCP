@@ -62,6 +62,21 @@ public class PluginCheckForUpdateTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the call succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("source", "Update source repo") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("branch", "Update source branch") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("availableVersion", "Newest published build version") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("installedVersion", "Currently installed build version") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("updateAvailable", "Whether a newer build is available") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("jar", "Jar file name of the candidate build") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("message", "Human-readable status / next step") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         String home = System.getProperty("user.home"); //$NON-NLS-1$
