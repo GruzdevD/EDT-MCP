@@ -1,6 +1,6 @@
 # get_tool_guide
 
-Get the full on-demand how-to for a tool: its description, every parameter (type, required, allowed values) and extended examples/preconditions kept OUT of the always-loaded tool list to save context. Pass the exact tool name from tools/list. Also available as the resource guide://<toolName>.
+Retrieve detailed instructions for an MCP tool. Parameters and examples: get_tool_guide('get_tool_guide').
 
 ## Parameters
 | Parameter | Required | Type | Description |

@@ -173,7 +173,9 @@ public class ToolGroupTest
         assertTrue(tools.contains("enable_toolset")); //$NON-NLS-1$
         assertTrue(tools.contains("get_event_log")); //$NON-NLS-1$
         assertTrue(tools.contains("get_mcp_history")); //$NON-NLS-1$
-        assertEquals(17, tools.size());
+        assertTrue(tools.contains("plugin_check_for_update")); //$NON-NLS-1$
+        assertTrue(tools.contains("plugin_update")); //$NON-NLS-1$
+        assertEquals(19, tools.size());
     }
 
     @Test

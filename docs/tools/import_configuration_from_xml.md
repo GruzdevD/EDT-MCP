@@ -1,6 +1,6 @@
 # import_configuration_from_xml
 
-Import a configuration from a directory of XML files into a NEW EDT project (EDT menu: Import); the reverse of export_configuration_to_xml. The projectName must not already exist in the workspace. Full parameters and examples: call get_tool_guide('import_configuration_from_xml').
+Create an EDT project from exported 1C configuration XML files. Parameters and examples: get_tool_guide('import_configuration_from_xml').
 
 ## Parameters
 | Parameter | Required | Type | Description |
