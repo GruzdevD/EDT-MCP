@@ -1,6 +1,6 @@
 # delete_infobase
 
-Remove a FILE infobase association from a configuration project OR delete a standalone (autonomous) server application. Destructive: guarded by a confirm-preview - call without confirm to preview what would be removed (no change), then confirm=true to delete. For a file infobase: dissociates it and (deleteRegistration, default true) deregisters it from the EDT infobases list. For a standalone server (applicationKind=standaloneServer): stops it and removes the WST server and its server config folder. By default the infobase DATABASE FILES on disk are KEPT (both kinds); pass deleteDatabaseFiles=true to also delete the database directory. The inverse of create_infobase. Full parameters and examples: call get_tool_guide('delete_infobase').
+Remove a project's infobase or its standalone-server registration, optionally deleting the database files. DESTRUCTIVE and IRREVERSIBLE. Two-phase: call once WITHOUT confirm to preview, then again with confirm=true to apply. Parameters and examples: get_tool_guide('delete_infobase').
 
 ## Parameters
 | Parameter | Required | Type | Description |

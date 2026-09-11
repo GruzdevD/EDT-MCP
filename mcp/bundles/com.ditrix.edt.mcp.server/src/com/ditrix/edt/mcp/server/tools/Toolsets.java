@@ -134,7 +134,8 @@ public final class Toolsets
             "get_tool_guide", "get_server_status", "get_edt_version", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "list_projects", "list_modules", "get_module_structure", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "read_module_source", "search_in_code", //$NON-NLS-1$ //$NON-NLS-2$
-            "get_metadata_objects", "get_metadata_details"); //$NON-NLS-1$ //$NON-NLS-2$
+            "get_metadata_objects", "get_metadata_details", //$NON-NLS-1$ //$NON-NLS-2$
+            "plugin_check_for_update", "plugin_update"); //$NON-NLS-1$ //$NON-NLS-2$
 
         assign(METADATA,
             "create_metadata", "modify_metadata", "delete_metadata", "dcs", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
@@ -156,8 +157,13 @@ public final class Toolsets
             "step", "resume", "evaluate_expression", "get_applications", "terminate_launch"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
 
         assign(TESTING,
-            "run_yaxunit_tests", "debug_yaxunit_tests", "ask_workmate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "get_job_status", "cancel_job"); //$NON-NLS-1$ //$NON-NLS-2$
+            "run_yaxunit_tests", "debug_yaxunit_tests", "list_yaxunit_tests", "ask_workmate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            "get_job_status", "cancel_job", //$NON-NLS-1$ //$NON-NLS-2$
+            "vanessa_list_launches", "vanessa_run_feature", //$NON-NLS-1$ //$NON-NLS-2$
+            "vanessa_get_execution_status", "vanessa_get_test_report", //$NON-NLS-1$ //$NON-NLS-2$
+            "vanessa_list_features", "vanessa_get_feature", //$NON-NLS-1$ //$NON-NLS-2$
+            "vanessa_run_by_tags", "vanessa_get_log", "vanessa_get_artifacts", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "vanessa_doctor", "vanessa_setup", "vanessa_open_allure_report"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
         assign(PROFILING,
             "start_profiling", "stop_profiling", "get_profiling_results"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$

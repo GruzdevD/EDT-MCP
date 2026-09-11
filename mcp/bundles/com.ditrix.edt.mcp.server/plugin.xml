@@ -369,6 +369,48 @@
       </perspectiveExtension>
    </extension>
 
+   <!-- Allure Report View (vanessa): embedded browser over the generated Allure
+        report, served by the local AllureHttpServer. -->
+   <extension point="org.eclipse.ui.views">
+      <view
+            id="com.ditrix.edt.mcp.server.allure.allureView"
+            name="%allure.view.name"
+            icon="icons/restart.png"
+            category="com.ditrix.edt.mcp.server.tags.viewCategory"
+            class="com.ditrix.edt.mcp.server.ui.AllureReportView"
+            allowMultiple="false"
+            restorable="true">
+         <description>%allure.view.description</description>
+      </view>
+   </extension>
+   <!-- Add Allure Report View to Window > Show View menu -->
+   <extension point="org.eclipse.ui.perspectiveExtensions">
+      <perspectiveExtension targetID="*">
+         <viewShortcut id="com.ditrix.edt.mcp.server.allure.allureView"/>
+      </perspectiveExtension>
+   </extension>
+
+   <!-- Test Selection View (vanessa): choose and run YAxUnit modules / Vanessa BDD
+        features, with an embedded JUnit-Markdown report pane. -->
+   <extension point="org.eclipse.ui.views">
+      <view
+            id="com.ditrix.edt.mcp.server.tests.testSelectionView"
+            name="%testSelection.view.name"
+            icon="icons/restart.png"
+            category="com.ditrix.edt.mcp.server.tags.viewCategory"
+            class="com.ditrix.edt.mcp.server.ui.TestSelectionView"
+            allowMultiple="false"
+            restorable="true">
+         <description>%testSelection.view.description</description>
+      </view>
+   </extension>
+   <!-- Add Test Selection View to Window > Show View menu -->
+   <extension point="org.eclipse.ui.perspectiveExtensions">
+      <perspectiveExtension targetID="*">
+         <viewShortcut id="com.ditrix.edt.mcp.server.tests.testSelectionView"/>
+      </perspectiveExtension>
+   </extension>
+
    <!-- Tag Search Filter for EDT Navigator -->
    <!-- Intentionally excluded from Enhance Navigator: inert until the user searches with #. -->
    <extension point="org.eclipse.ui.navigator.navigatorContent">

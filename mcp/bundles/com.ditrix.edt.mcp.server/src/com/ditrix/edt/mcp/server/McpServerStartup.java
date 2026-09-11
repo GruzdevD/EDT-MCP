@@ -9,13 +9,10 @@ package com.ditrix.edt.mcp.server;
 import java.io.File;
 import java.util.regex.Pattern;
 
-import org.eclipse.core.resources.IProject;
-import org.eclipse.core.resources.IProjectDescription;
 import org.eclipse.core.resources.IWorkspace;
 import org.eclipse.core.resources.IWorkspaceRunnable;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.CoreException;
-import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.ui.IStartup;
@@ -23,6 +20,7 @@ import org.eclipse.ui.IStartup;
 import com.ditrix.edt.mcp.server.history.McpCallHistory;
 import com.ditrix.edt.mcp.server.history.McpCallHistoryFileLog;
 import com.ditrix.edt.mcp.server.preferences.PreferenceConstants;
+import com.ditrix.edt.mcp.server.utils.ProjectImportUtils;
 
 /**
  * Startup class for auto-starting MCP server on EDT startup.
@@ -149,26 +147,14 @@ public class McpServerStartup implements IStartup
     {
         try
         {
-            IPath projectDir = IPath.fromOSString(dir);
-            IPath descPath = projectDir.append(IProjectDescription.DESCRIPTION_FILE_NAME);
-            if (!descPath.toFile().isFile())
+            boolean imported = ProjectImportUtils.importLinkedProject(workspace, dir, monitor);
+            if (imported)
+            {
+                Activator.logInfo("Imported/linked project at " + dir); //$NON-NLS-1$
+            }
+            else
             {
                 Activator.logInfo("Skipping import - no .project at " + dir); //$NON-NLS-1$
-                return;
-            }
-
-            IProjectDescription description = workspace.loadProjectDescription(descPath);
-            IProject project = workspace.getRoot().getProject(description.getName());
-            if (!project.exists())
-            {
-                // External location: the project lives outside the workspace (a git checkout).
-                description.setLocation(projectDir);
-                project.create(description, monitor);
-                Activator.logInfo("Imported project " + description.getName() + " from " + dir); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            if (!project.isOpen())
-            {
-                project.open(monitor);
             }
         }
         catch (CoreException e)

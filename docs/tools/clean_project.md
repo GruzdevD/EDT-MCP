@@ -1,6 +1,6 @@
 # clean_project
 
-Clean EDT project and trigger full revalidation. Direction: DISK -> MODEL - re-imports the on-disk src/ .mdo files into the in-memory model. Refreshes files from disk, clears all validation markers, and waits for EDT to complete revalidation. Full rebuild of the ENTIRE configuration — slow on large projects. Discards UNSAVED in-memory model edits (they are recomputed from disk); save pending changes first. For a single externally-edited object prefer revalidate_objects([FQN]). Reverse direction (MODEL -> DISK, write the model out to .mdo) is resync_to_disk. Full parameters and examples: call get_tool_guide('clean_project').
+Rebuild an EDT project from the on-disk src/ files and revalidate everything. Direction DISK -> MODEL; slow, and it DISCARDS unsaved in-memory model edits - save first. For one externally-edited object prefer revalidate_objects; for the opposite direction see resync_to_disk. Parameters and examples: get_tool_guide('clean_project').
 
 ## Parameters
 | Parameter | Required | Type | Description |

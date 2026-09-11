@@ -72,5 +72,15 @@ public class PreferenceInitializer extends AbstractPreferenceInitializer
 
         // Per-tool parameter defaults
         ToolParameterSettings.getInstance().initializeDefaults(store);
+
+        // Allure report dirs (empty = auto-detect from the run's out dir).
+        store.setDefault(PreferenceConstants.PREF_ALLURE_RESULTS_DIR,
+            PreferenceConstants.DEFAULT_ALLURE_RESULTS_DIR);
+        store.setDefault(PreferenceConstants.PREF_ALLURE_REPORT_DIR,
+            PreferenceConstants.DEFAULT_ALLURE_REPORT_DIR);
+
+        // VA_Runner project creation: the operator-supplied VanessaAutomation EDT-source template.
+        store.setDefault(PreferenceConstants.PREF_VA_RUNNER_SOURCE_TEMPLATE_DIR,
+            PreferenceConstants.DEFAULT_VA_RUNNER_SOURCE_TEMPLATE_DIR);
     }
 }

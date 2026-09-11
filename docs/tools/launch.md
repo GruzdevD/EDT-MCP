@@ -8,7 +8,7 @@ Start a 1C application in EDT debug (default) or run mode. An already-running se
 | projectName | — | string | EDT project name; required unless launchConfigurationName is given. |
 | applicationId | — | string | Application ID from get_applications; required in the projectName+applicationId mode. |
 | launchConfigurationName | — | string | Exact name of an EDT launch config (runtime client or Attach); skips projectName/applicationId. |
-| mode | — | string (enum: debug, run) | Launch mode: debug (default) or run. Attach configurations support debug only. |
+| mode | — | string (one of: debug, run) | Launch mode: debug (default) or run. Attach configurations support debug only. |
 | updateBeforeLaunch | — | boolean | Default true: silently apply the configuration->DB update before launching so no 'Update database?' modal blocks the call (even on a Russian-locale EDT the dialog is auto-confirmed); false skips the update and the platform may then show that modal. Ignored for Attach. |
 | externalInfobaseChanges | — | string | How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: 'override' (default) keeps the project configuration and overwrites the infobase, 'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update with an error. Omitted, the modal is still answered (with 'override'), so an unattended call never blocks on it. |
 | standaloneServerPortConflict | — | string | Answer to EDT's standalone-server port-conflict prompt: cancel (default) = fail and name the busy ports; reassign = let EDT move the server to free ports (rewrites its configuration). |

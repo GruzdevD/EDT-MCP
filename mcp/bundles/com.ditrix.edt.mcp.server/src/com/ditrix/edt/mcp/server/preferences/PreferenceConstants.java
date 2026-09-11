@@ -132,6 +132,20 @@ public final class PreferenceConstants
     /** Default auth token (empty = authentication disabled) */
     public static final String DEFAULT_AUTH_TOKEN = ""; //$NON-NLS-1$
 
+    // === Allure report preferences (edt-mcp-vanessa) ===
+
+    /** Raw Allure results dir used by the in-EDT Allure view (empty = auto-detect from the run's out dir). */
+    public static final String PREF_ALLURE_RESULTS_DIR = "allure.resultsDir"; //$NON-NLS-1$
+
+    /** Dir the generated Allure report is placed in (empty = auto-detect, a sibling of the results dir). */
+    public static final String PREF_ALLURE_REPORT_DIR = "allure.reportDir"; //$NON-NLS-1$
+
+    /** Default: auto-detect both dirs (current behaviour). */
+    public static final String DEFAULT_ALLURE_RESULTS_DIR = ""; //$NON-NLS-1$
+
+    /** Default: auto-detect both dirs (current behaviour). */
+    public static final String DEFAULT_ALLURE_REPORT_DIR = ""; //$NON-NLS-1$
+
     // === Destructive-operation consent preferences ===
 
     /**
@@ -209,6 +223,20 @@ public final class PreferenceConstants
 
     /** Default salt (empty): keep the per-run random pseudonymiser key. */
     public static final String DEFAULT_PII_SALT = ""; //$NON-NLS-1$
+
+    // === VA_Runner project creation (button in the preferences) ===
+
+    /**
+     * Directory holding the operator's EDT source of the {@code VanessaAutomation} processing
+     * (a local copy of {@code ExternalDataProcessors/VanessaAutomation}). Used by the
+     * {@code Create VA_Runner} button to seed a fresh project — the source is not shipped in
+     * the plugin / release, so it is copied from here.
+     */
+    public static final String PREF_VA_RUNNER_SOURCE_TEMPLATE_DIR = "vaRunner.sourceTemplateDir"; //$NON-NLS-1$
+
+    /** Default: a conventional single-copy location under {@code ~/.1c-tools/vanessa}. */
+    public static final String DEFAULT_VA_RUNNER_SOURCE_TEMPLATE_DIR =
+        System.getProperty("user.home") + "/.1c-tools/vanessa/template"; //$NON-NLS-1$ //$NON-NLS-2$
 
     private PreferenceConstants()
     {

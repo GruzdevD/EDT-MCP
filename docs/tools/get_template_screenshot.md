@@ -1,6 +1,6 @@
 # get_template_screenshot
 
-Capture a PNG screenshot of a 1C template (a SpreadsheetDocument print form) as EDT renders it, so its layout and text are visible to an AI. Works for a common template 'CommonTemplate.<Name>' OR an object-owned template '<Type>.<Owner>.Template.<Name>' (e.g. 'DataProcessor.Invoices.Template.Printout'). Renders off-screen (no JVM flag needed). Full parameters and examples: call get_tool_guide('get_template_screenshot').
+Visually inspect how a spreadsheet print template renders. Parameters and examples: get_tool_guide('get_template_screenshot').
 
 ## Parameters
 | Parameter | Required | Type | Description |
