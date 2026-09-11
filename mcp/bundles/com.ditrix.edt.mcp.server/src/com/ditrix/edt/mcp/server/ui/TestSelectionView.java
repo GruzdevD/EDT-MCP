@@ -48,6 +48,7 @@ import org.eclipse.ui.part.ViewPart;
 
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.McpKeys;
+import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
 import com.ditrix.edt.mcp.server.ui.TestSelectionSupport.FeatureRow;
@@ -90,6 +91,15 @@ public class TestSelectionView extends ViewPart
 
     private static final int POLL_INTERVAL_MS = 1500;
 
+    /**
+     * How long to keep retrying {@code run_yaxunit_tests} while the project is still
+     * building (a just-started infobase/project update) before giving up and rendering
+     * the last "Project is building" error.
+     */
+    private static final int YAXUNIT_BUILD_WAIT_MS = 300_000;
+    /** Poll cadence of the retry while the project is building. */
+    private static final int YAXUNIT_BUILD_POLL_MS = POLL_INTERVAL_MS;
+
     // Shared report pane
     private Text reportText;
     private Label statusLabel;
@@ -103,6 +113,10 @@ public class TestSelectionView extends ViewPart
     private Button yaxunitCancelButton;
     /** YAxUnit background job currently being polled, or {@code null} when none is active. */
     private volatile String activeYaxunitJobId;
+    /** True while {@link #runYaxunitWaitingForBuild} is retrying against a building project. */
+    private volatile boolean yaxunitWaitingForBuild;
+    /** Set when the user cancels the build-wait retry loop (the {Cancel} button). */
+    private volatile boolean yaxunitWaitCancelled;
     private final List<SuiteRow> suiteRows = new ArrayList<>();
 
     // Vanessa BDD tab
@@ -326,7 +340,7 @@ public class TestSelectionView extends ViewPart
             @Override
             public void widgetSelected(SelectionEvent e)
             {
-                cancelActiveYaxunitJob();
+                onYaxunitCancel();
             }
         });
 
@@ -746,11 +760,20 @@ public class TestSelectionView extends ViewPart
         {
             try
             {
-                String result = callTool(TOOL_RUN_YAXUNIT, params);
+                String result = runYaxunitWaitingForBuild(params);
                 String jobId = TestSelectionSupport.extractJobId(result);
                 if (jobId == null)
                 {
-                    runOnUi(() -> showReport(result, Messages.TestSelection_Done));
+                    final boolean cancelled = yaxunitWaitCancelled;
+                    runOnUi(() ->
+                    {
+                        yaxunitWaitingForBuild = false;
+                        yaxunitWaitCancelled = false;
+                        setYaxunitCancelEnabled(false);
+                        showReport(result,
+                            cancelled ? Messages.TestSelection_RunCancelled
+                                      : Messages.TestSelection_Done);
+                    });
                     return;
                 }
                 runOnUi(() ->
@@ -771,6 +794,77 @@ public class TestSelectionView extends ViewPart
                 runOnUi(() -> setBusyYaxunit(false));
             }
         }).start();
+    }
+
+    /**
+     * Invokes {@code run_yaxunit_tests}, tolerating a project that is still building
+     * (e.g. a just-triggered infobase/project update). The tool refuses while the model
+     * or the index is being computed with "Project is building ... Please wait and
+     * retry." Instead of surfacing that as a dead-end on the first call, we show a
+     * waiting status with the {Cancel} button armed and keep retrying. When the build
+     * finishes the run actually launches; the user may cancel the wait, or we give up
+     * after {@value #YAXUNIT_BUILD_WAIT_MS} ms and render the last building error.
+     *
+     * @param params the run parameters from {@link #runSelectedYaxunit()}
+     * @return the run result when it carried a job id (a launch) OR a definitive
+     *     non-building error/cancellation/timeout, never a tolerable building error
+     */
+    private String runYaxunitWaitingForBuild(Map<String, String> params)
+    {
+        yaxunitWaitingForBuild = true;
+        yaxunitWaitCancelled = false;
+        final long deadline = System.currentTimeMillis() + YAXUNIT_BUILD_WAIT_MS;
+        while (true)
+        {
+            String result = callTool(TOOL_RUN_YAXUNIT, params);
+            if (TestSelectionSupport.extractJobId(result) != null || !isProjectBuildingError(result))
+            {
+                yaxunitWaitingForBuild = false;
+                return result;
+            }
+            if (yaxunitWaitCancelled)
+            {
+                yaxunitWaitingForBuild = false;
+                return ToolResult.error(Messages.TestSelection_RunCancelled).toJson();
+            }
+            if (System.currentTimeMillis() >= deadline)
+            {
+                yaxunitWaitingForBuild = false;
+                return result;
+            }
+            runOnUi(() ->
+            {
+                setStatus(Messages.TestSelection_ProjectBuilding);
+                setYaxunitCancelEnabled(true);
+            });
+            sleep(YAXUNIT_BUILD_POLL_MS);
+        }
+    }
+
+    /**
+     * @return {@code true} when the tool result is the transient "project is still being
+     *     built" refusal that a retry may outlive, rather than a definitive error
+     */
+    private static boolean isProjectBuildingError(String result)
+    {
+        return result != null && result.contains("Project is building"); //$NON-NLS-1$
+    }
+
+    /**
+     * Cancels whatever the YAxUnit tab is currently doing. While a job is being polled
+     * this forwards to {@link #cancelActiveYaxunitJob()}; while waiting for a build to
+     * finish ({@link #runYaxunitWaitingForBuild}) it aborts the wait instead.
+     */
+    private void onYaxunitCancel()
+    {
+        if (yaxunitWaitingForBuild)
+        {
+            yaxunitWaitCancelled = true;
+            setYaxunitCancelEnabled(false);
+            setStatus(Messages.TestSelection_RunCancelled);
+            return;
+        }
+        cancelActiveYaxunitJob();
     }
 
     private void pollYaxunitJob(String jobId)
