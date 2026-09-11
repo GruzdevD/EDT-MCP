@@ -57,8 +57,8 @@ jobs:
             <h1>EDT MCP Server Update Site</h1>
             <p>Current version: <strong>${VERSION}</strong></p>
             <p>Use this URL in EDT: <strong>Help → Install New Software...</strong></p>
-            <pre>https://ditrixnew.github.io/EDT-MCP/</pre>
-            <p><a href="https://github.com/DitriXNew/EDT-MCP">GitHub Repository</a></p>
+            <pre>https://gruzdevd.github.io/EDT-MCP/</pre>
+            <p><a href="https://github.com/GruzdevD/EDT-MCP">GitHub Repository</a></p>
           </body>
           </html>
           EOF
