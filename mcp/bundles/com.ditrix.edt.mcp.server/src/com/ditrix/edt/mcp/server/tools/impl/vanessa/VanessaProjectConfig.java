@@ -30,8 +30,8 @@ import com.ditrix.edt.mcp.server.utils.ProjectContext;
  * {@code run-edt.sh} uses).
  *
  * <p><b>Primary (provisioned) layout:</b> {@code &lt;EDT-project-root&gt;/.vanessa/env.sh} -
- * the plugin creates this directory at activation ({@code VanessaBootstrap}) so the VA
- * environment travels with the project. <b>Legacy fallback:</b>
+ * created on demand for the project by {@code vanessa_setup} ({@code VanessaBootstrap}) so the
+ * VA environment travels with the project. <b>Legacy fallback:</b>
  * {@code ~/.1c-tools/vanessa/projects/&lt;project&gt;/env.sh} is still honoured for
  * previously-configured projects. The values (infobase, binary, VAParams, launch config,
  * VA_Runner) are the operator-edited source of truth. This class parses the simple

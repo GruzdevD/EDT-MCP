@@ -78,5 +78,9 @@ public class PreferenceInitializer extends AbstractPreferenceInitializer
             PreferenceConstants.DEFAULT_ALLURE_RESULTS_DIR);
         store.setDefault(PreferenceConstants.PREF_ALLURE_REPORT_DIR,
             PreferenceConstants.DEFAULT_ALLURE_REPORT_DIR);
+
+        // VA_Runner project creation: the operator-supplied VanessaAutomation EDT-source template.
+        store.setDefault(PreferenceConstants.PREF_VA_RUNNER_SOURCE_TEMPLATE_DIR,
+            PreferenceConstants.DEFAULT_VA_RUNNER_SOURCE_TEMPLATE_DIR);
     }
 }

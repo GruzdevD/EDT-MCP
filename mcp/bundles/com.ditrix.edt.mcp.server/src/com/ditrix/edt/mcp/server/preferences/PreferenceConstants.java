@@ -224,6 +224,20 @@ public final class PreferenceConstants
     /** Default salt (empty): keep the per-run random pseudonymiser key. */
     public static final String DEFAULT_PII_SALT = ""; //$NON-NLS-1$
 
+    // === VA_Runner project creation (button in the preferences) ===
+
+    /**
+     * Directory holding the operator's EDT source of the {@code VanessaAutomation} processing
+     * (a local copy of {@code ExternalDataProcessors/VanessaAutomation}). Used by the
+     * {@code Create VA_Runner} button to seed a fresh project — the source is not shipped in
+     * the plugin / release, so it is copied from here.
+     */
+    public static final String PREF_VA_RUNNER_SOURCE_TEMPLATE_DIR = "vaRunner.sourceTemplateDir"; //$NON-NLS-1$
+
+    /** Default: a conventional single-copy location under {@code ~/.1c-tools/vanessa}. */
+    public static final String DEFAULT_VA_RUNNER_SOURCE_TEMPLATE_DIR =
+        System.getProperty("user.home") + "/.1c-tools/vanessa/template"; //$NON-NLS-1$ //$NON-NLS-2$
+
     private PreferenceConstants()
     {
         // Utility class

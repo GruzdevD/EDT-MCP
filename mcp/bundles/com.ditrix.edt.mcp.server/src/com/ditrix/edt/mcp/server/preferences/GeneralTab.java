@@ -7,9 +7,13 @@
 package com.ditrix.edt.mcp.server.preferences;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.resource.ImageDescriptor;
@@ -26,6 +30,7 @@ import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.DirectoryDialog;
+import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Shell;
@@ -40,7 +45,9 @@ import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.McpServer;
 import com.ditrix.edt.mcp.server.UpdateChecker;
 import com.ditrix.edt.mcp.server.protocol.McpConstants;
+import com.ditrix.edt.mcp.server.tools.impl.vanessa.VaRunnerProjectFactory;
 import com.ditrix.edt.mcp.server.transport.HttpTransport;
+import com.ditrix.edt.mcp.server.utils.ProjectContext;
 
 /**
  * General settings tab for MCP Server preferences.
@@ -70,6 +77,8 @@ public class GeneralTab
     private Button restartButton;
     private Text allureResultsDirText;
     private Text allureReportDirText;
+    private Combo vaRunnerProjectCombo;
+    private Text vaSourceTemplateText;
 
     /** Track created images for disposal */
     private final List<org.eclipse.swt.graphics.Image> managedImages = new ArrayList<>();
@@ -110,6 +119,7 @@ public class GeneralTab
         createUpdateSection();
         createServerControlSection();
         createAllureSection();
+        createVaRunnerSection();
     }
 
     public Composite getControl()
@@ -753,6 +763,8 @@ public class GeneralTab
 
         store.setValue(PreferenceConstants.PREF_ALLURE_RESULTS_DIR, allureResultsDirText.getText());
         store.setValue(PreferenceConstants.PREF_ALLURE_REPORT_DIR, allureReportDirText.getText());
+        store.setValue(PreferenceConstants.PREF_VA_RUNNER_SOURCE_TEMPLATE_DIR,
+            vaSourceTemplateText.getText());
     }
 
     /**
@@ -801,6 +813,8 @@ public class GeneralTab
 
         allureResultsDirText.setText(PreferenceConstants.DEFAULT_ALLURE_RESULTS_DIR);
         allureReportDirText.setText(PreferenceConstants.DEFAULT_ALLURE_REPORT_DIR);
+        vaSourceTemplateText.setText(
+            PreferenceConstants.DEFAULT_VA_RUNNER_SOURCE_TEMPLATE_DIR);
     }
 
     /**
@@ -966,5 +980,121 @@ public class GeneralTab
         Label label = new Label(composite, SWT.NONE);
         label.setText(text);
         return label;
+    }
+
+    // ------------------------------------------------------------------
+    // VA_Runner project creation (button)
+    // ------------------------------------------------------------------
+
+    private void createVaRunnerSection()
+    {
+        Group group = new Group(composite, SWT.NONE);
+        group.setText(Messages.GeneralTab_VaRunnerGroupTitle);
+        GridData groupData = new GridData(SWT.FILL, SWT.FILL, true, false, 3, 1);
+        group.setLayoutData(groupData);
+        GridLayout gl = new GridLayout(3, false);
+        gl.marginWidth = 5;
+        gl.marginHeight = 5;
+        group.setLayout(gl);
+
+        Label prjLabel = new Label(group, SWT.NONE);
+        prjLabel.setText(Messages.GeneralTab_VaRunnerProjectLabel);
+        vaRunnerProjectCombo = new Combo(group, SWT.READ_ONLY | SWT.DROP_DOWN);
+        vaRunnerProjectCombo.setLayoutData(
+            new GridData(SWT.FILL, SWT.CENTER, true, false, 2, 1));
+        populateVaRunnerProjects();
+
+        Label tplLabel = new Label(group, SWT.NONE);
+        tplLabel.setText(Messages.GeneralTab_VaRunnerSourceTemplateLabel);
+        vaSourceTemplateText = new Text(group, SWT.BORDER);
+        vaSourceTemplateText.setLayoutData(
+            new GridData(SWT.FILL, SWT.CENTER, true, false, 1, 1));
+        vaSourceTemplateText.setText(
+            store.getString(PreferenceConstants.PREF_VA_RUNNER_SOURCE_TEMPLATE_DIR));
+        Button browseTemplate = new Button(group, SWT.PUSH);
+        browseTemplate.setText(Messages.GeneralTab_VaRunnerSourceTemplateBrowse);
+        browseTemplate.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent e)
+            {
+                DirectoryDialog dialog = new DirectoryDialog(group.getShell(), SWT.OPEN);
+                dialog.setText(Messages.GeneralTab_VaRunnerSourceTemplateBrowse);
+                String dir = dialog.open();
+                if (dir != null)
+                {
+                    vaSourceTemplateText.setText(dir);
+                }
+            }
+        });
+
+        Button createButton = new Button(group, SWT.PUSH);
+        createButton.setText(Messages.GeneralTab_VaRunnerCreateButton);
+        createButton.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false, 3, 1));
+        createButton.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent e)
+            {
+                createVaRunnerProject();
+            }
+        });
+    }
+
+    /** Fills the project combo with open 1C configuration projects of the workspace. */
+    private void populateVaRunnerProjects()
+    {
+        List<String> names = new ArrayList<>();
+        for (IProject p : ProjectContext.allProjects())
+        {
+            if (p.isOpen()
+                && ProjectContext.hasAnyNature(p, java.util.Collections.singleton(
+                    "com._1c.g5.v8.dt.core.V8ConfigurationNature")) == Boolean.TRUE) //$NON-NLS-1$
+            {
+                names.add(p.getName());
+            }
+        }
+        vaRunnerProjectCombo.setItems(names.toArray(new String[0]));
+        if (!names.isEmpty())
+        {
+            vaRunnerProjectCombo.select(0);
+        }
+    }
+
+    /** Button handler: validates inputs and starts the VA_Runner creation job for the picked project. */
+    private void createVaRunnerProject()
+    {
+        int idx = vaRunnerProjectCombo.getSelectionIndex();
+        if (idx < 0)
+        {
+            MessageDialog.openError(composite.getShell(), Messages.GeneralTab_VaRunnerErrorTitle,
+                Messages.GeneralTab_VaRunnerNoProject);
+            return;
+        }
+        String project = vaRunnerProjectCombo.getItem(idx);
+        Path sourceTemplate = Paths.get(vaSourceTemplateText.getText().trim());
+        if (!Files.isDirectory(sourceTemplate))
+        {
+            MessageDialog.openError(composite.getShell(), Messages.GeneralTab_VaRunnerErrorTitle,
+                NLS.bind(Messages.GeneralTab_VaRunnerMissingTemplate, sourceTemplate));
+            return;
+        }
+        if (VaRunnerProjectFactory.isCreating(project))
+        {
+            MessageDialog.openInformation(composite.getShell(), Messages.GeneralTab_VaRunnerErrorTitle,
+                NLS.bind(Messages.GeneralTab_VaRunnerAlreadyRunning, project));
+            return;
+        }
+        Path destRoot = VaRunnerProjectFactory.defaultProjectRoot(project);
+        var job = VaRunnerProjectFactory.create(VaRunnerProjectFactory.DEFAULT_OWNER,
+            project, destRoot, sourceTemplate);
+        if (job == null)
+        {
+            MessageDialog.openInformation(composite.getShell(), Messages.GeneralTab_VaRunnerErrorTitle,
+                NLS.bind(Messages.GeneralTab_VaRunnerAlreadyRunning, project));
+            return;
+        }
+        MessageDialog.openInformation(composite.getShell(), Messages.GeneralTab_VaRunnerStartedTitle,
+            NLS.bind(Messages.GeneralTab_VaRunnerStartedMessage, destRoot, job.getId()));
     }
 }

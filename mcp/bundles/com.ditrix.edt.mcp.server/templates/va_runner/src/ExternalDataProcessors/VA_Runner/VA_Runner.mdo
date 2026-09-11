@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mdclass:ExternalDataProcessor xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:core="http://g5.1c.ru/v8/dt/mcore" xmlns:mdclass="http://g5.1c.ru/v8/dt/metadata/mdclass" uuid="80be883e-f597-486d-9d51-affcdf75bf20">
+  <producedTypes>
+    <objectType typeId="03255955-fe1b-4e30-b134-10436d98e951" valueTypeId="c8619236-500a-4efb-b7ad-cfde6dee8651"/>
+  </producedTypes>
+  <name>VA_Runner</name>
+  <synonym>
+    <key>ru</key>
+    <value>Драйвер запуска Vanessa Automation через EDT-MCP</value>
+  </synonym>
+  <containedObjects classId="749b935d-b66d-4aff-b22b-afc8c0212827" objectId="68f32818-20e0-41db-be11-32f0da5a7a7e"/>
+  <defaultForm>ExternalDataProcessor.VA_Runner.Form.Форма</defaultForm>
+  <forms uuid="f8b838e3-b6a0-4959-aafd-096471aa4389">
+    <name>Форма</name>
+    <synonym>
+      <key>ru</key>
+      <value>Форма</value>
+    </synonym>
+    <usePurposes>PersonalComputer</usePurposes>
+    <usePurposes>MobileDevice</usePurposes>
+  </forms>
+</mdclass:ExternalDataProcessor>

@@ -160,4 +160,105 @@ public class VanessaBootstrapTest
         assertTrue(appended.contains("EPF=\"" + epf + "\"")); //$NON-NLS-1$
         assertEquals(1, appended.lines().filter(l -> l.trim().startsWith("EPF=")).count()); //$NON-NLS-1$
     }
+
+    @Test
+    public void testWriteVaRunnerBoilerplateBakesBaseProject() throws Exception
+    {
+        Path root = projectRoot.resolve("VA_Runner"); //$NON-NLS-1$
+        VanessaBootstrap.writeVaRunnerBoilerplate(root, "afm"); //$NON-NLS-1$
+
+        // The driver project skeleton is present.
+        assertTrue(Files.isRegularFile(root.resolve(".project"))); //$NON-NLS-1$
+        assertTrue(Files.isRegularFile(root.resolve( //$NON-NLS-1$
+            "DT-INF/PROJECT.PMF"))); //$NON-NLS-1$
+        assertTrue(Files.isRegularFile(root.resolve( //$NON-NLS-1$
+            "src/ExternalDataProcessors/VA_Runner/VA_Runner.mdo"))); //$NON-NLS-1$
+        assertTrue(Files.isRegularFile(root.resolve( //$NON-NLS-1$
+            "src/ExternalDataProcessors/VA_Runner/ObjectModule.bsl"))); //$NON-NLS-1$
+
+        // Base-Project is baked in, not left as a token, and the .vanessa layout is provisioned.
+        String pmf = Files.readString(root.resolve("DT-INF/PROJECT.PMF"), //$NON-NLS-1$
+            StandardCharsets.UTF_8);
+        assertTrue(pmf.contains("Base-Project: afm")); //$NON-NLS-1$
+        assertFalse(pmf.contains("@BASE_PROJECT@")); //$NON-NLS-1$
+        assertTrue(Files.isRegularFile(root.resolve(".vanessa/env.sh"))); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testWriteVaRunnerBoilerplateIsIdempotent() throws Exception
+    {
+        Path root = projectRoot.resolve("VA_Runner"); //$NON-NLS-1$
+        VanessaBootstrap.writeVaRunnerBoilerplate(root, "afm"); //$NON-NLS-1$
+
+        // An operator edit to PROJECT.PMF survives a second provision.
+        Path pmf = root.resolve("DT-INF/PROJECT.PMF"); //$NON-NLS-1$
+        String edited = Files.readString(pmf, StandardCharsets.UTF_8) + "\n# note\n"; //$NON-NLS-1$
+        Files.writeString(pmf, edited, StandardCharsets.UTF_8);
+        VanessaBootstrap.writeVaRunnerBoilerplate(root, "fom"); //$NON-NLS-1$
+        assertEquals(edited, Files.readString(pmf, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    public void testCopyVanessaAutomationSourceCopiesTreeAndIsIdempotent() throws Exception
+    {
+        Path tpl = Files.createTempDirectory("va-src-tpl-"); //$NON-NLS-1$
+        try
+        {
+            Files.writeString(tpl.resolve("VanessaAutomation.mdo"), "mdo", StandardCharsets.UTF_8); //$NON-NLS-1$
+            Files.createDirectories(tpl.resolve("МодульОбъекта")); //$NON-NLS-1$
+            Files.writeString(tpl.resolve("МодульОбъекта/Module.bsl"), "bsl", StandardCharsets.UTF_8); //$NON-NLS-1$
+
+            Path dst = VanessaBootstrap.copyVanessaAutomationSource(tpl, projectRoot);
+            assertTrue(Files.isRegularFile(dst.resolve("VanessaAutomation.mdo"))); //$NON-NLS-1$
+            assertTrue(Files.isRegularFile(dst.resolve("МодульОбъекта/Module.bsl"))); //$NON-NLS-1$
+
+            // Idempotent: operator edits are not overwritten on a second copy.
+            Files.writeString(dst.resolve("VanessaAutomation.mdo"), "edited", StandardCharsets.UTF_8); //$NON-NLS-1$
+            VanessaBootstrap.copyVanessaAutomationSource(tpl, projectRoot);
+            assertEquals("edited", //$NON-NLS-1$
+                Files.readString(dst.resolve("VanessaAutomation.mdo"), StandardCharsets.UTF_8));
+        }
+        finally
+        {
+            deleteRecursively(tpl);
+        }
+    }
+
+    @Test
+    public void testCopyVanessaAutomationSourceThrowsWhenTemplateMissing() throws Exception
+    {
+        try
+        {
+            VanessaBootstrap.copyVanessaAutomationSource(
+                projectRoot.resolve("does-not-exist"), projectRoot); //$NON-NLS-1$
+            org.junit.Assert.fail("expected IOException for a missing template"); //$NON-NLS-1$
+        }
+        catch (java.io.IOException expected)
+        {
+            // expected: missing template dir is reported, not silently skipped
+        }
+    }
+
+    @Test
+    public void testCopyDirKeepsExistingFilesWhenNotOverwriting() throws Exception
+    {
+        Path src = Files.createTempDirectory("va-copydir-src-"); //$NON-NLS-1$
+        Path dst = Files.createTempDirectory("va-copydir-dst-"); //$NON-NLS-1$
+        try
+        {
+            Files.createDirectories(src.resolve("lib")); //$NON-NLS-1$
+            Files.writeString(src.resolve("lib/a.jar"), "new", StandardCharsets.UTF_8); //$NON-NLS-1$
+            Files.createDirectories(dst.resolve("lib")); //$NON-NLS-1$
+            Files.writeString(dst.resolve("lib/a.jar"), "existing", StandardCharsets.UTF_8); //$NON-NLS-1$
+
+            VanessaBootstrap.copyDir(src, dst, false);
+            // The pre-existing target file wins when overwrite is off.
+            assertEquals("existing", Files.readString(dst.resolve("lib/a.jar"), StandardCharsets.UTF_8)); //$NON-NLS-1$
+        }
+        finally
+        {
+            deleteRecursively(src);
+            deleteRecursively(dst);
+        }
+    }
 }

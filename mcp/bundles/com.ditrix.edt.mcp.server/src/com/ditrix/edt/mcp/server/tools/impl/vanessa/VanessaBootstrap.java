@@ -31,9 +31,6 @@ import org.eclipse.core.resources.IFolder;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.CoreException;
-import org.eclipse.core.runtime.IProgressMonitor;
-import org.eclipse.core.runtime.SubMonitor;
-import org.eclipse.core.runtime.jobs.Job;
 import org.osgi.framework.FrameworkUtil;
 
 import com.ditrix.edt.mcp.server.Activator;
@@ -42,11 +39,16 @@ import com.ditrix.edt.mcp.server.utils.ProjectContext;
 
 /**
  * Turnkey installation of the Vanessa Automation runtime for an EDT project
- * ("Package A", soft scheme): when the plugin activates it creates
+ * ("Package A", soft scheme): on demand, per project, it creates
  * {@code <projectRoot>/.vanessa/} (templates for {@code env.sh} /
  * {@code VAParams.json} plus {@code features/} and {@code out/}), and the heavy
  * runtime — the {@code vanessa-automation.epf} executable data processor — is
  * downloaded lazily into a shared cache only when VA is first used.
+ *
+ * <p>The layout is NOT created at plugin activation for every open project — that
+ * would drop {@code .vanessa/} into repositories that never use Vanessa. It is
+ * provisioned per project only when {@code vanessa_setup} runs for that project
+ * (and the run tools report the missing layout with a pointer to it).</p>
  *
  * <p>VA runs are driven by EDT ({@code LaunchTool} + the {@code VA_Runner}
  * external processor), so the plugin does NOT need OneScript/vrunner: the only
@@ -63,8 +65,8 @@ import com.ditrix.edt.mcp.server.utils.ProjectContext;
  * layout stays a read fallback (see {@link VanessaProjectConfig}).</p>
  *
  * <p>The layout/provision/doctor logic is pure — it takes paths, not an EDT
- * workspace — so it is unit-testable without EDT; only the {@link Job} wrappers
- * and the network download touch the platform.</p>
+ * workspace — so it is unit-testable without EDT; only the background-job
+ * wrappers and the network download touch the platform.</p>
  *
  * <p>The pinned VA release is the public, actively maintained publishing repo for
  * the {@code vanessa-automation.epf} (GitHub: {@code Pr-Mex/vanessa-automation}); the zip holds
@@ -96,6 +98,10 @@ public final class VanessaBootstrap
     static final String VA_ZIP = "vanessa-automation." + VA_TAG + ".zip"; //$NON-NLS-1$
     /** The extracted epf file name inside the cache dir. */
     static final String EPF_FILE = "vanessa-automation.epf"; //$NON-NLS-1$
+    /** Top-level folder inside the release zip holding the runtime tree. */
+    static final String RELEASE_SUBDIR = "vanessa-automation"; //$NON-NLS-1$
+    /** Runtime sub-folders of the release that make up the VA project's {@code bin/}. */
+    static final String[] BIN_DIRS = { "features", "lib", "plugins", "locales", "vendor" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
 
     /** Public GitHub repo the Allure CLI is published from. */
     static final String ALLURE_REPO = "allure-framework/allure2"; //$NON-NLS-1$
@@ -558,7 +564,7 @@ public final class VanessaBootstrap
         }
     }
 
-    private static void download(String url, Path target) throws IOException
+    static void download(String url, Path target) throws IOException
     {
         try
         {
@@ -584,7 +590,7 @@ public final class VanessaBootstrap
     }
 
     /** Extracts a zip so {@code vanessa-automation.epf} + {@code locales/} land at the root. */
-    private static void extractZip(Path zip, Path dir) throws IOException
+    static void extractZip(Path zip, Path dir) throws IOException
     {
         try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zip),
             StandardCharsets.UTF_8))
@@ -614,7 +620,7 @@ public final class VanessaBootstrap
      * Resolves an (archive-relative) entry name under {@code base}, rejecting entries
      * that would escape the extract dir via {@code ..} or an absolute path.
      */
-    private static Path sanitized(Path base, String name)
+    static Path sanitized(Path base, String name)
     {
         Path target = base.resolve(name.replace('\\', '/')).normalize();
         if (!target.startsWith(base.normalize()))
@@ -677,48 +683,6 @@ public final class VanessaBootstrap
         {
             return ""; //$NON-NLS-1$
         }
-    }
-
-    /**
-     * A background job that provisions {@code .vanessa/} for every open workspace
-     * project (first-run activation layout). Fails softly per project.
-     *
-     * @return the scheduled job
-     */
-    public static Job scheduleProvisionLayouts()
-    {
-        Job job = new Job("VA bootstrap: provision .vanessa layouts") //$NON-NLS-1$
-        {
-            @Override
-            protected org.eclipse.core.runtime.IStatus run(IProgressMonitor monitor)
-            {
-                SubMonitor sub = SubMonitor.convert(monitor);
-                String envTemplate = template("env.sh.template"); //$NON-NLS-1$
-                String vaparamsTemplate = template("VAParams.json.template"); //$NON-NLS-1$
-                for (IProject p : ProjectContext.allProjects())
-                {
-                    if (sub.isCanceled())
-                    {
-                        return org.eclipse.core.runtime.Status.CANCEL_STATUS;
-                    }
-                    try
-                    {
-                        Path root = p.getLocation().toFile().toPath();
-                        provisionLayout(root, p.getName(), envTemplate, vaparamsTemplate);
-                        markVanessaDerived(p);
-                    }
-                    catch (RuntimeException | IOException e)
-                    {
-                        Activator.logWarning("VA bootstrap layout failed for " + p.getName() + ": " + e); //$NON-NLS-1$
-                    }
-                }
-                return org.eclipse.core.runtime.Status.OK_STATUS;
-            }
-        };
-        job.setSystem(true);
-        job.setUser(false);
-        job.schedule();
-        return job;
     }
 
     /**
@@ -844,5 +808,195 @@ public final class VanessaBootstrap
     {
         String id = EPF_DOWNLOADS.get(project);
         return id == null || id.isEmpty() ? null : id;
+    }
+
+    // ---------------------------------------------------------------------
+    // VA_Runner external-object project provisioning (button-driven)
+    // ---------------------------------------------------------------------
+
+    /** Bundle-relative {@code templates/va_runner/} files that form the driver project. */
+    static final String[] VA_RUNNER_TEMPLATE_FILES =
+    {
+        ".project", //$NON-NLS-1$
+        ".settings/com._1c.g5.v8.dt.platform.services.core.prefs", //$NON-NLS-1$
+        "DT-INF/PROJECT.PMF", //$NON-NLS-1$
+        "src/ExternalDataProcessors/VA_Runner/VA_Runner.mdo", //$NON-NLS-1$
+        "src/ExternalDataProcessors/VA_Runner/ObjectModule.bsl", //$NON-NLS-1$
+        "src/ExternalDataProcessors/VA_Runner/Forms/Форма/Form.form", //$NON-NLS-1$
+        "src/ExternalDataProcessors/VA_Runner/Forms/Форма/Module.bsl", //$NON-NLS-1$
+    };
+
+    /** URL of the pinned VA release zip asset. */
+    static String vaReleaseUrl(String asset)
+    {
+        return "https://github.com/" + VA_REPO //$NON-NLS-1$
+            + "/releases/download/" + VA_TAG + "/" + asset; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Guarantees the full VA release is downloaded and extracted into the shared cache,
+     * including the {@value #RELEASE_SUBDIR} runtime tree the project {@code bin/} is built from.
+     * Reuses the lazily-downloaded {@code epf} when present; otherwise (re)downloads the zip.
+     *
+     * @return the extracted release root ({@code <cache>/<RELEASE_SUBDIR>})
+     * @throws IOException on a download/extract failure
+     */
+    static Path ensureReleaseExtracted() throws IOException
+    {
+        if (!Files.isRegularFile(epfCacheFile()))
+        {
+            ensureEpfDownloaded();
+        }
+        Path relRoot = epfCacheDir().resolve(RELEASE_SUBDIR);
+        if (!Files.isDirectory(relRoot))
+        {
+            Path dir = epfCacheDir();
+            Files.createDirectories(dir);
+            Path zip = dir.resolve(VA_ZIP);
+            download(vaReleaseUrl(VA_ZIP), zip);
+            extractZip(zip, dir);
+        }
+        return relRoot;
+    }
+
+    /**
+     * Builds the project's {@code bin/} runtime tree from the extracted VA release:
+     * the {@link #BIN_DIRS} folders plus the {@code .epf}, copied under {@code <root>/bin/}.
+     * Idempotent — never overwrites files already present in {@code bin/}.
+     *
+     * @param projectVaRoot the VA_Runner project root
+     * @return the created {@code bin/} directory
+     * @throws IOException on a download or copy failure
+     */
+    public static Path provisionVanessaBin(Path projectVaRoot) throws IOException
+    {
+        Path release = ensureReleaseExtracted();
+        Path bin = projectVaRoot.resolve("bin"); //$NON-NLS-1$
+        for (String d : BIN_DIRS)
+        {
+            copyDir(release.resolve(d), bin.resolve(d), false);
+        }
+        copyFileIfAbsent(release.resolve(EPF_FILE), bin.resolve(EPF_FILE));
+        return bin;
+    }
+
+    /**
+     * Copies the operator's EDT source of the {@code VanessaAutomation} processing from a
+     * template directory into the project as {@code src/ExternalDataProcessors/VanessaAutomation}.
+     * Idempotent: an already-provisioned non-empty target is left untouched so operator edits survive.
+     *
+     * @param templateDir where the {@code VanessaAutomation} EDT-source template lives (may be null)
+     * @param projectVaRoot the VA_Runner project root
+     * @return the destination source directory
+     * @throws IOException if the template is missing/unreadable or the copy fails
+     */
+    public static Path copyVanessaAutomationSource(Path templateDir, Path projectVaRoot)
+        throws IOException
+    {
+        if (templateDir == null || !Files.isDirectory(templateDir))
+        {
+            throw new IOException("VanessaAutomation EDT-source template not found at " //$NON-NLS-1$
+                + (templateDir == null ? "<null>" : templateDir)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        Path dst = projectVaRoot.resolve("src").resolve("ExternalDataProcessors") //$NON-NLS-1$ //$NON-NLS-2$
+            .resolve("VanessaAutomation"); //$NON-NLS-1$
+        if (!Files.isDirectory(dst) || isEmptyDir(dst))
+        {
+            copyDir(templateDir, dst, false);
+        }
+        return dst;
+    }
+
+    /**
+     * Writes the VA_Runner driver project boilerplate from the bundled {@code templates/va_runner/}
+     * tree ({@code .project}, {@code .settings}, {@code DT-INF/PROJECT.PMF} with the given base
+     * project, {@code src/ExternalDataProcessors/VA_Runner}) and the {@code .vanessa/} layout.
+     * Never overwrites an existing file.
+     *
+     * @param projectVaRoot the VA_Runner project root
+     * @param baseProject the base configuration project name ({@code Base-Project} in {@code PROJECT.PMF})
+     * @return the project root
+     * @throws IOException on a write failure
+     */
+    public static Path writeVaRunnerBoilerplate(Path projectVaRoot, String baseProject)
+        throws IOException
+    {
+        Files.createDirectories(projectVaRoot);
+        Map<String, String> vars = new LinkedHashMap<>();
+        vars.put("BASE_PROJECT", baseProject == null ? "" : baseProject); //$NON-NLS-1$ //$NON-NLS-2$
+        for (String rel : VA_RUNNER_TEMPLATE_FILES)
+        {
+            String t = template("va_runner/" + rel); //$NON-NLS-1$
+            if (!t.isEmpty())
+            {
+                writeIfAbsent(projectVaRoot.resolve(rel), t, vars);
+            }
+        }
+        provisionLayout(projectVaRoot, "VA_Runner", //$NON-NLS-1$
+            template("env.sh.template"), template("VAParams.json.template")); //$NON-NLS-1$ //$NON-NLS-2$
+        return projectVaRoot;
+    }
+
+    /** Whether {@code dir} exists and holds no files. */
+    private static boolean isEmptyDir(Path dir)
+    {
+        if (!Files.isDirectory(dir))
+        {
+            return true;
+        }
+        try (var s = Files.list(dir))
+        {
+            return s.findFirst().isEmpty();
+        }
+        catch (IOException e)
+        {
+            return true;
+        }
+    }
+
+    /** Recursively copies a directory tree; existing target files are kept when {@code overwrite} is false. */
+    static void copyDir(Path src, Path dst, boolean overwrite) throws IOException
+    {
+        if (!Files.isDirectory(src))
+        {
+            return;
+        }
+        try (var stream = Files.walk(src))
+        {
+            for (Path p : (Iterable<Path>) stream::iterator)
+            {
+                Path target = dst.resolve(src.relativize(p));
+                if (Files.isDirectory(p))
+                {
+                    Files.createDirectories(target);
+                }
+                else
+                {
+                    if (!overwrite && Files.exists(target))
+                    {
+                        continue;
+                    }
+                    if (target.getParent() != null)
+                    {
+                        Files.createDirectories(target.getParent());
+                    }
+                    Files.copy(p, target, StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+        }
+    }
+
+    /** Copies a file only when the target does not exist yet. */
+    static void copyFileIfAbsent(Path src, Path dst) throws IOException
+    {
+        if (!Files.isRegularFile(src) || Files.exists(dst))
+        {
+            return;
+        }
+        if (dst.getParent() != null)
+        {
+            Files.createDirectories(dst.getParent());
+        }
+        Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING);
     }
 }
