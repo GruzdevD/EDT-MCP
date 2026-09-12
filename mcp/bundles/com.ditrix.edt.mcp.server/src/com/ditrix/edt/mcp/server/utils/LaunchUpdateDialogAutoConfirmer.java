@@ -375,6 +375,96 @@ public final class LaunchUpdateDialogAutoConfirmer
     static final Set<String> DEBUG_SESSION_KEEP_BUTTONS = Collections.unmodifiableSet(
         new LinkedHashSet<>(Arrays.asList(DEBUG_SESSION_KEEP_BUTTON, DEBUG_SESSION_KEEP_BUTTON_RU)));
 
+    /**
+     * Russian message-body prefix of the platform's exclusive-infobase-lock modal (decodes to
+     * "Ошибка исключительной блокировки информационной базы" — the message EDT shows when a
+     * structural/monopolistic update of a standalone-hosted file base cannot acquire exclusive
+     * access). Occurring only for a STANDALONE-server hosted base (its own process holds the base,
+     * so no external restart can ever satisfy it), this is the signal the plugin uses to run the
+     * restructure through the server's admin-SSH gate instead. Kept unicode-escaped (no raw
+     * Cyrillic in source) so it compiles identically whatever encoding the Tycho compiler picks.
+     */
+    static final String EXCLUSIVE_LOCK_BODY_PREFIX_RU =
+        "\u041E\u0448\u0438\u0431\u043A\u0430 " //$NON-NLS-1$
+            + "\u0438\u0441\u043A\u043B\u044E\u0447\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0439 " //$NON-NLS-1$
+            + "\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0438 " //$NON-NLS-1$
+            + "\u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u043E\u043D\u043D\u043E\u0439 " //$NON-NLS-1$
+            + "\u0431\u0430\u0437\u044B"; //$NON-NLS-1$
+
+    /**
+     * English message-body prefix of the same modal, best-effort (the RU prefix is the reliable
+     * one for the affected bases; this is a tolerant secondary matcher).
+     */
+    static final String EXCLUSIVE_LOCK_BODY_PREFIX_EN = "Exclusive access to the infobase"; //$NON-NLS-1$
+
+    /** Every shipped localized message-body prefix of the exclusive-infobase-lock modal. */
+    static final Set<String> EXCLUSIVE_LOCK_BODY_PREFIXES = Collections.unmodifiableSet(
+        new LinkedHashSet<>(Arrays.asList(
+            EXCLUSIVE_LOCK_BODY_PREFIX_RU, EXCLUSIVE_LOCK_BODY_PREFIX_EN)));
+
+    /**
+     * Localized labels of the exclusive-lock modal's "retry" button — the answer that makes EDT
+     * RE-ACQUIRE exclusive access after the plugin has externally applied the restructure. In the
+     * standalone case the retry finds the base already structurally current, so no further
+     * exclusive need arises. A label miss is a cancelled dialog plus a clear error, never a blind
+     * default press (the default may be "stop sessions").
+     */
+    static final Set<String> EXCLUSIVE_RETRY_BUTTONS = Collections.unmodifiableSet(
+        new LinkedHashSet<>(Arrays.asList("Terminate sessions and retry", //$NON-NLS-1$
+            "Retry", //$NON-NLS-1$
+            "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C\u0020\u0441\u0435\u0430\u043D\u0441\u044B\u0020\u0438\u0020" //$NON-NLS-1$
+                + "\u043F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u044C", //$NON-NLS-1$
+            "\u041F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u044C"))); //$NON-NLS-1$
+
+    /** Whether a restructure-terminal failure has been recorded for the caller to read. */
+    private static volatile String lastExclusiveError;
+
+    /**
+     * The standalone structural-update restructure a caller runs through the admin-SSH gate. Kept
+     * as a callback so THIS matcher stays free of workspace/IB resolution — the tool that armed it
+     * (which already knows its project, application and infobase) supplies how to restructure.
+     */
+    @FunctionalInterface
+    public interface ExclusiveAgent
+    {
+        /**
+         * Applies any pending structural restructure. Runs on a worker thread (never the UI).
+         *
+         * @return the outcome; {@code isSatisfied()} when nothing more is needed
+         */
+        StandaloneInfobaseAdmin.Outcome restructureNow();
+    }
+
+    /**
+     * One standalone structural-update arm: an armed caller plus the infobase it is updating, used
+     * to attribute an exclusive-lock dialog before the (writing) retry press.
+     */
+    private static final class ExclusiveArm
+    {
+        final String infobaseName;
+        final ExclusiveAgent agent;
+
+        ExclusiveArm(String infobaseName, ExclusiveAgent agent)
+        {
+            this.infobaseName = infobaseName;
+            this.agent = agent;
+        }
+    }
+
+    /** The armed standalone structural-update callers (attributed by infobase), guarded by {@link #LOCK}. */
+    private static final List<ExclusiveArm> EXCLUSIVE_ARMS = new ArrayList<>();
+
+    /** Shells whose exclusive dialog is currently being restructure-then-pressed (re-entry guard). */
+    private static final Set<Shell> EXCLUSIVE_IN_FLIGHT =
+        java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+
+    /** Exclusive-handle invocations per infobase within one armed lifecycle, bounded so a retry that
+     *  genuinely cannot be satisfied cancels instead of looping forever. Guarded by {@link #LOCK}. */
+    private static final java.util.Map<String, Integer> EXCLUSIVE_ATTEMPTS = new java.util.HashMap<>();
+
+    /** How many times one armed update may restructure+retry before the exclusive dialog is cancelled. */
+    private static final int MAX_EXCLUSIVE_RETRIES = 2;
+
     /** Cap on how much dialog text {@link #collectDialogText} accumulates for attribution. */
     private static final int MAX_DIALOG_TEXT_CHARS = 8192;
 
@@ -930,6 +1020,148 @@ public final class LaunchUpdateDialogAutoConfirmer
             }
         }
         return false;
+    }
+
+    /**
+     * Pure decision (and test seam): is the dialog body that of the platform's exclusive-infobase-lock
+     * modal? Matched on the BODY prefix because the shell TITLE is the region-generic question title.
+     */
+    static boolean isExclusiveLockBody(String body)
+    {
+        if (body == null)
+        {
+            return false;
+        }
+        for (String prefix : EXCLUSIVE_LOCK_BODY_PREFIXES)
+        {
+            if (body.startsWith(prefix))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Arms the standalone structural-update restructure + retry for ONE infobase. MUST be paired
+     * with {@link #disarmExclusive(String)} on the same infobase. While armed, an exclusive-lock
+     * dialog is restructured through the agent's admin-SSH gate and retried; a failed restructure
+     * cancels the dialog and records a terminal error (see {@link #lastExclusiveError()}).
+     *
+     * <p>Independent of the update/session/conflict/port arms: a caller may arm it alone (e.g. the
+     * launch path) without touching the others. Runs its own reconcile so the filter starts
+     * watching before the caller enters the (blocking) update.
+     *
+     * @param infobaseName the infobase being structurally updated (attribution key)
+     * @param agent how to apply the pending restructure (runs on a worker thread)
+     */
+    public static void armExclusive(String infobaseName, ExclusiveAgent agent)
+    {
+        if (infobaseName == null || agent == null)
+        {
+            throw new IllegalArgumentException("armExclusive requires an infobase name and an agent"); //$NON-NLS-1$
+        }
+        Display display = safeDisplay();
+        if (display == null)
+        {
+            return; // headless — no UI, so no modal can ever appear (see arm(...))
+        }
+        synchronized (LOCK)
+        {
+            EXCLUSIVE_ARMS.add(new ExclusiveArm(infobaseName, agent));
+            EXCLUSIVE_ATTEMPTS.put(infobaseName, 0);
+        }
+        reconcileOnUiThread(display);
+    }
+
+    /**
+     * Disarms the exclusive matcher the caller armed with {@link #armExclusive(String, ExclusiveAgent)}
+     * on the same infobase. Never throws.
+     *
+     * @param infobaseName the infobase the caller armed
+     */
+    public static void disarmExclusive(String infobaseName)
+    {
+        Display display = safeDisplay();
+        synchronized (LOCK)
+        {
+            removeFirstExclusiveArm(infobaseName);
+            EXCLUSIVE_ATTEMPTS.remove(infobaseName);
+        }
+        if (display != null)
+        {
+            reconcileOnUiThread(display);
+        }
+    }
+
+    /** Removes the first exclusive arm for the infobase; {@code true} when one was removed. */
+    private static boolean removeFirstExclusiveArm(String infobaseName)
+    {
+        for (java.util.Iterator<ExclusiveArm> it = EXCLUSIVE_ARMS.iterator(); it.hasNext();)
+        {
+            if (java.util.Objects.equals(it.next().infobaseName, infobaseName))
+            {
+                it.remove();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether any exclusive arm is current. Must be called with {@code LOCK} held (reentrant). */
+    private static boolean exclusiveArmedLocked()
+    {
+        synchronized (LOCK)
+        {
+            return !EXCLUSIVE_ARMS.isEmpty();
+        }
+    }
+
+    /**
+     * The agent to run for an exclusive-lock dialog: attributed to the dialog's infobase when it is
+     * named in the body, else the sole armed agent, else {@code null} (a dialog no armed caller
+     * owns must NOT be restructure-and-retried — it may belong to a different server entirely).
+     */
+    private static ExclusiveArm exclusiveArmForBody(String body)
+    {
+        synchronized (LOCK)
+        {
+            if (EXCLUSIVE_ARMS.isEmpty())
+            {
+                return null;
+            }
+            if (EXCLUSIVE_ARMS.size() == 1)
+            {
+                return EXCLUSIVE_ARMS.get(0);
+            }
+            if (body != null)
+            {
+                for (ExclusiveArm arm : EXCLUSIVE_ARMS)
+                {
+                    if (arm.infobaseName != null && body.contains(arm.infobaseName))
+                    {
+                        return arm;
+                    }
+                }
+            }
+            return null;
+        }
+    }
+
+    /**
+     * A restructure-terminal error left by the exclusive handler, or {@code null} when the last
+     * exclusive dialog was handled (or none appeared). A STRUCTURAL-update call reads this after
+     * its update returns to turn EDT's bare "cancelled" into the concrete ibcmd failure.
+     */
+    public static String lastExclusiveError()
+    {
+        return lastExclusiveError;
+    }
+
+    /** Clears the recorded exclusive error, called after a caller has consumed it. */
+    public static void clearLastExclusiveError()
+    {
+        lastExclusiveError = null;
     }
 
     /**
@@ -1568,6 +1800,14 @@ public final class LaunchUpdateDialogAutoConfirmer
      */
     private static boolean claims(ArmState armed, String title, Supplier<String> body)
     {
+        // The exclusive-lock (standalone structural update) matcher is its own track, gated on the
+        // exclusive arms rather than on the update/session flags — a launch that arms ONLY
+        // armExclusive still handles the dialog. Its body is read (a widget-tree walk) whenever an
+        // exclusive arm is up; a miss falls through to the shared TITLE/session logic below.
+        if (exclusiveArmedLocked() && isExclusiveLockBody(body.get()))
+        {
+            return true;
+        }
         // The body is only read (a widget-tree walk) when the title did not already
         // match an armed TITLE matcher (update, restructure or conflict) AND the
         // session matcher is armed — otherwise it is needless work.
@@ -1995,6 +2235,15 @@ public final class LaunchUpdateDialogAutoConfirmer
             {
                 return;
             }
+            // The exclusive-infobase-lock modal (structural update of a standalone-hosted base) is
+            // matched on its BODY and completed by restructure-then-retry — never by pressing its
+            // default/retry button blind. Routed before the conflict branch; deferred so the body is
+            // populated and the ibcmd restructure runs off the UI thread.
+            if (isExclusiveLockBody(readDialogBody(shell)))
+            {
+                shell.getDisplay().asyncExec(() -> handleExclusiveLockDialog(shell));
+                return;
+            }
             // The external-changes conflict modal is keyed on its own TITLE and completed
             // by a policy-selected LABELLED button (its default button rewrites the
             // project) — decided before the generic body walk below.
@@ -2058,6 +2307,124 @@ public final class LaunchUpdateDialogAutoConfirmer
         catch (RuntimeException e)
         {
             Activator.logError("Failed to auto-confirm the launch update dialog", e); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Completes the exclusive-infobase-lock modal by restructuring the base through the standalone
+     * server's admin-SSH gate (the ONLY way a server-hosted file base can be restructured — EDT's
+     * own update always re-raises the lock because its server process holds the base), then pressing
+     * the modal's retry button, now that the base is structurally current.
+     *
+     * <p>A restructure that fails — or a retry that never settles within {@value #MAX_EXCLUSIVE_RETRIES}
+     * attempts — CANCELS the dialog (never presses the default button blind) and records the concrete
+     * error, which the structural-update call reads from {@link #lastExclusiveError()} to report
+     * instead of EDT's bare "cancelled". The restructure runs on a background Job; only the final
+     * press returns to the UI thread.
+     */
+    private static void handleExclusiveLockDialog(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+        {
+            return;
+        }
+        ExclusiveArm arm = exclusiveArmForBody(readDialogBody(shell));
+        if (arm == null)
+        {
+            // Not attributable to an armed standalone update — cancel rather than press blindly: the
+            // modal is application-modal and leaving it open freezes the workbench. The worst case is
+            // that an update we do not own has to be retried, which beats a stuck workbench.
+            Activator.logError("Auto-confirmer: exclusive-infobase-lock dialog is not attributable to " //$NON-NLS-1$
+                + "an armed standalone update — cancelling: '" + safeShellText(shell) + "'", null); //$NON-NLS-1$
+            closeQuietly(shell);
+            return;
+        }
+        if (!EXCLUSIVE_IN_FLIGHT.add(shell))
+        {
+            return; // this physical dialog is already being handled
+        }
+        int attempt;
+        synchronized (LOCK)
+        {
+            attempt = EXCLUSIVE_ATTEMPTS.getOrDefault(arm.infobaseName, 0) + 1;
+            EXCLUSIVE_ATTEMPTS.put(arm.infobaseName, attempt);
+        }
+        if (attempt > MAX_EXCLUSIVE_RETRIES)
+        {
+            EXCLUSIVE_IN_FLIGHT.remove(shell);
+            lastExclusiveError = "The exclusive infobase lock did not settle after " //$NON-NLS-1$
+                + MAX_EXCLUSIVE_RETRIES + " structural updates through the standalone admin gate; " //$NON-NLS-1$
+                + "the base is still held by the server. Cancel and re-run once it is healthy."; //$NON-NLS-1$
+            Activator.logError("Standalone structural update could not settle the exclusive infobase " //$NON-NLS-1$
+                + "lock; cancelling the dialog", null); //$NON-NLS-1$
+            closeQuietly(shell);
+            return;
+        }
+        Display display = shell.getDisplay();
+        new org.eclipse.core.runtime.jobs.Job("Standalone structural infobase update (admin-SSH)") //$NON-NLS-1$
+        {
+            @Override
+            protected org.eclipse.core.runtime.IStatus run(org.eclipse.core.runtime.IProgressMonitor monitor)
+            {
+                StandaloneInfobaseAdmin.Outcome outcome;
+                try
+                {
+                    outcome = arm.agent.restructureNow();
+                }
+                catch (RuntimeException e)
+                {
+                    Activator.logError("Standalone structural update raised", e); //$NON-NLS-1$
+                    outcome = StandaloneInfobaseAdmin.Outcome.failed("Restructure raised: " + e); //$NON-NLS-1$
+                }
+                // javac's blank-final-vs-try/catch capture rule refuses a final captured in a lambda
+                // when the catch may also assign it; a final snapshot of the (definitely assigned)
+                // variable is the standard workaround.
+                final StandaloneInfobaseAdmin.Outcome captured = outcome;
+                display.asyncExec(() -> pressAfterExclusiveRestructure(shell, captured));
+                return org.eclipse.core.runtime.Status.OK_STATUS;
+            }
+        }.schedule();
+    }
+
+    /** Presses the retry (or cancels) after the ibcmd restructure settles. Runs on the UI thread. */
+    private static void pressAfterExclusiveRestructure(Shell shell, StandaloneInfobaseAdmin.Outcome outcome)
+    {
+        if (shell != null && !shell.isDisposed())
+        {
+            try
+            {
+                if (outcome.isSatisfied())
+                {
+                    Button retry = findButtonByLabel(shell, 0, EXCLUSIVE_RETRY_BUTTONS);
+                    if (retry != null)
+                    {
+                        Activator.logInfo("Standalone structural update applied via admin-SSH; retrying " //$NON-NLS-1$
+                            + "the exclusive-lock dialog '" + safeShellText(shell) + "' via button '" //$NON-NLS-1$
+                            + safeText(retry) + "'"); //$NON-NLS-1$ //$NON-NLS-2$
+                        pressButton(retry);
+                        EXCLUSIVE_IN_FLIGHT.remove(shell);
+                        return;
+                    }
+                    lastExclusiveError = "Standalone structural update applied but the exclusive-lock " //$NON-NLS-1$
+                        + "retry button was not found by label. Update the base by hand."; //$NON-NLS-1$
+                    Activator.logError(lastExclusiveError + " Dialog: '" + safeShellText(shell) + "'", null); //$NON-NLS-1$
+                }
+                else
+                {
+                    lastExclusiveError = outcome.error;
+                    Activator.logError("Standalone structural update failed; cancelling: " //$NON-NLS-1$
+                        + outcome.error, null); //$NON-NLS-1$
+                }
+            }
+            finally
+            {
+                EXCLUSIVE_IN_FLIGHT.remove(shell);
+            }
+            closeQuietly(shell);
+        }
+        else
+        {
+            EXCLUSIVE_IN_FLIGHT.remove(shell);
         }
     }
 
