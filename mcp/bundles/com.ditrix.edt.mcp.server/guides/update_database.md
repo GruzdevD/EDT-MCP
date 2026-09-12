@@ -53,6 +53,19 @@ Pass `terminateRunningClients=false` to keep the client running; then the old ma
 
 When the update changes the DB structure (new/changed objects), EDT pops a blocking **"Restructure data" / «Реорганизация информации»** confirmation dialog listing the structural changes. Because `confirm=true` has already approved this irreversible update, the tool **auto-presses that dialog's default "Accept" button** so the unattended call completes without a human click — otherwise the MCP call would hang on the modal. The EDT update API offers no per-call switch for this, so it is handled by intercepting the dialog only for the duration of this update; the auto-press is written to the EDT log. A structural restructure can include data-deleting changes (dropped attributes/objects) — that is part of applying the configuration you confirmed. Applies to both file infobases and standalone servers.
 
+## Standalone server: "exclusive access to the infobase" (auto-answered)
+
+On a standalone server the update path can hit the platform's exclusivity question instead.
+When the server holds the base in a way that blocks a structural change, EDT asks
+**"Exclusive access to the infobase is not available"** / «Ошибка исключительной блокировки
+информационной базы» and offers to **"Terminate sessions and retry"**. In interactive EDT a human
+answers it; in an unattended run nobody does, so `update_database` would fail with "Delegate
+provides no answer". The plugin registers the platform's `IInfobaseSynchonizationQuestionHandler`
+as an OSGi service and answers exactly this question with "Terminate sessions and retry": EDT
+then ends the sessions itself and completes the restructure — the same mechanism interactive EDT
+uses. No `ibcmd`/SSH or server administration is involved, so it works on macOS and Windows
+alike. Every other question is left untouched.
+
 ## Examples
 
 - Preferred, incremental: `launchConfigurationName="MyApp / ThinClient"`.

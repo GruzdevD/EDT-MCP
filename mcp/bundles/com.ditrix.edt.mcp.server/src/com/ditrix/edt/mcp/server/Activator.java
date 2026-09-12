@@ -13,6 +13,7 @@ import java.util.function.Supplier;
 
 import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.osgi.framework.BundleContext;
+import org.osgi.framework.Constants;
 import org.osgi.framework.ServiceRegistration;
 
 import com._1c.g5.v8.dt.bm.xtext.BmAwareResourceSetProvider;
@@ -34,6 +35,9 @@ import com._1c.g5.v8.dt.md.refactoring.core.IMdRefactoringService;
 import com._1c.g5.v8.dt.navigator.providers.INavigatorContentProviderStateProvider;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager;
+import com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchonizationQuestionHandler;
+
+import com.ditrix.edt.mcp.server.utils.InfobaseExclusiveLockAnswerer;
 import com._1c.g5.v8.dt.rights.IRightInfosService;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com.ditrix.edt.mcp.server.groups.IGroupService;
@@ -66,6 +70,8 @@ public class Activator extends AbstractUIPlugin
 
     /** In-process bridge exposed to sibling OSGi bundles by string service name. */
     private ServiceRegistration<?> bridgeRegistration;
+
+    private ServiceRegistration<?> questionHandlerRegistration;
 
     /**
      * EDT platform service access (OSGi service trackers + their getters).
@@ -121,6 +127,11 @@ public class Activator extends AbstractUIPlugin
         // service has to mean the tools it advertises are usable.
         publishBridge(context);
 
+        // Publish the infobase-sync question answerer so EDT resolves it via the
+        // platform's IInfobaseSynchonizationQuestionHandler binding (.toService()) for
+        // headless structural updates (exclusive-infobase-lock question).
+        registerInfobaseQuestionHandler(context);
+
         // Run startup orchestration (group service + UI integrations) in the
         // same order as before.
         orchestrator.start(headless);
@@ -149,6 +160,25 @@ public class Activator extends AbstractUIPlugin
             new EdtMcpBridge(), bridgeProperties);
     }
 
+    /**
+     * Publishes the exclusive-infobase-lock answerer as an OSGi service under the platform
+     * {@link IInfobaseSynchonizationQuestionHandler} interface. EDT resolves that interface from
+     * the OSGi service registry (its DI binds it via {@code .toService()}), so an unattended
+     * (headless) run is able to answer the "exclusive access to the infobase — terminate sessions
+     * and retry" question the way interactive EDT does, instead of aborting with "Delegate
+     * provides no answer". The high {@link Constants#SERVICE_RANKING} makes our handler win over
+     * the platform's own when both are registered.
+     *
+     * @param context the bundle context to register in
+     */
+    private void registerInfobaseQuestionHandler(BundleContext context)
+    {
+        Dictionary<String, Object> props = new Hashtable<>();
+        props.put(Constants.SERVICE_RANKING, Integer.valueOf(Integer.MAX_VALUE));
+        questionHandlerRegistration = context.registerService(
+            IInfobaseSynchonizationQuestionHandler.class, new InfobaseExclusiveLockAnswerer(), props);
+    }
+
     @Override
     public void stop(BundleContext context) throws Exception
     {
@@ -156,6 +186,12 @@ public class Activator extends AbstractUIPlugin
         {
             bridgeRegistration.unregister();
             bridgeRegistration = null;
+        }
+
+        if (questionHandlerRegistration != null)
+        {
+            questionHandlerRegistration.unregister();
+            questionHandlerRegistration = null;
         }
 
         // Cancel Workmate conversations and stop their non-UI worker/deadline threads
