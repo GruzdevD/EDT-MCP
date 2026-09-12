@@ -55,16 +55,21 @@ When the update changes the DB structure (new/changed objects), EDT pops a block
 
 ## Standalone server: "exclusive access to the infobase" (auto-answered)
 
-On a standalone server the update path can hit the platform's exclusivity question instead.
+On a standalone server the update path can hit the platform's exclusivity questions instead.
 When the server holds the base in a way that blocks a structural change, EDT asks
 **"Exclusive access to the infobase is not available"** / «Ошибка исключительной блокировки
-информационной базы» and offers to **"Terminate sessions and retry"**. In interactive EDT a human
-answers it; in an unattended run nobody does, so `update_database` would fail with "Delegate
-provides no answer". The plugin registers the platform's `IInfobaseSynchonizationQuestionHandler`
-as an OSGi service and answers exactly this question with "Terminate sessions and retry": EDT
-then ends the sessions itself and completes the restructure — the same mechanism interactive EDT
-uses. No `ibcmd`/SSH or server administration is involved, so it works on macOS and Windows
-alike. Every other question is left untouched.
+информационной базы» and offers **"Terminate sessions and retry"**; when it is to end those
+sessions itself, EDT follows with the warning
+**"Terminating sessions will cause an abnormal termination of user sessions! Proceed?"** /
+«Завершение сеансов приведет к аварийному завершению работы пользователей! Выполнить завершение
+сеансов?» whose **default answer is "Cancel"**. In interactive EDT a human answers both; in an
+unattended run nobody does, so `update_database` would fail with "Delegate provides no answer". The
+plugin registers the platform's `IInfobaseSynchonizationQuestionHandler` as an OSGi service and
+answers the exclusivity question with "Terminate sessions and retry" and the warning with
+"Terminate sessions and continue" (never the default "Cancel"): EDT then ends the sessions itself
+and completes the restructure — the same mechanism interactive EDT uses. No `ibcmd`/SSH or server
+administration is involved, so it works on macOS and Windows alike. Every other question is left
+untouched.
 
 ## Examples
 

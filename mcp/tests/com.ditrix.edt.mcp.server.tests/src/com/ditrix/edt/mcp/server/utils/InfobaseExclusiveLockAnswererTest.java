@@ -38,6 +38,12 @@ public class InfobaseExclusiveLockAnswererTest
     private static final String TERMINATE_RETRY_EN = "Terminate sessions and retry";
     private static final String RETRY_EN = "Retry";
     private static final String CANCEL_EN = "Cancel";
+    private static final String SESSION_TERMINATION_WARNING_MESSAGE_RU =
+        "\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u0435 \u0441\u0435\u0430\u043D\u0441\u043E\u0432 \u043F\u0440\u0438\u0432\u0435\u0434\u0435\u0442 \u043A \u0430\u0432\u0430\u0440\u0438\u0439\u043D\u043E\u043C\u0443 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u044E \u0440\u0430\u0431\u043E\u0442\u044B \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u0435\u0439!\u0412\u044B\u043F\u043E\u043B\u043D\u0438\u0442\u044C \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u0435 \u0441\u0435\u0430\u043D\u0441\u043E\u0432?";
+    private static final String TERMINATE_CONTINUE_RU =
+        "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0441\u0435\u0430\u043D\u0441\u044B \u0438 \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0438\u0442\u044C";
+    private static final String TERMINATE_CONTINUE_EN = "Terminate sessions and continue";
+    private static final String CANCEL_RU = "\u041E\u0442\u043C\u0435\u043D\u0430";
 
     private final InfobaseExclusiveLockAnswerer answerer = new InfobaseExclusiveLockAnswerer();
 
@@ -147,8 +153,54 @@ public class InfobaseExclusiveLockAnswererTest
         assertEquals(TERMINATE_RETRY_RU, result.get().getLabel());
     }
 
+    @Test
+    public void answersSessionTerminationWarningWithTerminateAndContinue()
+    {
+        IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer cont =
+            new IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer(TERMINATE_CONTINUE_RU, TERMINATE_CONTINUE_RU, false);
+        IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer cancel =
+            new IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer(CANCEL_RU, CANCEL_RU, true);
+        IInfobaseSynchonizationQuestionHandler.IInfobaseSynchonizationQuestionContext ctx = context(cancel, cont);
+        when(ctx.getMessage()).thenReturn(SESSION_TERMINATION_WARNING_MESSAGE_RU);
+
+        Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> result = answerer.handleQuestion(ctx);
+        assertTrue(result.isPresent());
+        assertSame(cont, result.get());
+        assertEquals(TERMINATE_CONTINUE_RU, result.get().getLabel());
+    }
+
+    @Test
+    public void answersSessionTerminationWarningWithEnglishContinueLabel()
+    {
+        IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer cont = terminateContinueEn();
+        IInfobaseSynchonizationQuestionHandler.IInfobaseSynchonizationQuestionContext ctx = context(cont);
+        when(ctx.getMessage()).thenReturn(SESSION_TERMINATION_WARNING_MESSAGE_RU);
+
+        Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> result = answerer.handleQuestion(ctx);
+        assertTrue(result.isPresent());
+        assertSame(cont, result.get());
+    }
+
+    @Test
+    public void sessionTerminationWarningWithoutContinueAnswerYieldsEmptyRatherThanCancel()
+    {
+        // Default is "Cancel"; without the explicit continue answer the handler must refuse,
+        // not press the destructive default.
+        IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer cancel =
+            new IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer(CANCEL_RU, CANCEL_RU, true);
+        IInfobaseSynchonizationQuestionHandler.IInfobaseSynchonizationQuestionContext ctx = context(cancel);
+        when(ctx.getMessage()).thenReturn(SESSION_TERMINATION_WARNING_MESSAGE_RU);
+
+        assertFalse(answerer.handleQuestion(ctx).isPresent());
+    }
+
     private IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer terminateRetry()
     {
         return new IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer(TERMINATE_RETRY_RU, TERMINATE_RETRY_RU, false);
+    }
+
+    private IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer terminateContinueEn()
+    {
+        return new IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer(TERMINATE_CONTINUE_EN, TERMINATE_CONTINUE_EN, false);
     }
 }
