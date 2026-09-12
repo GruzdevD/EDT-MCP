@@ -200,7 +200,67 @@ public class LaunchUpdateDialogAutoConfirmerTest
                 "Debug session for project \"X\" and application \"Y\" has already been started."));
     }
 
+
+    // === standalone exclusive-infobase-lock body-prefix matcher ===
+
+    /** The Russian exclusive-lock body prefix, as the production constant decodes it. */
+    private static final String EXCLUSIVE_BODY_PREFIX_RU =
+        "\u041E\u0448\u0438\u0431\u043A\u0430\u0020\u0438\u0441\u043A\u043B\u044E\u0447\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0439\u0020\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0438\u0020\u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u043E\u043D\u043D\u043E\u0439\u0020\u0431\u0430\u0437\u044B";
+
+    @Test
+    public void testExclusiveLockRussianBodyMatches()
+    {
+        assertTrue("the Russian exclusive-lock body must match",
+            LaunchUpdateDialogAutoConfirmer.isExclusiveLockBody(
+                EXCLUSIVE_BODY_PREFIX_RU + "."));
+    }
+
+    @Test
+    public void testExclusiveLockEnglishBodyMatches()
+    {
+        assertTrue("the English exclusive-lock body must match",
+            LaunchUpdateDialogAutoConfirmer.isExclusiveLockBody(
+                "Exclusive access to the infobase is required."));
+    }
+
+    @Test
+    public void testExclusiveLockRussianConstantDecodesCorrectly()
+    {
+        assertEquals("the Russian exclusive-lock prefix constant must equal the expected string",
+            EXCLUSIVE_BODY_PREFIX_RU,
+            LaunchUpdateDialogAutoConfirmer.EXCLUSIVE_LOCK_BODY_PREFIX_RU);
+    }
+
+    @Test
+    public void testUnrelatedBodyDoesNotMatchExclusiveLock()
+    {
+        assertFalse("an unrelated body must not match the exclusive-lock matcher",
+            LaunchUpdateDialogAutoConfirmer.isExclusiveLockBody(
+                "Are you sure you want to delete this object?"));
+        assertFalse("an update body must not match the exclusive-lock matcher",
+            LaunchUpdateDialogAutoConfirmer.isExclusiveLockBody("Application update"));
+    }
+
+    @Test
+    public void testNullAndEmptyExclusiveLockBodyDoNotMatch()
+    {
+        assertFalse("a null body must not match", LaunchUpdateDialogAutoConfirmer.isExclusiveLockBody(null));
+        assertFalse("an empty body must not match", LaunchUpdateDialogAutoConfirmer.isExclusiveLockBody(""));
+    }
+
+    @Test
+    public void testExclusiveLockBodyPrefixSetHasBothLocales()
+    {
+        assertTrue("the exclusive-lock body-prefix set must contain the Russian prefix",
+            LaunchUpdateDialogAutoConfirmer.EXCLUSIVE_LOCK_BODY_PREFIXES.contains(
+                EXCLUSIVE_BODY_PREFIX_RU));
+        assertTrue("the exclusive-lock body-prefix set must contain the English prefix",
+            LaunchUpdateDialogAutoConfirmer.EXCLUSIVE_LOCK_BODY_PREFIXES.contains(
+                "Exclusive access to the infobase"));
+    }
+
     // === independently-gated matchers (shouldAutoConfirm) ===
+
 
     /** English 1003 body, as the live modal renders it (prefix + interpolated names). */
     private static final String DEBUG_SESSION_BODY =
