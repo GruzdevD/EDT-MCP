@@ -67,7 +67,6 @@ import com.ditrix.edt.mcp.server.utils.McpJobs;
 import com.ditrix.edt.mcp.server.utils.PlatformFailures;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
-import com.ditrix.edt.mcp.server.utils.StandaloneExclusiveRestructure;
 import com.ditrix.edt.mcp.server.utils.StandaloneServerPortConflictPolicy;
 import com.ditrix.edt.mcp.server.utils.StandaloneServerStateRecovery;
 import com.ditrix.edt.mcp.server.utils.YaxunitJobCancellation;
@@ -1169,17 +1168,6 @@ public class RunYaxunitTestsTool implements IMcpTool
                     launchServer);
         LaunchUpdateDialogAutoConfirmer.arm(armFlags[0], armFlags[1], armFlags[0], launchPolicy,
             launchInfobase, launchPortPolicy, launchServer);
-        // A standalone-server hosted FILE base cannot be restructured by EDT's own update (its
-        // server process holds the base, so the exclusive-lock dialog re-loops). When that dialog
-        // appears, restructure through the server's admin-SSH gate and press retry; a failure
-        // cancels the dialog and records an actionable error instead of hanging the run. Armed only
-        // for a standalone target; never for a file/client-server base that cannot raise this modal.
-        boolean standaloneLaunch =
-            DebugServerTargetSupport.isServerApplicationId(applicationId);
-        if (standaloneLaunch)
-        {
-            StandaloneExclusiveRestructure.arm(launchInfobase);
-        }
         ILaunch launch;
         try
         {
@@ -1203,39 +1191,15 @@ public class RunYaxunitTestsTool implements IMcpTool
             {
                 throw new CoreException(new Status(IStatus.ERROR, Activator.PLUGIN_ID, cancelled, ex));
             }
-            // An exclusive-lock cancel means the standalone structural update failed (the admin-SSH
-            // restructure could not lift the lock); report the concrete ibcmd failure, not EDT's bare
-            // cancellation.
-            String exclusiveRunError = StandaloneExclusiveRestructure.lastError();
-            if (exclusiveRunError != null)
-            {
-                StandaloneExclusiveRestructure.clearError();
-                throw new CoreException(new Status(IStatus.ERROR, Activator.PLUGIN_ID,
-                    exclusiveRunError, ex));
-            }
             throw ex;
         }
         finally
         {
             LaunchUpdateDialogAutoConfirmer.disarm(armFlags[0], armFlags[1], armFlags[0], launchPolicy,
                 launchInfobase, launchPortPolicy, launchServer);
-            if (standaloneLaunch)
-            {
-                StandaloneExclusiveRestructure.disarm(launchInfobase);
-            }
             // Closed HERE, not after the check below: a launch() that throws must not leave the
             // window registered in the confirmer for the rest of the session.
             closeQuietly(conflicts);
-        }
-        // The launch may return (a client starts) even when the exclusive handler cancelled the
-        // structural update — that client would run against a stale base. Treat the recorded
-        // restructure failure as a failed run rather than poll for a report that cannot pass.
-        String exclusiveRunError = StandaloneExclusiveRestructure.lastError();
-        if (exclusiveRunError != null)
-        {
-            StandaloneExclusiveRestructure.clearError();
-            terminateQuietly(launch);
-            throw new CoreException(new Status(IStatus.ERROR, Activator.PLUGIN_ID, exclusiveRunError));
         }
         String declined = declinedConflict(conflicts, launchPolicy);
         if (declined != null)
@@ -1664,15 +1628,6 @@ public class RunYaxunitTestsTool implements IMcpTool
                         launchServer);
             LaunchUpdateDialogAutoConfirmer.arm(armFlags[0], armFlags[1], armFlags[0], launchPolicy,
                 launchInfobase, launchPortPolicy, launchServer);
-            // See the RUN path: a standalone-hosted file base needs its structural update applied
-            // inside the server via admin-SSH; arm the exclusive-lock matcher while the delegate
-            // performs that update.
-            boolean standaloneLaunch =
-                DebugServerTargetSupport.isServerApplicationId(applicationId);
-            if (standaloneLaunch)
-            {
-                StandaloneExclusiveRestructure.arm(launchInfobase);
-            }
             ILaunch[] spawned = new ILaunch[1];
             try
             {
@@ -1695,12 +1650,6 @@ public class RunYaxunitTestsTool implements IMcpTool
                 // Same as the RUN path: a cancel that aborted the launch is reported with its own
                 // cause, not with the delegate's generic message.
                 String cancelled = declinedConflict(conflicts, launchPolicy);
-                String exclusiveDebugError = StandaloneExclusiveRestructure.lastError();
-                if (exclusiveDebugError != null)
-                {
-                    StandaloneExclusiveRestructure.clearError();
-                    return ToolResult.error(exclusiveDebugError).toJson();
-                }
                 return ToolResult.error(cancelled != null ? cancelled
                     : "Launch failed: " + PlatformFailures.describe(ex)).toJson(); //$NON-NLS-1$
             }
@@ -1708,10 +1657,6 @@ public class RunYaxunitTestsTool implements IMcpTool
             {
                 LaunchUpdateDialogAutoConfirmer.disarm(armFlags[0], armFlags[1], armFlags[0],
                     launchPolicy, launchInfobase, launchPortPolicy, launchServer);
-                if (standaloneLaunch)
-                {
-                    StandaloneExclusiveRestructure.disarm(launchInfobase);
-                }
                 closeQuietly(conflicts);
             }
             String declined = declinedConflict(conflicts, launchPolicy);
@@ -1722,13 +1667,6 @@ public class RunYaxunitTestsTool implements IMcpTool
                 // if the termination below cannot go through.
                 terminateQuietly(spawned[0]);
                 return ToolResult.error(declined).toJson();
-            }
-            String exclusiveDebugError = StandaloneExclusiveRestructure.lastError();
-            if (exclusiveDebugError != null)
-            {
-                StandaloneExclusiveRestructure.clearError();
-                terminateQuietly(spawned[0]);
-                return ToolResult.error(exclusiveDebugError).toJson();
             }
             LaunchLifecycleUtils.registerOwnedLaunch(spawned[0]);
             execution.trackLaunch(spawned[0], reportDir);
