@@ -14,20 +14,24 @@ import com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchoniz
 import com.ditrix.edt.mcp.server.Activator;
 
 /**
- * Platform infobase-synchronization question handler that answers the exclusive-infobase-lock
- * question the way the interactive EDT does, so an unattended (headless) run can structurally
- * update a base, including one hosted by a standalone server, instead of aborting with
- * "Delegate provides no answer".
+ * Platform infobase-synchronization question handler that answers, the way the interactive EDT
+ * does, the two questions EDT asks before terminating user sessions to apply a structural update:
+ * the exclusive-infobase-lock question and the follow-up session-termination warning. This lets an
+ * unattended (headless) run structurally update a base, including one hosted by a standalone
+ * server, instead of aborting with "Delegate provides no answer".
  *
  * <p>When EDT needs to apply a structural (monopolistic) configuration change it asks a
  * {@code DbUpdateQuestionResponse} — "Ошибка исключительной блокировки информационной базы / Завершить
- * сеансы и повторить?" Because a headless run has no UI to answer it, the platform refuses the
- * update. The fix is not to press a dialog button (there is none on that channel) but to register
- * this handler as the {@link IInfobaseSynchonizationQuestionHandler} OSGi service EDT resolves for
- * infobase-sync questions. When the question is the exclusive-lock one, we answer "terminate
- * sessions and retry"; EDT then ends the sessions itself and restructures the base — exactly as in
- * interactive use. On macOS there is no {@code ibcmd}/{@code ring} binary, so this is the only
- * headless restructure path that works at all.
+ * сеансы и повторить?", and if EDT itself is to end those sessions it follows with the warning
+ * "Завершение сеансов приведет к аварийному завершению работы пользователей! Выполнить завершение
+ * сеансов?" (whose default answer is "Cancel"). Because a headless run has no UI to answer them, the
+ * platform refuses the update. The fix is not to press a dialog button (there is none on that
+ * channel) but to register this handler as the {@link IInfobaseSynchonizationQuestionHandler} OSGi
+ * service EDT resolves for infobase-sync questions. We answer the exclusive-lock question with
+ * "terminate sessions and retry" and the warning with "terminate sessions and continue"; EDT then
+ * ends the sessions itself and restructures the base — exactly as in interactive use. On macOS
+ * there is no {@code ibcmd}/{@code ring} binary, so this is the only headless restructure path that
+ * works at all.
  *
  * <p>Self-contained and conservative: every other question yields {@link Optional#empty()} so the
  * regular flow (and any other handler EDT consults) is unaffected.
@@ -59,19 +63,37 @@ public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizat
     /** EN label of the plain "retry" fallback. */
     private static final String RETRY_LABEL_EN = "Retry"; //$NON-NLS-1$
 
+    /**
+     * RU marker of the platform's session-termination warning question: "Завершение сеансов
+     * приведет к аварийному завершению работы пользователей! Выполнить завершение сеансов?".
+     * Its default answer is "Cancel", so it must be answered explicitly. Escaped as {@code \\uXXXX}
+     * (CLAUDE.md rule #7: no raw Cyrillic in source).
+     */
+    private static final String SESSION_TERMINATION_WARNING_MARKER_RU = //$NON-NLS-1$
+        "\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u0435 \u0441\u0435\u0430\u043D\u0441\u043E\u0432 \u043F\u0440\u0438\u0432\u0435\u0434\u0435\u0442";
+
+    /** RU label of the "terminate sessions and continue" answer of that warning. */
+    private static final String SESSION_TERMINATION_CONTINUE_LABEL_RU = //$NON-NLS-1$
+        "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0441\u0435\u0430\u043D\u0441\u044B \u0438 \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0438\u0442\u044C";
+
+    /** EN label of the same answer. */
+    private static final String SESSION_TERMINATION_CONTINUE_LABEL_EN = //$NON-NLS-1$
+        "Terminate sessions and continue";
+
     public InfobaseExclusiveLockAnswerer()
     {
         // Default
     }
 
     /**
-     * Answers the exclusive-infobase-lock question with "terminate sessions and retry", so EDT
-     * ends the current sessions and applies the structural update itself. Any other question is
-     * left unanswered ({@link Optional#empty()}). Never throws.
+     * Answers the two infobase-synchronization questions that EDT asks before it terminates user
+     * sessions to apply a structural update: the exclusive-infobase-lock question ("terminate
+     * sessions and retry") and the follow-up session-termination warning ("terminate sessions and
+     * continue"). Any other question is left unanswered ({@link Optional#empty()}). Never throws.
      *
      * @param context the question EDT is asking (may be {@code null})
-     * @return the chosen answer, or {@link Optional#empty()} when the question is not the
-     *         exclusive-lock one
+     * @return the chosen answer, or {@link Optional#empty()} when the question is not one this
+     *         handler answers
      */
     @Override
     public Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> handleQuestion(
@@ -82,6 +104,17 @@ public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizat
             return Optional.empty();
         }
         String message = context.getMessage();
+        if (isSessionTerminationWarning(message))
+        {
+            Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> continueChoice =
+                terminateAndContinueAnswer(context);
+            if (!continueChoice.isPresent())
+            {
+                Activator.logInfo("Session-termination warning seen but no 'terminate sessions and" //$NON-NLS-1$
+                    + " continue' answer offered; leaving it to the platform"); //$NON-NLS-1$
+            }
+            return continueChoice;
+        }
         if (!isExclusiveLockQuestion(message))
         {
             return Optional.empty();
@@ -93,6 +126,52 @@ public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizat
                 + " answer offered; leaving it to the platform"); //$NON-NLS-1$
         }
         return chosen;
+    }
+
+    /**
+     * Matches the platform's session-termination warning question by its message text: "Завершение
+     * сеансов приведет к аварийному завершению работы пользователей! Выполнить завершение
+     * сеансов?". Its default answer is "Cancel", so the handler must answer it with the explicit
+     * "terminate sessions and continue" label instead of falling through to the default. Null or
+     * unrecognized text is {@code false}.
+     *
+     * @param message the question message (may be {@code null})
+     * @return {@code true} when this is the session-termination warning
+     */
+    private static boolean isSessionTerminationWarning(String message)
+    {
+        return message != null && message.contains(SESSION_TERMINATION_WARNING_MARKER_RU);
+    }
+
+    /**
+     * Picks the explicit "terminate sessions and continue" answer of the session-termination
+     * warning. Never the default — that is "Cancel" and would abort the update. Returns empty when
+     * no such answer is on offer, so an unrecognized variant is left to the platform rather than
+     * answered wrongly.
+     *
+     * @param context the session-termination warning question (non-null)
+     * @return the chosen answer, or empty
+     */
+    private static Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> terminateAndContinueAnswer(
+        IInfobaseSynchonizationQuestionHandler.IInfobaseSynchonizationQuestionContext context)
+    {
+        List<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> answers = context.getAnswers();
+        if (answers == null)
+        {
+            return Optional.empty();
+        }
+        for (IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer answer : answers)
+        {
+            if (answer == null)
+            {
+                continue;
+            }
+            if (isLabel(answer.getLabel(), SESSION_TERMINATION_CONTINUE_LABEL_RU, SESSION_TERMINATION_CONTINUE_LABEL_EN))
+            {
+                return Optional.of(answer);
+            }
+        }
+        return Optional.empty();
     }
 
     /**
