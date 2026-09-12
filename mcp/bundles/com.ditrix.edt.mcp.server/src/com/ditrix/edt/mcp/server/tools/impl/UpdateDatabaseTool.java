@@ -36,7 +36,6 @@ import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils;
 import com.ditrix.edt.mcp.server.utils.LaunchUpdateDialogAutoConfirmer;
 import com.ditrix.edt.mcp.server.utils.PlatformFailures;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
-import com.ditrix.edt.mcp.server.utils.StandaloneExclusiveRestructure;
 import com.ditrix.edt.mcp.server.utils.StandaloneServerPortConflictPolicy;
 import com.ditrix.edt.mcp.server.utils.StandaloneServerStateRecovery;
 import com.e1c.g5.dt.applications.ApplicationException;
@@ -759,22 +758,11 @@ public class UpdateDatabaseTool implements IMcpTool
                     // client-server application cannot raise that modal, and an arm held for the
                     // whole of such an update would answer a dialog belonging to a concurrent (or
                     // manual) server start.
-                    boolean standaloneTarget =
-                        DebugServerTargetSupport.isServerApplicationId(applicationId);
                     StandaloneServerPortConflictPolicy armedPortPolicy =
-                        standaloneTarget ? portPolicy : null;
+                        DebugServerTargetSupport.isServerApplicationId(applicationId)
+                            ? portPolicy : null;
                     LaunchUpdateDialogAutoConfirmer.arm(false, false, true, externalChanges,
                         infobaseName, armedPortPolicy, armedServerName);
-                    // A standalone-server hosted FILE base cannot be restructured by EDT's own update:
-                    // its server process holds the base, so the exclusive-lock dialog re-loops no
-                    // matter how often it is answered. When that dialog appears, restructure through
-                    // the server's admin-SSH gate inside the running process, then press retry; a
-                    // failed restructure records an actionable error (lastExclusiveError) and cancels
-                    // the dialog instead of hanging.
-                    if (standaloneTarget)
-                    {
-                        StandaloneExclusiveRestructure.arm(infobaseName);
-                    }
                     try
                     {
                         updateApiEntered = true;
@@ -802,16 +790,6 @@ public class UpdateDatabaseTool implements IMcpTool
                         {
                             return declinedUpdateResult(watch, externalChanges);
                         }
-                        // An exclusive-lock cancel means the standalone structural update failed (the
-                        // admin-SSH restructure could not lift the lock). Report the concrete ibcmd
-                        // failure rather than EDT's bare "cancelled".
-                        String exclusiveError = StandaloneExclusiveRestructure.lastError();
-                        if (exclusiveError != null)
-                        {
-                            StandaloneExclusiveRestructure.clearError();
-                            return exclusiveFailedResult(projectName, applicationId, infobaseName,
-                                exclusiveError);
-                        }
                         throw ex;
                     }
                     finally
@@ -822,11 +800,6 @@ public class UpdateDatabaseTool implements IMcpTool
                         portsReassigned = watch.portsReassigned();
                         LaunchUpdateDialogAutoConfirmer.disarm(false, false, true, externalChanges,
                             infobaseName, armedPortPolicy, armedServerName);
-                        // Arm/disarm are symmetric; the exclusive matcher releases with the others.
-                        if (standaloneTarget)
-                        {
-                            StandaloneExclusiveRestructure.disarm(infobaseName);
-                        }
                     }
                     // Same reasoning as the catch above, for the path where the cancelled server
                     // start lets update() return a (cached, therefore meaningless) state instead
@@ -846,16 +819,6 @@ public class UpdateDatabaseTool implements IMcpTool
                     {
                         return declinedUpdateResult(watch, externalChanges);
                     }
-                }
-                // The update may have returned a (cached) state instead of throwing even when the
-                // exclusive handler cancelled the structural update — check the recorded error so a
-                // genuinely failed restructure is not reported as "updated".
-                String exclusiveError = LaunchUpdateDialogAutoConfirmer.lastExclusiveError();
-                if (exclusiveError != null)
-                {
-                    LaunchUpdateDialogAutoConfirmer.clearLastExclusiveError();
-                    return exclusiveFailedResult(projectName, applicationId, infobaseName,
-                        exclusiveError);
                 }
             }
 
@@ -1057,27 +1020,6 @@ public class UpdateDatabaseTool implements IMcpTool
             result.put(KEY_PORTS_REASSIGNED, true);
         }
         return result.toJson();
-    }
-
-    /**
-     * Error payload for a standalone structural update that the admin-SSH restructure failed to
-     * complete. The update itself was IRREVERSIBLE and MAY have partially applied, so the payload
-     * is marked as a post-mutation error; {@code detail} carries the concrete ibcmd/gate failure
-     * with the manual fallback.
-     *
-     * @param projectName the EDT project
-     * @param applicationId the application id
-     * @param infobaseName the infobase being restructured
-     * @param detail the concrete restructure failure already ending with a manual fallback hint
-     * @return the error payload
-     */
-    private static String exclusiveFailedResult(String projectName, String applicationId,
-        String infobaseName, String detail)
-    {
-        String message = "Structural (exclusive) update of infobase '" + infobaseName //$NON-NLS-1$
-            + "' (project=" + projectName + ", application=" + applicationId + ") could not be " //$NON-NLS-1$
-            + "applied through the standalone server's admin console.\n" + detail; //$NON-NLS-1$
-        return ToolResult.errorAfterMutation(message).toJson();
     }
 
     /**

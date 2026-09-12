@@ -167,30 +167,3 @@ the likely reason: an `ibsrv` left over from the previous run still holding the 
 
 EDT's own background jobs - notably its external-object dump - can still lose this race on their
 own, which is logged in the workbench log without failing the MCP call.
-
-## Standalone server: structural (exclusive) update uses the admin-SSH gate
-
-A standalone server hosts its **file** infobase by holding it open in its own `ibsrv` process.
-When a structural (monopolistic) change requires exclusive access, EDT's own update therefore
-cannot restructure the base: its `IApplicationManager.update` first restarts the server, and the
-restarted server holds the base again, so the platform's **"exclusive infobase lock"** dialog
-("Ошибка исключительной блокировки информационной базы") re-loops on "Завершить сеансы и
-повторить" no matter how often it is answered — the server's own hold is never released.
-
-For a standalone-server target this is handled automatically: when that dialog appears (the new
-configuration is already loaded into the base by then), the tool applies the pending restructure
-**inside the running server** through its admin console over SSH —
-
-```
-ssh -i <serverFolder>/.ssh/id_rsa admin@localhost -p <gates.ssh.admin.port> "infobase config update"
-```
-
-— resolves the gate from the server's `config.yaml` (`gates.ssh.admin.address/port`), then presses
-the dialog's retry button; the base is now structurally current, so no further exclusive need
-arises. This applies to `update_database` and to the standalone-server paths of `launch` and
-`run_yaxunit_tests`.
-
-If no usable admin gate exists, or `ibcmd`/`ssh` fails, the tool **cancels the dialog** (it never
-presses a button blind) and returns an actionable error naming the manual command above — run it in
-the server's console and re-run the update. The restructure is idempotent: when the base is already
-structurally current it is a no-op.
