@@ -66,11 +66,14 @@ public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizat
     /**
      * RU marker of the platform's session-termination warning question: "Завершение сеансов
      * приведет к аварийному завершению работы пользователей! Выполнить завершение сеансов?".
-     * Its default answer is "Cancel", so it must be answered explicitly. Escaped as {@code \\uXXXX}
-     * (CLAUDE.md rule #7: no raw Cyrillic in source).
+     * The marker is the unique question suffix "Выполнить завершение сеансов?" but NOT the phrase
+     * "Завершение сеансов приведет": that phrase is ALSO a substring of the exclusive-infobase-lock
+     * question (its message ends "... всех пользователей информационной базы!" and never asks
+     * "Выполнить завершение сеансов?"). The default of this warning is "Cancel", so it must be
+     * answered explicitly. Escaped as {@code \\uXXXX} (CLAUDE.md rule #7: no raw Cyrillic in source).
      */
     private static final String SESSION_TERMINATION_WARNING_MARKER_RU = //$NON-NLS-1$
-        "\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u0435 \u0441\u0435\u0430\u043D\u0441\u043E\u0432 \u043F\u0440\u0438\u0432\u0435\u0434\u0435\u0442";
+        "\u0412\u044B\u043F\u043E\u043B\u043D\u0438\u0442\u044C \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u0435 \u0441\u0435\u0430\u043D\u0441\u043E\u0432?";
 
     /** RU label of the "terminate sessions and continue" answer of that warning. */
     private static final String SESSION_TERMINATION_CONTINUE_LABEL_RU = //$NON-NLS-1$
@@ -89,7 +92,11 @@ public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizat
      * Answers the two infobase-synchronization questions that EDT asks before it terminates user
      * sessions to apply a structural update: the exclusive-infobase-lock question ("terminate
      * sessions and retry") and the follow-up session-termination warning ("terminate sessions and
-     * continue"). Any other question is left unanswered ({@link Optional#empty()}). Never throws.
+     * continue"). The exclusive-lock question is matched FIRST, because its message contains the
+     * phrase "Завершение сеансов приведет ..." that also starts the warning's message — reusing
+     * that phrase as the warning marker while checking the warning first would misclassify the
+     * exclusive-lock question and leave it unanswered. Any other question is left unanswered
+     * ({@link Optional#empty()}). Never throws.
      *
      * @param context the question EDT is asking (may be {@code null})
      * @return the chosen answer, or {@link Optional#empty()} when the question is not one this
@@ -104,6 +111,16 @@ public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizat
             return Optional.empty();
         }
         String message = context.getMessage();
+        if (isExclusiveLockQuestion(message))
+        {
+            Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> chosen = terminateAndRetryAnswer(context);
+            if (!chosen.isPresent())
+            {
+                Activator.logInfo("Exclusive-infobase-lock question seen but no 'terminate and retry'" //$NON-NLS-1$
+                    + " answer offered; leaving it to the platform"); //$NON-NLS-1$
+            }
+            return chosen;
+        }
         if (isSessionTerminationWarning(message))
         {
             Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> continueChoice =
@@ -115,25 +132,17 @@ public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizat
             }
             return continueChoice;
         }
-        if (!isExclusiveLockQuestion(message))
-        {
-            return Optional.empty();
-        }
-        Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> chosen = terminateAndRetryAnswer(context);
-        if (!chosen.isPresent())
-        {
-            Activator.logInfo("Exclusive-infobase-lock question seen but no 'terminate and retry'" //$NON-NLS-1$
-                + " answer offered; leaving it to the platform"); //$NON-NLS-1$
-        }
-        return chosen;
+        return Optional.empty();
     }
 
     /**
-     * Matches the platform's session-termination warning question by its message text: "Завершение
-     * сеансов приведет к аварийному завершению работы пользователей! Выполнить завершение
-     * сеансов?". Its default answer is "Cancel", so the handler must answer it with the explicit
-     * "terminate sessions and continue" label instead of falling through to the default. Null or
-     * unrecognized text is {@code false}.
+     * Matches the platform's session-termination warning question by its unique question suffix
+     * "Завершение сеансов приведет к аварийному завершению работы пользователей! Выполнить
+     * завершение сеансов?". The marker used is the "Выполнить завершение сеансов?" suffix, which
+     * appears ONLY in this warning's message and not in the exclusive-infobase-lock question whose
+     * message also starts with "Завершение сеансов приведет ...". Its default answer is "Cancel",
+     * so the handler must answer it with the explicit "terminate sessions and continue" label
+     * instead of falling through to the default. Null or unrecognized text is {@code false}.
      *
      * @param message the question message (may be {@code null})
      * @return {@code true} when this is the session-termination warning

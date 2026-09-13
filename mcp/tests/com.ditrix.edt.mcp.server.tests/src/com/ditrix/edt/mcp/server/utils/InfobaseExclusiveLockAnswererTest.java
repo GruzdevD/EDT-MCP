@@ -33,6 +33,15 @@ public class InfobaseExclusiveLockAnswererTest
 {
     private static final String EXCLUSIVE_LOCK_MESSAGE_RU =
         "\u041E\u0448\u0438\u0431\u043A\u0430 \u0438\u0441\u043A\u043B\u044E\u0447\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0439 \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0438 \u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u043E\u043D\u043D\u043E\u0439 \u0431\u0430\u0437\u044B";
+    /**
+     * The FULL real exclusive-lock message: it contains BOTH the exclusive-lock marker and the
+     * phrase "\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u0435 \u0441\u0435\u0430\u043D\u0441\u043E\u0432 \u043F\u0440\u0438\u0432\u0435\u0434\u0435\u0442" that also starts the session-termination warning.
+     * Because the warning marker is the unique suffix "\u0412\u044B\u043F\u043E\u043B\u043D\u0438\u0442\u044C \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u0435 \u0441\u0435\u0430\u043D\u0441\u043E\u0432?" and the
+     * exclusive-lock question is matched FIRST, this must classify as the exclusive-lock question
+     * and be answered with "terminate sessions and retry" \u2014 never as the warning, never empty.
+     */
+    private static final String EXCLUSIVE_LOCK_MESSAGE_FULL_RU =
+        "\u041E\u0448\u0438\u0431\u043A\u0430 \u0438\u0441\u043A\u043B\u044E\u0447\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0439 \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0438 \u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u043E\u043D\u043D\u043E\u0439 \u0431\u0430\u0437\u044B. \u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u0435 \u0441\u0435\u0430\u043D\u0441\u043E\u0432 \u043F\u0440\u0438\u0432\u0435\u0434\u0435\u0442 \u043A \u0430\u0432\u0430\u0440\u0438\u0439\u043D\u043E\u043C\u0443 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u044E \u0440\u0430\u0431\u043E\u0442\u044B \u0432\u0441\u0435\u0445 \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u0435\u0439 \u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u043E\u043D\u043D\u043E\u0439 \u0431\u0430\u0437\u044B!";
     private static final String TERMINATE_RETRY_RU =
         "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0441\u0435\u0430\u043D\u0441\u044B \u0438 \u043F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u044C";
     private static final String TERMINATE_RETRY_EN = "Terminate sessions and retry";
@@ -84,6 +93,26 @@ public class InfobaseExclusiveLockAnswererTest
         Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> result = answerer.handleQuestion(ctx);
         assertTrue(result.isPresent());
         assertSame(terminate, result.get());
+    }
+
+    @Test
+    public void fullExclusiveLockMessageContainingWarningPhraseIsAnsweredWithTerminateAndRetry()
+    {
+        // Regression for 3.0.7: the real exclusive-lock message ALSO contains the phrase
+        // "Завершение сеансов приведет ..." that starts the warning. A warning marker built from
+        // that phrase (checked first) misclassified this as the warning and left it unanswered.
+        // With the exclusive-lock question matched first and the warning marker being the unique
+        // "Выполнить завершение сеансов?" suffix, this must be answered with terminate-and-retry.
+        IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer terminate = terminateRetry();
+        IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer cancel =
+            new IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer(CANCEL_RU, CANCEL_RU, false);
+        IInfobaseSynchonizationQuestionHandler.IInfobaseSynchonizationQuestionContext ctx = context(cancel, terminate);
+        when(ctx.getMessage()).thenReturn(EXCLUSIVE_LOCK_MESSAGE_FULL_RU);
+
+        Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> result = answerer.handleQuestion(ctx);
+        assertTrue(result.isPresent());
+        assertSame(terminate, result.get());
+        assertEquals(TERMINATE_RETRY_RU, result.get().getLabel());
     }
 
     @Test

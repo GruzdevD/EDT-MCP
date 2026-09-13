@@ -71,6 +71,13 @@ and completes the restructure — the same mechanism interactive EDT uses. No `i
 administration is involved, so it works on macOS and Windows alike. Every other question is left
 untouched.
 
+Each question is recognized by its own distinguishing text: the exclusivity question by the
+`Ошибка исключительной блокировки информационной базы` marker (matched first), and the warning by
+its unique `Выполнить завершение сеансов?` suffix. The shared phrase `Завершение сеансов приведет`
+appears in both questions' messages and is deliberately NOT used as the warning marker, otherwise the
+exclusivity question would be mistaken for the warning and left without its terminate-and-retry
+answer.
+
 ## Examples
 
 - Preferred, incremental: `launchConfigurationName="MyApp / ThinClient"`.
