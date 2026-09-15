@@ -19,6 +19,11 @@ The parameters match `run_yaxunit_tests(debug=true)`:
 - Filter with `extensions`, `modules`, `tests`, and `tags`. Each accepts an array or a comma-separated string. Pin `tests` to one `Module.Method` for a predictable debug cycle.
 - `timeout` is the start-call wait only, default and maximum 45 seconds. It does not limit the background job. A larger value is clamped.
 - `updateBeforeLaunch` defaults to `true` and performs the pre-launch recompute/update chain. `updateScope` narrows that chain; `externalInfobaseChanges` selects how its blocking external-change prompt is answered.
+- `standaloneRestructure="external"` (opt-in) and `externalUpdate1cBinary` forward to
+  `run_yaxunit_tests`, so a needed monopolistic restructure on a standalone-server target can be
+  done offline — stopping the server, applying `1cv8 DESIGNER /LoadConfigFromFiles /UpdateDBCfg` to
+  the file infobase, restarting, and retrying — instead of ending live user sessions. See the
+  `run_yaxunit_tests` / `update_database` guides. Default is OFF.
 
 The progress journal uses the same `resolve`, `prep:terminate`, `prep:check-changes`, `prep:recompute`, `prep:settle`, `prep:db-update`, and `spawn` phases as `run_yaxunit_tests`; `prep:recompute` appears only when the gate found something to recompute. A phase that stops advancing may be slow work or an EDT modal dialog; inspect EDT instead of waiting indefinitely.
 

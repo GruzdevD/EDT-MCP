@@ -35,6 +35,17 @@ import com.ditrix.edt.mcp.server.Activator;
  *
  * <p>Self-contained and conservative: every other question yields {@link Optional#empty()} so the
  * regular flow (and any other handler EDT consults) is unaffected.
+ *
+ * <p><b>External mode (3.0.9).</b> Terminating user sessions is destructive on a live standalone
+ * server, so {@code update_database} / {@code launch} / {@code run_yaxunit_tests} can opt into the
+ * external-monopolistic-restructure path (see {@link StandaloneMonopolisticRestructure}). While that
+ * path is armed, the exclusive-lock question is instead answered with "Cancel" — a clean abort of the
+ * update that lets the tool stop the server, apply the restructure through an external
+ * {@code 1cv8 DESIGNER} offline, and restart it — and the fact that the platform asked for a
+ * monopolistic restructure is recorded for the aborting tool ({@code requestRestructure}). The
+ * session-termination warning is likewise answered "Cancel" under external mode (its default is
+ * already Cancel, so it is effectively left un-answered). If the exclusive-lock question offers no
+ * "Cancel" answer, the question is left to the platform rather than prematurely ending sessions.
  */
 public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizationQuestionHandler
 {
@@ -83,6 +94,16 @@ public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizat
     private static final String SESSION_TERMINATION_CONTINUE_LABEL_EN = //$NON-NLS-1$
         "Terminate sessions and continue";
 
+    /**
+     * RU label of the "Cancel" answer, used to abort cleanly under external mode. Escaped as
+     * {@code \\uXXXX} (CLAUDE.md rule #7: no raw Cyrillic in source).
+     */
+    private static final String CANCEL_LABEL_RU = //$NON-NLS-1$
+        "\u041E\u0442\u043C\u0435\u043D\u0430";
+
+    /** EN label of the same answer. */
+    private static final String CANCEL_LABEL_EN = "Cancel"; //$NON-NLS-1$
+
     public InfobaseExclusiveLockAnswerer()
     {
         // Default
@@ -113,6 +134,23 @@ public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizat
         String message = context.getMessage();
         if (isExclusiveLockQuestion(message))
         {
+            // Under external mode we WANT this question — it is the reliable "a monopolistic
+            // restructure is needed" signal. Abort the update cleanly with "Cancel" instead of
+            // ending user sessions, and tell the aborting tool to run the offline restructure.
+            if (StandaloneMonopolisticRestructure.isArmedExternal())
+            {
+                Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> cancel = cancelAnswer(context);
+                if (cancel.isPresent())
+                {
+                    StandaloneMonopolisticRestructure.requestRestructure(message);
+                    return cancel;
+                }
+                // No Cancel on offer (unexpected variant): better to leave it to the platform than
+                // to end sessions without the tool knowing it aborted.
+                Activator.logWarning("External standalone restructure is armed but the exclusive-lock " //$NON-NLS-1$
+                    + "question offered no Cancel answer; leaving it to the platform"); //$NON-NLS-1$
+                return Optional.empty();
+            }
             Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> chosen = terminateAndRetryAnswer(context);
             if (!chosen.isPresent())
             {
@@ -123,6 +161,19 @@ public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizat
         }
         if (isSessionTerminationWarning(message))
         {
+            // Under external mode this follow-up (should EDT already be ending sessions) must NOT be
+            // answered "terminate and continue" — that would end user sessions. Cancel keeps the
+            // update aborted cleanly, matching the exclusive-lock abort above.
+            if (StandaloneMonopolisticRestructure.isArmedExternal())
+            {
+                Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> cancel = cancelAnswer(context);
+                if (cancel.isPresent())
+                {
+                    return cancel;
+                }
+                // Its default is already Cancel, so leaving it to the platform is equally safe.
+                return Optional.empty();
+            }
             Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> continueChoice =
                 terminateAndContinueAnswer(context);
             if (!continueChoice.isPresent())
@@ -131,6 +182,37 @@ public final class InfobaseExclusiveLockAnswerer implements IInfobaseSynchonizat
                     + " continue' answer offered; leaving it to the platform"); //$NON-NLS-1$
             }
             return continueChoice;
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Picks the explicit "Cancel"/"Отмена" answer of a question — the clean abort under external
+     * mode. Returns empty when no such label is on offer; it deliberately does NOT fall back to the
+     * platform default, because for the exclusive-lock question that default may be "terminate
+     * sessions and retry" (the very destructive choice external mode exists to avoid).
+     *
+     * @param context the question (non-null)
+     * @return the Cancel answer, or empty
+     */
+    private static Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> cancelAnswer(
+        IInfobaseSynchonizationQuestionHandler.IInfobaseSynchonizationQuestionContext context)
+    {
+        List<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> answers = context.getAnswers();
+        if (answers == null)
+        {
+            return Optional.empty();
+        }
+        for (IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer answer : answers)
+        {
+            if (answer == null)
+            {
+                continue;
+            }
+            if (isLabel(answer.getLabel(), CANCEL_LABEL_RU, CANCEL_LABEL_EN))
+            {
+                return Optional.of(answer);
+            }
         }
         return Optional.empty();
     }

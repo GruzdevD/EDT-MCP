@@ -17,6 +17,7 @@ import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.debug.core.DebugPlugin;
 import org.eclipse.debug.core.ILaunchConfiguration;
+import org.eclipse.debug.core.ILaunchConfigurationType;
 import org.eclipse.debug.core.ILaunchManager;
 import org.eclipse.swt.widgets.Shell;
 
@@ -34,7 +35,9 @@ import com.ditrix.edt.mcp.server.utils.ExternalInfobaseChangesPolicy;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
 import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils;
 import com.ditrix.edt.mcp.server.utils.LaunchUpdateDialogAutoConfirmer;
+import com.ditrix.edt.mcp.server.utils.OneCBinaryResolver;
 import com.ditrix.edt.mcp.server.utils.PlatformFailures;
+import com.ditrix.edt.mcp.server.utils.StandaloneMonopolisticRestructure;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
 import com.ditrix.edt.mcp.server.utils.StandaloneServerPortConflictPolicy;
 import com.ditrix.edt.mcp.server.utils.StandaloneServerStateRecovery;
@@ -113,6 +116,10 @@ public class UpdateDatabaseTool implements IMcpTool
                 "Before applying, terminate any 1C client THIS EDT launched on the target infobase " //$NON-NLS-1$
                 + "to free the exclusive lock (default true). false keeps a running client — the " //$NON-NLS-1$
                 + "update then fails if that client holds the infobase exclusively.") //$NON-NLS-1$
+            .stringProperty("standaloneRestructure", //$NON-NLS-1$
+                RunYaxunitTestsTool.STANDALONE_RESTRUCTURE_DESCRIPTION)
+            .stringProperty("externalUpdate1cBinary", //$NON-NLS-1$
+                RunYaxunitTestsTool.EXTERNAL_1CV8_BINARY_DESCRIPTION)
             .build();
     }
 
@@ -186,6 +193,15 @@ public class UpdateDatabaseTool implements IMcpTool
                 + "'. Accepted values: " //$NON-NLS-1$
                 + StandaloneServerPortConflictPolicy.acceptedValues()).toJson();
         }
+        String rawRestructure = JsonUtils.extractStringArgument(params, "standaloneRestructure"); //$NON-NLS-1$
+        if (rawRestructure != null && !rawRestructure.isEmpty()
+            && !"external".equals(rawRestructure)) //$NON-NLS-1$
+        {
+            return ToolResult.error("Unknown standaloneRestructure value: '" + rawRestructure //$NON-NLS-1$
+                + "'. Accepted values: external (default: the answerer terminates sessions).").toJson(); //$NON-NLS-1$
+        }
+        String externalUpdate1cBinary =
+            JsonUtils.extractStringArgument(params, "externalUpdate1cBinary"); //$NON-NLS-1$
 
         boolean hasName = configName != null && !configName.isEmpty();
         String argError = validateDirectArguments(hasName, projectName, applicationId);
@@ -263,7 +279,8 @@ public class UpdateDatabaseTool implements IMcpTool
         }
 
         return updateDatabase(projectName, applicationId, fullUpdate, confirm,
-            terminateRunningClients, externalChanges, portPolicy);
+            terminateRunningClients, externalChanges, portPolicy,
+            rawRestructure, externalUpdate1cBinary);
     }
 
     /**
@@ -629,7 +646,8 @@ public class UpdateDatabaseTool implements IMcpTool
     private String updateDatabase(String projectName, String applicationId, // NOSONAR one resolved plan, not a bag of concerns
             boolean fullUpdate, boolean confirm,
             boolean terminateRunningClients, ExternalInfobaseChangesPolicy externalChanges,
-            StandaloneServerPortConflictPolicy portPolicy)
+            StandaloneServerPortConflictPolicy portPolicy,
+            String standaloneRestructure, String externalUpdate1cBinary)
     {
         boolean terminatedClient = false;
         boolean portsReassigned = false;
@@ -721,6 +739,12 @@ public class UpdateDatabaseTool implements IMcpTool
             // client-typed-thread discriminated (never a debug-server session) and exempts MCP-owned
             // launches. Runs only on confirm=true, never in preview.
             ApplicationUpdateState stateAfter;
+            // External-monopolistic-restructure mode (3.0.9): gated to a STANDALONE-SERVER target
+            // and to the opt-in "external" parameter. While armed, the answerer replies "Cancel" to
+            // the exclusive-lock question instead of ending user sessions; the consumed signal then
+            // triggers the offline apply below (see applyStandaloneRestructure).
+            final boolean externalMode = "external".equals(standaloneRestructure) //$NON-NLS-1$
+                && DebugServerTargetSupport.isServerApplicationId(applicationId);
             synchronized (LaunchLifecycleUtils.lockFor(projectName, applicationId))
             {
                 if (terminateRunningClients)
@@ -765,6 +789,10 @@ public class UpdateDatabaseTool implements IMcpTool
                         infobaseName, armedPortPolicy, armedServerName);
                     try
                     {
+                        if (externalMode)
+                        {
+                            StandaloneMonopolisticRestructure.armExternal();
+                        }
                         updateApiEntered = true;
                         stateAfter = StandaloneServerStateRecovery.updateWithRecovery(appManager,
                             project, application, applicationId, updateType, context, monitor);
@@ -790,6 +818,14 @@ public class UpdateDatabaseTool implements IMcpTool
                         {
                             return declinedUpdateResult(watch, externalChanges);
                         }
+                        // External mode: the abort that landed here belongs to the exclusive-lock
+                        // question (the answerer cancelled it so user sessions are NOT ended) only
+                        // when the answerer recorded that it needed a monopolistic restructure.
+                        if (externalMode && StandaloneMonopolisticRestructure.consumeRestructureRequested())
+                        {
+                            return applyStandaloneRestructure(projectName, applicationId, application,
+                                externalUpdate1cBinary, terminatedClient);
+                        }
                         throw ex;
                     }
                     finally
@@ -798,6 +834,10 @@ public class UpdateDatabaseTool implements IMcpTool
                         // exception: once "Find free port" is pressed the server configuration is
                         // rewritten, and a RuntimeException on the way out must not swallow that.
                         portsReassigned = watch.portsReassigned();
+                        if (externalMode)
+                        {
+                            StandaloneMonopolisticRestructure.disarmExternal();
+                        }
                         LaunchUpdateDialogAutoConfirmer.disarm(false, false, true, externalChanges,
                             infobaseName, armedPortPolicy, armedServerName);
                     }
@@ -818,6 +858,15 @@ public class UpdateDatabaseTool implements IMcpTool
                     if (watch.cancelled())
                     {
                         return declinedUpdateResult(watch, externalChanges);
+                    }
+                    // As in the catch above: the update RETURNED a (cached) state, but under
+                    // external mode the answerer cancelled the exclusive-lock question — the
+                    // platform decided a monopolistic restructure is needed and we must apply it
+                    // offline rather than report the meaningless cached state as success.
+                    if (externalMode && StandaloneMonopolisticRestructure.consumeRestructureRequested())
+                    {
+                        return applyStandaloneRestructure(projectName, applicationId, application,
+                            externalUpdate1cBinary, terminatedClient);
                     }
                 }
             }
@@ -1055,10 +1104,102 @@ public class UpdateDatabaseTool implements IMcpTool
     }
 
     /**
-     * Builds the success JSON after an applied update. terminatedClient is emitted ONLY when a
-     * client was actually terminated (truthful; "swept but none / not confirmed" and opt-out are
-     * indistinguishable by absence — the confirmationRequired idiom). Side-effect-free.
+     * The external-monopolistic-restructure path (3.0.9, opt-in via {@code standaloneRestructure=
+     * external}). Runs after the watched update aborted because the platform decided a monopolistic
+     * restructure is needed: the exclusive-lock question was answered "Cancel" (so user sessions are
+     * NOT ended) and {@code consumeRestructureRequested} fired. Stops the standalone server cleanly,
+     * applies the project configuration to the file infobase via an external {@code 1cv8 DESIGNER
+     * /UpdateDBCfg}, then restarts the server (best-effort). A live server is never left down
+     * silently: an apply failure that leaves the server stopped is reported as such with the restart
+     * attempt, and an unresolved {@code 1cv8} binary is refused up front.
+     *
+     * @param projectName the target project
+     * @param applicationId the target application id
+     * @param application the target standalone-server application (never {@code null})
+     * @param externalUpdate1cBinary the {@code externalUpdate1cBinary} parameter (may be {@code null})
+     * @param terminatedClient whether this update had already terminated a running client
+     * @return the tool result, never {@code null}
      */
+    private String applyStandaloneRestructure(String projectName, String applicationId,
+        IApplication application, String externalUpdate1cBinary, boolean terminatedClient)
+    {
+        java.util.Optional<String> binaryOpt = OneCBinaryResolver.resolve(externalUpdate1cBinary, null);
+        if (!binaryOpt.isPresent())
+        {
+            return ToolResult.error(OneCBinaryResolver.notFoundError()).toJson();
+        }
+        java.nio.file.Path xmlDir;
+        try
+        {
+            xmlDir = java.nio.file.Files.createTempDirectory("edt-standalone-restructure"); //$NON-NLS-1$
+        }
+        catch (java.io.IOException e)
+        {
+            Activator.logError("standalone restructure: temp export dir failed", e); //$NON-NLS-1$
+            return ToolResult.error("Could not create a temporary export directory for the external " //$NON-NLS-1$
+                + "standalone-server restructure: " + e.getMessage()).toJson(); //$NON-NLS-1$
+        }
+        StandaloneMonopolisticRestructure.Outcome outcome = StandaloneMonopolisticRestructure.escalate(
+            application, applicationId, xmlDir, binaryOpt.get());
+        if (outcome.applied)
+        {
+            ToolResult result = ToolResult.success()
+                .put(McpKeys.ACTION, "updated") //$NON-NLS-1$
+                .put(McpKeys.PROJECT, projectName)
+                .put(McpKeys.APPLICATION_ID, applicationId)
+                .put(KEY_APPLICATION_NAME, application.getName())
+                .put("standaloneRestructure", "external-applied"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (terminatedClient)
+            {
+                result.put(KEY_TERMINATED_CLIENT, true);
+            }
+            result.put(McpKeys.MESSAGE, outcome.message + restartStandaloneServer(projectName, applicationId));
+            return result.toJson();
+        }
+        ToolResult failed = ToolResult.error((outcome.serverStopped
+            ? "The standalone server was STOPPED but the external update was NOT applied: " //$NON-NLS-1$
+            : "The external standalone-server restructure did not run: ") //$NON-NLS-1$
+            + outcome.message
+            + (outcome.serverStopped ? restartStandaloneServer(projectName, applicationId) : "")); //$NON-NLS-1$
+        return failed.toJson();
+    }
+
+    /**
+     * Best-effort restart of the standalone server after the external restructure left it stopped:
+     * resolve the application's runtime-client launch configuration and launch it (in debug mode,
+     * EDT's default for a server target). A server that cannot be restarted is stated explicitly
+     * rather than silently left down.
+     *
+     * @param projectName the project owning the server
+     * @param applicationId the standalone-server application id
+     * @return a sentence describing the restart outcome (never {@code null}, even on failure)
+     */
+    private static String restartStandaloneServer(String projectName, String applicationId)
+    {
+        ILaunchManager launchManager = DebugPlugin.getDefault().getLaunchManager();
+        ILaunchConfigurationType type = launchManager == null ? null
+            : launchManager.getLaunchConfigurationType(LaunchConfigUtils.LAUNCH_CONFIG_TYPE_ID);
+        ILaunchConfiguration config = type == null ? null
+            : LaunchConfigUtils.findLaunchConfig(launchManager, type, projectName, applicationId);
+        if (config == null)
+        {
+            return " The standalone server could not be restarted automatically (no launch configuration " //$NON-NLS-1$
+                + "is bound to " + applicationId + "); start it with launch or run_yaxunit_tests."; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        try
+        {
+            StandaloneServerStateRecovery.launchWithRecovery(config, ILaunchManager.DEBUG_MODE, null);
+            return " The standalone server was restarted via '" + config.getName() + "'."; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (CoreException e)
+        {
+            Activator.logError("standalone restructure: restarting the server failed for " //$NON-NLS-1$
+                + applicationId, e);
+            return " The standalone server could not be restarted (launching '" + config.getName() //$NON-NLS-1$
+                + "' failed); start it with launch or run_yaxunit_tests."; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
     private static String buildUpdatedResult(String projectName, String applicationId, // NOSONAR every value is already resolved by the caller
             IApplication application, ApplicationUpdateType updateType,
             ApplicationUpdateState stateBefore, ApplicationUpdateState stateAfter,

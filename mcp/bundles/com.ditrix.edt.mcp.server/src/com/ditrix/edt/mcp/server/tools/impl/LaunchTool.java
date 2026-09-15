@@ -41,6 +41,7 @@ import com.ditrix.edt.mcp.server.utils.McpJobs;
 import com.ditrix.edt.mcp.server.utils.PlatformFailures;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
+import com.ditrix.edt.mcp.server.utils.StandaloneMonopolisticRestructure;
 import com.ditrix.edt.mcp.server.utils.StandaloneServerPortConflictPolicy;
 import com.ditrix.edt.mcp.server.utils.StandaloneServerStateRecovery;
 import com.e1c.g5.dt.applications.ApplicationException;
@@ -149,6 +150,10 @@ public class LaunchTool implements IMcpTool
                     + "answered (with 'override'), so an unattended call never blocks on it.") //$NON-NLS-1$
             .stringProperty("standaloneServerPortConflict", //$NON-NLS-1$
                 StandaloneServerPortConflictPolicy.PARAMETER_DESCRIPTION)
+            .stringProperty("standaloneRestructure", //$NON-NLS-1$
+                RunYaxunitTestsTool.STANDALONE_RESTRUCTURE_DESCRIPTION)
+            .stringProperty("externalUpdate1cBinary", //$NON-NLS-1$
+                RunYaxunitTestsTool.EXTERNAL_1CV8_BINARY_DESCRIPTION)
             .stringProperty(KEY_STARTUP_OPTION,
                 "The 1C /C startup option for THIS launch only (e.g. 'xddRun ...; xddReport ...'); " //$NON-NLS-1$
                     + "applied to a working copy, the saved EDT configuration is not modified. " //$NON-NLS-1$
@@ -243,6 +248,16 @@ public class LaunchTool implements IMcpTool
                 + StandaloneServerPortConflictPolicy.acceptedValues()).toJson();
         }
 
+        String rawRestructure = JsonUtils.extractStringArgument(params, "standaloneRestructure"); //$NON-NLS-1$
+        if (rawRestructure != null && !rawRestructure.isEmpty()
+            && !"external".equals(rawRestructure)) //$NON-NLS-1$
+        {
+            return ToolResult.error("Unknown standaloneRestructure value: '" + rawRestructure //$NON-NLS-1$
+                + "'. Accepted values: external (default: the answerer terminates sessions).").toJson(); //$NON-NLS-1$
+        }
+        String externalUpdate1cBinary =
+            JsonUtils.extractStringArgument(params, "externalUpdate1cBinary"); //$NON-NLS-1$
+
         // Read here, in execute(), rather than inside LaunchOverrides: rule #6 parity is checked
         // by scanning THIS method for the project's accessor idioms.
         LaunchOverrides overrides = LaunchOverrides.of(
@@ -262,7 +277,7 @@ public class LaunchTool implements IMcpTool
         if (configName != null && !configName.isEmpty())
         {
             return launchByConfigName(configName, updateBeforeLaunch, restartIfRunning, policy,
-                portPolicy, overrides, prepared, mode);
+                portPolicy, rawRestructure, externalUpdate1cBinary, overrides, prepared, mode);
         }
 
         // Target form 2: project + application (runtime-client only).
@@ -286,7 +301,7 @@ public class LaunchTool implements IMcpTool
         }
 
         return launch(projectName, applicationId, updateBeforeLaunch, restartIfRunning, policy,
-            portPolicy, overrides, prepared, mode);
+            portPolicy, rawRestructure, externalUpdate1cBinary, overrides, prepared, mode);
     }
 
     /**
@@ -330,7 +345,8 @@ public class LaunchTool implements IMcpTool
      */
     private String launchByConfigName(String configName, boolean updateBeforeLaunch, // NOSONAR one argument per independent caller-visible decision; a parameter object would only rename them
         boolean restartIfRunning, ExternalInfobaseChangesPolicy policy,
-        StandaloneServerPortConflictPolicy portPolicy, LaunchOverrides overrides,
+        StandaloneServerPortConflictPolicy portPolicy, String standaloneRestructure,
+        String externalUpdate1cBinary, LaunchOverrides overrides,
         LaunchOverrides.Prepared prepared, String mode)
     {
         try
@@ -454,7 +470,7 @@ public class LaunchTool implements IMcpTool
 
             String launchError = performLaunch(applied.config, updateBeforeLaunch,
                 isAttach ? null : policy, isAttach ? null : portPolicy,
-                eclipseLaunchMode(mode));
+                eclipseLaunchMode(mode), standaloneRestructure, externalUpdate1cBinary);
             if (launchError != null)
             {
                 return ToolResult.error("Failed to launch " + mode + " session: " //$NON-NLS-1$ //$NON-NLS-2$
@@ -658,7 +674,8 @@ public class LaunchTool implements IMcpTool
      */
     private String launch(String projectName, String applicationId, boolean updateBeforeLaunch, // NOSONAR one argument per independent caller-visible decision; a parameter object would only rename them
         boolean restartIfRunning, ExternalInfobaseChangesPolicy policy,
-        StandaloneServerPortConflictPolicy portPolicy, LaunchOverrides overrides,
+        StandaloneServerPortConflictPolicy portPolicy, String standaloneRestructure,
+        String externalUpdate1cBinary, LaunchOverrides overrides,
         LaunchOverrides.Prepared prepared, String mode)
     {
         try
@@ -772,7 +789,7 @@ public class LaunchTool implements IMcpTool
 
             String launchError =
                 performLaunch(applied.config, updateBeforeLaunch, policy, portPolicy,
-                    eclipseLaunchMode(mode));
+                    eclipseLaunchMode(mode), standaloneRestructure, externalUpdate1cBinary);
             if (launchError != null)
             {
                 return ToolResult.error("Failed to launch " + mode + " session: " //$NON-NLS-1$ //$NON-NLS-2$
@@ -1462,6 +1479,23 @@ public class LaunchTool implements IMcpTool
         ExternalInfobaseChangesPolicy policy, StandaloneServerPortConflictPolicy portPolicy,
         String launchMode)
     {
+        return performLaunch(config, autoConfirmUpdateDialog, policy, portPolicy, launchMode,
+            null, null);
+    }
+
+    /**
+     * Same launch, additionally choosing Eclipse's debug or run launch mode and the
+     * external-monopolistic-restructure parameters (3.0.9, opt-in via {@code standaloneRestructure=
+     * external}; {@code null}/{@code null} keeps the current behaviour).
+     *
+     * @param launchMode {@link ILaunchManager#DEBUG_MODE} or {@link ILaunchManager#RUN_MODE}
+     * @param standaloneRestructure the {@code standaloneRestructure} parameter (may be {@code null})
+     * @param externalUpdate1cBinary the {@code externalUpdate1cBinary} parameter (may be {@code null})
+     */
+    String performLaunch(ILaunchConfiguration config, boolean autoConfirmUpdateDialog,
+        ExternalInfobaseChangesPolicy policy, StandaloneServerPortConflictPolicy portPolicy,
+        String launchMode, String standaloneRestructure, String externalUpdate1cBinary)
+    {
         // Workbench-aware probe: never creates a display. It
         // decides Job-vs-headless ONLY: with a live workbench the launch is
         // dispatched as a background Job; a truly headless runtime takes the
@@ -1481,7 +1515,7 @@ public class LaunchTool implements IMcpTool
                 protected IStatus run(IProgressMonitor monitor)
                 {
                     return runLaunchJobBody(config, autoConfirmUpdateDialog, policy, portPolicy,
-                        launchMode, monitor);
+                        launchMode, monitor, standaloneRestructure, externalUpdate1cBinary);
                 }
             };
             job.setPriority(Job.INTERACTIVE);
@@ -1507,9 +1541,21 @@ public class LaunchTool implements IMcpTool
         LaunchUpdateDialogAutoConfirmer.arm(autoConfirmUpdateDialog, debugMode,
             autoConfirmUpdateDialog, launchPolicy, launchInfobase, launchPortPolicy, launchServer);
         InfobaseAuthDialogSuppressor.markActivityStart();
+        // 3.0.9 external standalone-server restructure (headless path): the same armed retry as the
+        // async Job body above; a consumed exclusive-lock abort triggers the offline restructure and
+        // a single relaunch that restarts the server.
+        final boolean externalMode = "external".equals(standaloneRestructure) //$NON-NLS-1$
+            && DebugServerTargetSupport.isServerApplicationId(LaunchConfigUtils.getApplicationIdFor(config));
         try
         {
-            StandaloneServerStateRecovery.launchWithRecovery(config, launchMode, null);
+            String launchError = launchWithExternalRetry(config, launchMode, null, externalMode,
+                externalUpdate1cBinary);
+            if (launchError != null)
+            {
+                Activator.logError("Error launching " + launchMode + " session: " //$NON-NLS-1$ //$NON-NLS-2$
+                    + launchError, null); //$NON-NLS-1$
+                return launchError;
+            }
             return null;
         }
         catch (CoreException e)
@@ -1577,6 +1623,26 @@ public class LaunchTool implements IMcpTool
         ExternalInfobaseChangesPolicy policy, StandaloneServerPortConflictPolicy portPolicy,
         String launchMode, IProgressMonitor monitor)
     {
+        // Kept so the unit seam (and any caller that does not care) stays six-argument: the
+        // external standalone-server restructure (3.0.9) is then not armed — the current behaviour.
+        return runLaunchJobBody(config, autoConfirmUpdateDialog, policy, portPolicy, launchMode,
+            monitor, null, null);
+    }
+
+    /**
+     * Same Job body, additionally arming the external standalone-server restructure (3.0.9).
+     *
+     * @param standaloneRestructure the {@code standaloneRestructure} parameter; {@code "external"}
+     *        arms the offline {@code 1cv8 DESIGNER} restructure on an answered-with-Cancel
+     *        exclusive-lock question, anything else keeps the current behaviour
+     * @param externalUpdate1cBinary the {@code externalUpdate1cBinary} parameter (may be
+     *        {@code null})
+     */
+    static IStatus runLaunchJobBody(ILaunchConfiguration config, boolean autoConfirmUpdateDialog, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
+        ExternalInfobaseChangesPolicy policy, StandaloneServerPortConflictPolicy portPolicy,
+        String launchMode, IProgressMonitor monitor, String standaloneRestructure,
+        String externalUpdate1cBinary)
+    {
         // Auto-confirm EDT's blocking launch modals for the duration of this
         // single launch only. The "Application update" modal is pressed
         // only when the caller did NOT opt out of the DB update; the
@@ -1625,9 +1691,23 @@ public class LaunchTool implements IMcpTool
         // dialog raised by this connect (missing/wrong stored creds) is still auto-cancelled
         // instead of hanging the unattended call (mirrors the arm/disarm pattern above).
         InfobaseAuthDialogSuppressor.markActivityStart();
+        // 3.0.9 external standalone-server restructure: armed only when the caller asked for it AND
+        // the target is a standalone-SERVER application (mirrors the gate in update_database and
+        // run_yaxunit_tests). While armed the exclusive-lock question is answered with Cancel,
+        // aborting the update cleanly; the launch retry then applies the configuration offline
+        // (external 1cv8 DESIGNER) and the RELAUNCH restarts the server.
+        final boolean externalMode = "external".equals(standaloneRestructure) //$NON-NLS-1$
+            && DebugServerTargetSupport.isServerApplicationId(LaunchConfigUtils.getApplicationIdFor(config));
         try
         {
-            StandaloneServerStateRecovery.launchWithRecovery(config, launchMode, monitor);
+            String launchError = launchWithExternalRetry(config, launchMode, monitor, externalMode,
+                externalUpdate1cBinary);
+            if (launchError != null)
+            {
+                recordAsyncFailure(config, ERR_ASYNC_PREFIX + launchError);
+                Activator.logError(ERR_ASYNC_PREFIX + launchError, null); //$NON-NLS-1$
+                return new Status(IStatus.ERROR, Activator.PLUGIN_ID, launchError);
+            }
             String declined = declinedConflictMessage(config, launchPolicy, conflicts);
             if (declined != null)
             {
@@ -1678,6 +1758,112 @@ public class LaunchTool implements IMcpTool
                 conflicts.close();
             }
         }
+    }
+
+    /**
+     * Runs the launch with the 3.0.9 external-monopolistic-restructure retry, when armed. While the
+     * external mode is armed the exclusive-lock question is answered with Cancel, which aborts the
+     * launch; on that abort the offline restructure is applied ({@link #launchEscalate}) and the
+     * launch retried once — the RELAUNCH itself restarts the stopped server (an incremental no-op
+     * when the offline update already brought the base current).
+     *
+     * <p>Returns {@code null} on success (with or without a restructure). Returns an error message
+     * only for an unrecoverable escalate failure (one that changed nothing/left the server running),
+     * whose text the caller surfaces. A {@link CoreException} that is NOT a consumed
+     * answered-with-Cancel restructure abort is thrown to the caller unchanged, so each call site
+     * keeps its own failure handling.
+     *
+     * @param config the launch configuration to start
+     * @param launchMode {@link ILaunchManager#DEBUG_MODE} or {@link ILaunchManager#RUN_MODE}
+     * @param monitor the progress monitor (may be {@code null}) passed to {@code config.launch}
+     * @param externalMode whether the external restructure is armed for this launch
+     * @param externalUpdate1cBinary the {@code externalUpdate1cBinary} parameter (may be
+     *        {@code null})
+     * @return {@code null} to report success, else an error message
+     * @throws CoreException when the launch failed for reasons other than a restructure abort
+     */
+    private static String launchWithExternalRetry(ILaunchConfiguration config, String launchMode,
+        IProgressMonitor monitor, boolean externalMode, String externalUpdate1cBinary)
+        throws CoreException
+    {
+        for (int attempt = 0; attempt <= (externalMode ? 1 : 0); attempt++)
+        {
+            if (externalMode)
+            {
+                StandaloneMonopolisticRestructure.armExternal();
+            }
+            try
+            {
+                StandaloneServerStateRecovery.launchWithRecovery(config, launchMode, monitor);
+                return null;
+            }
+            catch (CoreException e)
+            {
+                if (externalMode && attempt == 0
+                    && StandaloneMonopolisticRestructure.consumeRestructureRequested())
+                {
+                    String escalateError = launchEscalate(config, externalUpdate1cBinary);
+                    if (escalateError != null)
+                    {
+                        return escalateError;
+                    }
+                    continue;
+                }
+                throw e;
+            }
+            finally
+            {
+                if (externalMode)
+                {
+                    StandaloneMonopolisticRestructure.disarmExternal();
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Applies the offline standalone-server restructure (3.0.9) for {@code config} and returns
+     * {@code null} to proceed with the retry launch (the relaunch restarts the server), or an error
+     * message to fail with (one whose escalate outcome left the server running).
+     *
+     * @param config the launch configuration whose server is to be restructured
+     * @param externalUpdate1cBinary the {@code externalUpdate1cBinary} parameter (may be
+     *        {@code null})
+     * @return {@code null} to retry the launch, else an error message
+     */
+    private static String launchEscalate(ILaunchConfiguration config, String externalUpdate1cBinary)
+        throws CoreException
+    {
+        String projectName = config.getAttribute(LaunchConfigUtils.ATTR_PROJECT_NAME, ""); //$NON-NLS-1$
+        String applicationId = LaunchConfigUtils.getApplicationIdFor(config);
+        if (projectName.isEmpty() || applicationId == null || applicationId.isEmpty())
+        {
+            return "The external standalone-server restructure could not run: the launch " //$NON-NLS-1$
+                + "configuration '" + config.getName() + "' has no project/application to target"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        ProjectContext ctx = ProjectContext.of(projectName);
+        if (!ctx.isOpen())
+        {
+            return "The external standalone-server restructure could not run: project is closed: " //$NON-NLS-1$
+                + projectName; //$NON-NLS-1$
+        }
+        IProject project = ctx.project();
+        IApplicationManager appManager = Activator.getDefault().getApplicationManager();
+        ApplicationResolution appResolution = resolveApplication(project, applicationId, appManager);
+        if (appResolution.error != null)
+        {
+            return "The external standalone-server restructure could not run: " //$NON-NLS-1$
+                + appResolution.error; //$NON-NLS-1$
+        }
+        IApplication application = appResolution.application;
+        if (application == null)
+        {
+            return "The external standalone-server restructure could not run: no server " //$NON-NLS-1$
+                + "application '" + applicationId + "' could be resolved"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return StandaloneMonopolisticRestructure.escalateForRetry(application, applicationId,
+            externalUpdate1cBinary);
     }
 
     /**

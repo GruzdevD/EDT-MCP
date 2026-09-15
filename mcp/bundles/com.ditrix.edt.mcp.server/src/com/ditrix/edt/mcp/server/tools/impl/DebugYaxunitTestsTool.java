@@ -138,6 +138,10 @@ public class DebugYaxunitTestsTool implements IMcpTool // NOSONAR intentional re
                 RunYaxunitTestsTool.EXTERNAL_INFOBASE_CHANGES_DESCRIPTION)
             .stringProperty(KEY_PORT_CONFLICT,
                 StandaloneServerPortConflictPolicy.PARAMETER_DESCRIPTION)
+            .stringProperty("standaloneRestructure", //$NON-NLS-1$
+                RunYaxunitTestsTool.STANDALONE_RESTRUCTURE_DESCRIPTION)
+            .stringProperty("externalUpdate1cBinary", //$NON-NLS-1$
+                RunYaxunitTestsTool.EXTERNAL_1CV8_BINARY_DESCRIPTION)
             .build();
     }
 
@@ -162,6 +166,8 @@ public class DebugYaxunitTestsTool implements IMcpTool // NOSONAR intentional re
         putIfPresent(forwarded, KEY_EXTERNAL_INFOBASE_CHANGES,
             params.get(KEY_EXTERNAL_INFOBASE_CHANGES));
         putIfPresent(forwarded, KEY_PORT_CONFLICT, params.get(KEY_PORT_CONFLICT));
+        putIfPresent(forwarded, "standaloneRestructure", params.get("standaloneRestructure")); //$NON-NLS-1$ //$NON-NLS-2$
+        putIfPresent(forwarded, "externalUpdate1cBinary", params.get("externalUpdate1cBinary")); //$NON-NLS-1$ //$NON-NLS-2$
         forwarded.put("debug", "true"); //$NON-NLS-1$ //$NON-NLS-2$
         return delegate.executeAs(forwarded, NAME);
     }

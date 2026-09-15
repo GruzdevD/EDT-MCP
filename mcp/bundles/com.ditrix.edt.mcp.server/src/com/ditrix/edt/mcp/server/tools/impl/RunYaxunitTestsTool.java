@@ -65,8 +65,10 @@ import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils.PreLaunchResult;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
 import com.ditrix.edt.mcp.server.utils.McpJobs;
 import com.ditrix.edt.mcp.server.utils.PlatformFailures;
+import com.ditrix.edt.mcp.server.utils.OneCBinaryResolver;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
+import com.ditrix.edt.mcp.server.utils.StandaloneMonopolisticRestructure;
 import com.ditrix.edt.mcp.server.utils.StandaloneServerPortConflictPolicy;
 import com.ditrix.edt.mcp.server.utils.StandaloneServerStateRecovery;
 import com.ditrix.edt.mcp.server.utils.YaxunitJobCancellation;
@@ -250,6 +252,10 @@ public class RunYaxunitTestsTool implements IMcpTool
                 EXTERNAL_INFOBASE_CHANGES_DESCRIPTION) //$NON-NLS-1$
             .stringProperty("standaloneServerPortConflict", //$NON-NLS-1$
                 StandaloneServerPortConflictPolicy.PARAMETER_DESCRIPTION)
+            .stringProperty("standaloneRestructure", //$NON-NLS-1$
+                STANDALONE_RESTRUCTURE_DESCRIPTION)
+            .stringProperty("externalUpdate1cBinary", //$NON-NLS-1$
+                EXTERNAL_1CV8_BINARY_DESCRIPTION)
             .booleanProperty("debug", //$NON-NLS-1$
                 "true launches in DEBUG mode so breakpoints fire: a short start returns the "  //$NON-NLS-1$
                     + "launch handle and you call wait_for_break next, while Pending returns a "  //$NON-NLS-1$
@@ -274,6 +280,28 @@ public class RunYaxunitTestsTool implements IMcpTool
             + "window returns the same report in this call. Otherwise the call returns Pending " //$NON-NLS-1$
             + "with jobId; poll get_job_status with that id. This value never limits the job's " //$NON-NLS-1$
             + "server-side lifetime."; //$NON-NLS-1$
+
+    /**
+     * Shared schema doc for the {@code standaloneRestructure} parameter (also forwarded by the
+     * {@code launch} / {@code debug_yaxunit_tests} aliases and reused by {@code update_database}).
+     */
+    static final String STANDALONE_RESTRUCTURE_DESCRIPTION =
+        "For a standalone-server target ONLY. Set to 'external' to NOT end user sessions when the " //$NON-NLS-1$
+        + "platform decides a monopolistic (structural) restructure is needed: the launch aborts " //$NON-NLS-1$
+        + "cleanly, the standalone server is stopped, the configuration is applied to the file " //$NON-NLS-1$
+        + "infobase via an external 1cv8 DESIGNER update, the server is restarted, and the launch " //$NON-NLS-1$
+        + "is retried. Absent/other = current behaviour (the answerer terminates sessions). Requires " //$NON-NLS-1$
+        + "externalUpdate1cBinary unless the EDT_MCP_1CV8 environment variable is set or 1cv8 is " //$NON-NLS-1$
+        + "found on disk."; //$NON-NLS-1$
+
+    /**
+     * Shared schema doc for the {@code externalUpdate1cBinary} parameter (also forwarded by the
+     * {@code debug_yaxunit_tests} alias and reused by {@code launch} / {@code update_database}).
+     */
+    static final String EXTERNAL_1CV8_BINARY_DESCRIPTION =
+        "Absolute path to the 1C '1cv8' executable (ships DESIGNER) used by " //$NON-NLS-1$
+        + "standaloneRestructure=external. Optional then: falls back to the EDT_MCP_1CV8 " //$NON-NLS-1$
+        + "environment variable, then a best-effort scan of common install directories."; //$NON-NLS-1$
 
     /**
      * Shared schema doc for the {@code externalInfobaseChanges} parameter (also forwarded by
@@ -502,6 +530,15 @@ public class RunYaxunitTestsTool implements IMcpTool
                 + StandaloneServerPortConflictPolicy.acceptedValues()).toJson();
         }
         boolean debug = JsonUtils.extractBooleanArgument(params, "debug", false); //$NON-NLS-1$ //$NON-NLS-2$
+        String rawRestructure = JsonUtils.extractStringArgument(params, "standaloneRestructure"); //$NON-NLS-1$
+        if (rawRestructure != null && !rawRestructure.isEmpty()
+            && !"external".equals(rawRestructure)) //$NON-NLS-1$
+        {
+            return ToolResult.error("Unknown standaloneRestructure value: '" + rawRestructure //$NON-NLS-1$
+                + "'. Accepted values: external (default: the answerer terminates sessions).").toJson(); //$NON-NLS-1$
+        }
+        String externalUpdate1cBinary =
+            JsonUtils.extractStringArgument(params, "externalUpdate1cBinary"); //$NON-NLS-1$
 
         boolean hasName = configName != null && !configName.isEmpty();
         if (!hasName)
@@ -522,7 +559,7 @@ public class RunYaxunitTestsTool implements IMcpTool
 
         RunRequest request = new RunRequest(configName, projectName, applicationId, extensions,
             modules, tests, tags, timeout, updateBeforeLaunch, updateScope, externalChanges,
-            portConflict, debug);
+            portConflict, debug, rawRestructure, externalUpdate1cBinary);
         return startOrAttach(request, owningTool);
     }
 
@@ -852,11 +889,16 @@ public class RunYaxunitTestsTool implements IMcpTool
         /** How EDT's standalone-server port-conflict modal is answered for this run. */
         final StandaloneServerPortConflictPolicy portConflict;
         final boolean debug;
+        /** The {@code standaloneRestructure} parameter (null/absent = default answerer behaviour). */
+        final String standaloneRestructure;
+        /** The {@code externalUpdate1cBinary} parameter (may be {@code null}). */
+        final String externalUpdate1cBinary;
 
         RunRequest(String configName, String projectName, String applicationId, String extensions, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
                 String modules, String tests, String tags, int timeout, boolean updateBeforeLaunch,
                 String updateScope, ExternalInfobaseChangesPolicy externalChanges,
-                StandaloneServerPortConflictPolicy portConflict, boolean debug)
+                StandaloneServerPortConflictPolicy portConflict, boolean debug,
+                String standaloneRestructure, String externalUpdate1cBinary)
         {
             this.configName = configName;
             this.projectName = projectName;
@@ -871,6 +913,18 @@ public class RunYaxunitTestsTool implements IMcpTool
             this.externalChanges = externalChanges;
             this.portConflict = portConflict;
             this.debug = debug;
+            this.standaloneRestructure = standaloneRestructure;
+            this.externalUpdate1cBinary = externalUpdate1cBinary;
+        }
+
+        /** Legacy 13-argument form (no external mode) — external mode defaults to off. */
+        RunRequest(String configName, String projectName, String applicationId, String extensions,
+                String modules, String tests, String tags, int timeout, boolean updateBeforeLaunch,
+                String updateScope, ExternalInfobaseChangesPolicy externalChanges,
+                StandaloneServerPortConflictPolicy portConflict, boolean debug)
+        {
+            this(configName, projectName, applicationId, extensions, modules, tests, tags, timeout,
+                updateBeforeLaunch, updateScope, externalChanges, portConflict, debug, null, null);
         }
     }
 
@@ -1069,6 +1123,42 @@ public class RunYaxunitTestsTool implements IMcpTool
     }
 
     /**
+     * The external-monopolistic-restructure path (3.0.9, opt-in via {@code standaloneRestructure=
+     * external}). Runs after a launch aborted because the platform decided a monopolistic restructure
+     * is needed: the exclusive-lock question was answered "Cancel" (user sessions NOT ended) and
+     * {@code consumeRestructureRequested} fired. Stops the standalone server cleanly and applies the
+     * project configuration to the file infobase via an external {@code 1cv8 DESIGNER /UpdateDBCfg}.
+     * On any outcome that left the server stopped (applied OR apply-failed) it returns {@code null} —
+     * the caller's retry launch is itself the server restart. Only a failure that changed nothing
+     * (server not stopped) returns an error.
+     *
+     * @param config the launch configuration used for this run (to resolve the project)
+     * @param req the run request carrying the external-mode parameters
+     * @param applicationId the target application id (never {@code null} here for a server target)
+     * @return {@code null} to proceed with the retry launch, or an error message to fail with
+     */
+    private static String escalateStandalone(ILaunchConfiguration config, RunRequest req,
+        String applicationId)
+    {
+        IApplicationManager appManager = Activator.getDefault().getApplicationManager();
+        String projectName = configProjectName(config);
+        ProjectContext ctx = ProjectContext.of(projectName);
+        IProject project = ctx.isOpen() ? ctx.project() : null;
+        IApplication application = null;
+        if (project != null && appManager != null && applicationId != null)
+        {
+            application = appManager.getApplication(project, applicationId).orElse(null);
+        }
+        if (application == null)
+        {
+            return "The external standalone-server restructure could not resolve application '" //$NON-NLS-1$
+                + applicationId + "' in project '" + projectName + "'."; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return StandaloneMonopolisticRestructure.escalateForRetry(application, applicationId,
+            req.externalUpdate1cBinary);
+    }
+
+    /**
      * Phase 3 reuse-or-spawn body for the RUN path — extracted verbatim from the
      * inner {@code synchronized (ACTIVE_LAUNCHES)} block of {@link #runTests}. The
      * CALLER still holds BOTH locks ({@code lockFor(project, applicationId)} then
@@ -1168,30 +1258,69 @@ public class RunYaxunitTestsTool implements IMcpTool
                     launchServer);
         LaunchUpdateDialogAutoConfirmer.arm(armFlags[0], armFlags[1], armFlags[0], launchPolicy,
             launchInfobase, launchPortPolicy, launchServer);
-        ILaunch launch;
+        // External-monopolistic-restructure mode (3.0.9): gated to a STANDALONE-SERVER target and
+        // the opt-in "external" parameter. On the first abort caused by the answered-with-Cancel
+        // exclusive-lock question the launch is retried once after the offline apply — the relaunch
+        // is itself the server restart.
+        boolean externalMode = "external".equals(req.standaloneRestructure) //$NON-NLS-1$
+            && DebugServerTargetSupport.isServerApplicationId(applicationId);
+        ILaunch launch = null;
         try
         {
-            // With no auto-chain this is the first irreversible hand-off. With the auto-chain
-            // the job is already committed, and this idempotent check closes the launch race.
-            if (!execution.tryCommit())
+            for (int attempt = 0; attempt <= (externalMode ? 1 : 0); attempt++)
             {
-                throw new CoreException(new Status(IStatus.CANCEL, Activator.PLUGIN_ID,
-                    "The YAXUnit job was cancelled before the launch was handed to EDT.")); //$NON-NLS-1$
+                if (externalMode)
+                {
+                    StandaloneMonopolisticRestructure.armExternal();
+                }
+                try
+                {
+                    // With no auto-chain this is the first irreversible hand-off. With the auto-chain
+                    // the job is already committed, and this idempotent check closes the launch race.
+                    if (!execution.tryCommit())
+                    {
+                        throw new CoreException(new Status(IStatus.CANCEL, Activator.PLUGIN_ID,
+                            "The YAXUnit job was cancelled before the launch was handed to EDT.")); //$NON-NLS-1$
+                    }
+                    launch = StandaloneServerStateRecovery.launchWithRecovery(workingCopy,
+                        ILaunchManager.RUN_MODE, new NullProgressMonitor());
+                    break;
+                }
+                catch (CoreException ex)
+                {
+                    // The cancel can also ABORT the launch instead of letting it return: the reason is
+                    // still in the window, and it explains the failure far better than the delegate's own
+                    // message does.
+                    String cancelled = declinedConflict(conflicts, launchPolicy);
+                    if (cancelled != null)
+                    {
+                        throw new CoreException(new Status(IStatus.ERROR, Activator.PLUGIN_ID, cancelled, ex));
+                    }
+                    // External mode: the abort belongs to the exclusive-lock question (answered
+                    // "Cancel", so user sessions were NOT ended) when the platform decided a
+                    // monopolistic restructure is needed. Apply offline, then retry once; on
+                    // success the relaunch restarts the server.
+                    if (externalMode && attempt == 0
+                        && StandaloneMonopolisticRestructure.consumeRestructureRequested())
+                    {
+                        String escalateError = escalateStandalone(matchingConfig, req, applicationId);
+                        if (escalateError != null)
+                        {
+                            throw new CoreException(new Status(IStatus.ERROR,
+                                Activator.PLUGIN_ID, escalateError, ex));
+                        }
+                        continue; // bounded: attempt becomes 1, within the externalMode retry limit
+                    }
+                    throw ex;
+                }
+                finally
+                {
+                    if (externalMode)
+                    {
+                        StandaloneMonopolisticRestructure.disarmExternal();
+                    }
+                }
             }
-            launch = StandaloneServerStateRecovery.launchWithRecovery(workingCopy,
-                ILaunchManager.RUN_MODE, new NullProgressMonitor());
-        }
-        catch (CoreException ex)
-        {
-            // The cancel can also ABORT the launch instead of letting it return: the reason is
-            // still in the window, and it explains the failure far better than the delegate's own
-            // message does.
-            String cancelled = declinedConflict(conflicts, launchPolicy);
-            if (cancelled != null)
-            {
-                throw new CoreException(new Status(IStatus.ERROR, Activator.PLUGIN_ID, cancelled, ex));
-            }
-            throw ex;
         }
         finally
         {
