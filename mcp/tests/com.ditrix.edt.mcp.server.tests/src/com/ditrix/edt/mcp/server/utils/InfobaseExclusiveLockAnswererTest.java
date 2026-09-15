@@ -223,6 +223,78 @@ public class InfobaseExclusiveLockAnswererTest
         assertFalse(answerer.handleQuestion(ctx).isPresent());
     }
 
+    @Test
+    public void exclusiveLockUnderExternalModeAbortsWithCancelAndRecordsSignal()
+    {
+        IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer terminate = terminateRetry();
+        IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer cancel =
+            new IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer(CANCEL_RU, CANCEL_RU, false);
+        IInfobaseSynchonizationQuestionHandler.IInfobaseSynchonizationQuestionContext ctx = context(cancel, terminate);
+        when(ctx.getMessage()).thenReturn(EXCLUSIVE_LOCK_MESSAGE_RU);
+        try
+        {
+            StandaloneMonopolisticRestructure.armExternal();
+            Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> result =
+                answerer.handleQuestion(ctx);
+            assertTrue(result.isPresent());
+            assertSame("external mode must abort with Cancel, not end sessions", cancel, result.get()); //$NON-NLS-1$
+            assertTrue("the monopolistic-restructure signal must be recorded for the aborting tool", //$NON-NLS-1$
+                StandaloneMonopolisticRestructure.consumeRestructureRequested());
+        }
+        finally
+        {
+            StandaloneMonopolisticRestructure.disarmExternal();
+            StandaloneMonopolisticRestructure.consumeRestructureRequested();
+        }
+    }
+
+    @Test
+    public void exclusiveLockUnderExternalModeWithoutCancelYieldsEmptyNotTerminate()
+    {
+        // No Cancel on offer: the answerer must NOT end sessions under external mode; it leaves the
+        // question to the platform (empty) and does NOT claim a restructure was requested.
+        IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer terminate = terminateRetry();
+        IInfobaseSynchonizationQuestionHandler.IInfobaseSynchonizationQuestionContext ctx = context(terminate);
+        when(ctx.getMessage()).thenReturn(EXCLUSIVE_LOCK_MESSAGE_RU);
+        try
+        {
+            StandaloneMonopolisticRestructure.armExternal();
+            assertFalse(answerer.handleQuestion(ctx).isPresent());
+            assertFalse(StandaloneMonopolisticRestructure.consumeRestructureRequested());
+        }
+        finally
+        {
+            StandaloneMonopolisticRestructure.disarmExternal();
+            StandaloneMonopolisticRestructure.consumeRestructureRequested();
+        }
+    }
+
+    @Test
+    public void sessionWarningUnderExternalModeAbortsWithCancelInsteadOfContinue()
+    {
+        // The follow-up warning must NOT be answered "terminate sessions and continue" under
+        // external mode — that would end user sessions; Cancel keeps the abort clean.
+        IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer cont =
+            new IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer(TERMINATE_CONTINUE_RU, TERMINATE_CONTINUE_RU, false);
+        IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer cancel =
+            new IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer(CANCEL_RU, CANCEL_RU, false);
+        IInfobaseSynchonizationQuestionHandler.IInfobaseSynchonizationQuestionContext ctx = context(cancel, cont);
+        when(ctx.getMessage()).thenReturn(SESSION_TERMINATION_WARNING_MESSAGE_RU);
+        try
+        {
+            StandaloneMonopolisticRestructure.armExternal();
+            Optional<IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer> result =
+                answerer.handleQuestion(ctx);
+            assertTrue(result.isPresent());
+            assertSame("session warning under external mode must abort with Cancel", cancel, result.get()); //$NON-NLS-1$
+        }
+        finally
+        {
+            StandaloneMonopolisticRestructure.disarmExternal();
+            StandaloneMonopolisticRestructure.consumeRestructureRequested();
+        }
+    }
+
     private IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer terminateRetry()
     {
         return new IInfobaseSynchonizationQuestionHandler.InfobaseSynchonizationQuestionAnswer(TERMINATE_RETRY_RU, TERMINATE_RETRY_RU, false);

@@ -499,6 +499,7 @@ public final class VanessaBootstrap
         Path zip = dir.resolve(VA_ZIP);
         download(url, zip);
         extractZip(zip, dir);
+        relocateEpfToRoot(dir);
         if (!Files.isRegularFile(epf))
         {
             throw new IOException("Downloaded VA release " + VA_TAG //$NON-NLS-1$
@@ -612,6 +613,30 @@ public final class VanessaBootstrap
                     Files.createDirectories(out.getParent());
                 }
                 Files.copy(zis, out, StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
+    }
+
+    /**
+     * Some VA release zips nest {@link #EPF_FILE} (plus its {@code locales/}) under a
+     * top-level folder (e.g. {@code vanessa-automation/}) instead of the archive root.
+     * Lifts the {@code .epf} to the cache root — where {@code epfCacheFile()}/
+     * {@code provisionVanessaBin} expect it — without disturbing release subfolders.
+     * Idempotent: no-op once the root copy already exists.
+     */
+    static void relocateEpfToRoot(Path dir) throws IOException
+    {
+        Path root = dir.resolve(EPF_FILE);
+        if (Files.isRegularFile(root))
+        {
+            return;
+        }
+        try (java.util.stream.Stream<Path> walk = Files.walk(dir))
+        {
+            Path found = walk.filter(p -> p.getFileName().toString().equals(EPF_FILE)).findFirst().orElse(null);
+            if (found != null && !found.equals(root))
+            {
+                Files.copy(found, root, StandardCopyOption.REPLACE_EXISTING);
             }
         }
     }
@@ -855,6 +880,7 @@ public final class VanessaBootstrap
             Path zip = dir.resolve(VA_ZIP);
             download(vaReleaseUrl(VA_ZIP), zip);
             extractZip(zip, dir);
+            relocateEpfToRoot(dir);
         }
         return relRoot;
     }

@@ -1591,6 +1591,14 @@ public class RunYaxunitTestsToolTest
             null, null, null, 45, true, null, override,
             StandaloneServerPortConflictPolicy.REASSIGN, false));
         variants.put("debug", request(null, null, null, null, 45, true, null, override, true));
+        variants.put("standaloneRestructure",
+            new RunYaxunitTestsTool.RunRequest(CFG, PROJ, APP, null, null, null, null, 45, true,
+                null, override, StandaloneServerPortConflictPolicy.CANCEL, false, "external",
+                null));
+        variants.put("externalUpdate1cBinary",
+            new RunYaxunitTestsTool.RunRequest(CFG, PROJ, APP, null, null, null, null, 45, true,
+                null, override, StandaloneServerPortConflictPolicy.CANCEL, false, null,
+                "/opt/app/1cv8")); //$NON-NLS-1$
         return variants;
     }
 
@@ -1606,6 +1614,11 @@ public class RunYaxunitTestsToolTest
         excluded.put("timeout", "the caller's waiting window, not what runs: keying it would drop "
             + "a Pending report the moment a retry asked for a longer one");
         excluded.put("debug", "the DEBUG path returns before a run key is ever built");
+        excluded.put("standaloneRestructure", "mechanical launch behaviour only: it decides how the "
+            + "standalone-server launch reacts to a needed restructure (abort + external 1cv8 "
+            + "DESIGNER + relaunch), never which modules/tests run or whether the base is fresh");
+        excluded.put("externalUpdate1cBinary", "a path for that same external restructure; it "
+            + "selects the 1cv8 binary, not what runs");
         return excluded;
     }
 
@@ -1670,10 +1683,15 @@ public class RunYaxunitTestsToolTest
             assertEquals("each variant must still differ in exactly its named field", field,
                 theOnlyChangedField(baseRequest, variant.getValue()));
             String varied = RunYaxunitTestsTool.buildSubmissionKey(variant.getValue());
-            if ("timeout".equals(field)) //$NON-NLS-1$
+            if ("timeout".equals(field) //$NON-NLS-1$
+                || "standaloneRestructure".equals(field) //$NON-NLS-1$
+                || "externalUpdate1cBinary".equals(field)) //$NON-NLS-1$
             {
-                assertEquals("timeout controls only this call's wait and must attach to the same job",
-                    base, varied);
+                // timeout controls only this call's wait; the external-restructure pair selects
+                // only the LAUNCH mechanics (abort + 1cv8 DESIGNER + relaunch), never which tests
+                // run - so each must attach to the same job rather than start a fresh one.
+                assertEquals("field '" + field + "' does not identify the run and must attach to "
+                    + "the same job", base, varied);
             }
             else
             {

@@ -78,6 +78,28 @@ appears in both questions' messages and is deliberately NOT used as the warning 
 exclusivity question would be mistaken for the warning and left without its terminate-and-retry
 answer.
 
+## Standalone server: NOT ending live sessions (opt-in `standaloneRestructure=external`)
+
+The auto-answer above is convenient but destructive on a live server: the answerer tidies up by
+ending REAL user sessions abruptly. When a structural restructure is genuinely needed on a
+standalone-server target (`ServerApplication.*`), you can opt IN to the clean offline alternative
+instead — pass `standaloneRestructure="external"` (plus `externalUpdate1cBinary` unless the
+`EDT_MCP_1CV8` env var is set or `1cv8` is found on disk):
+
+- The tool stops the standalone server cleanly, applies the configuration to the underlying
+  **file** infobase through an external `1cv8 DESIGNER /LoadConfigFromFiles <dir> /UpdateDBCfg`
+  (macOS has no `ibcmd`/`ring`, but the `1cv8` binary ships DESIGNER), restarts the server, and the
+  update/launch is reattempted once — an incremental no-op when the offline update already brought
+  the base current.
+- No `ibcmd`/SSH/admin tools and no ending of user sessions: the server is stopped cleanly, updated
+  offline, and restarted. The `1cv8` executable must already be installed and usable on the host.
+- **Default is OFF.** Absent/any other value keeps the current behaviour above (the answerer
+  terminates sessions). Opt-in is deliberate: a clean stop of a live production server is itself
+  disruptive and should only ever happen when the caller asks for it.
+
+Result payloads gain `standaloneRestructure: "external-applied"` and a message describing the
+offline update when this path ran.
+
 ## Examples
 
 - Preferred, incremental: `launchConfigurationName="MyApp / ThinClient"`.

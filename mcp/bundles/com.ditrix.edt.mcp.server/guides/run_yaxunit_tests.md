@@ -226,3 +226,21 @@ the server in state STARTED although the launch that owned it has ended, it refu
 start ("Can only start server that is stopped but current server state is 2"). The server is then
 stopped through EDT's own application lifecycle and the run is retried ONCE — see the
 `update_database` guide.
+
+## Standalone server: monopolistic restructure without ending sessions (opt-in)
+
+When the platform decides a structural (monopolistic) restructure is needed on a standalone-server
+target (`ServerApplication.*`), the default answerer ends REAL user sessions abruptly to do it. To do
+what a 1C admin does by hand instead, pass `standaloneRestructure="external"` (plus
+`externalUpdate1cBinary` unless `EDT_MCP_1CV8` is set or `1cv8` is found on disk):
+
+- The first launch aborts cleanly on the exclusive-lock question (answered with Cancel — nothing is
+  ended), the standalone server is stopped, the configuration is applied to the underlying **file**
+  infobase via an external `1cv8 DESIGNER /LoadConfigFromFiles <dir> /UpdateDBCfg` (macOS has no
+  `ibcmd`/`ring`, but `1cv8` ships DESIGNER), and the run is reattempted once — the relaunch
+  restarts the server (an incremental no-op once the base is current).
+- No `ibcmd`/SSH/admin tools and no ending of user sessions. The `1cv8` executable must be installed
+  and usable on the host.
+- **Default is OFF.** Absent/any other value keeps the current behaviour (the answerer terminates
+  sessions). Opt-in is deliberate: a clean stop of a live production server is disruptive and should
+  only ever happen when the caller asks for it.
