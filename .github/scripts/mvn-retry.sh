@@ -13,7 +13,7 @@ sleep_seconds="${MVN_RETRY_SLEEP_SECONDS:-30}"
 # Trailer entries are anchored to the [ERROR] line start so their text cannot
 # launder a real failure message that merely contains the same words.
 # Extend this allowlist when another unambiguously retryable diagnostic is identified.
-transient_error_allowlist='Could not mirror artifact|Unable to read repository|Connection reset|HTTP code: 50[0-9]|Return code is: 50[0-9]|Could not resolve target platform specification|Failed to resolve target definition|Cannot resolve target definition|No repository found at|Failed to load p2 repository|Read timed out|Connection timed out|UnknownHostException|^[[:space:]]*\[ERROR\][[:space:]]+(re-run Maven|For more information about the errors|After correcting the problems|To see the full stack trace|Re-run Maven using|\[Help [0-9]+\])|^[[:space:]]*\[ERROR\][[:space:]]*$'
+transient_error_allowlist='Could not mirror artifact|Unable to read repository|Connection reset|HTTP code: 50[0-9]|Return code is: 50[0-9]|Could not resolve target platform specification|Failed to resolve target definition|Cannot resolve target definition|No repository found at|Failed to load p2 repository|bundleLocation can't be null for artifact|Read timed out|Connection timed out|UnknownHostException|^[[:space:]]*\[ERROR\][[:space:]]+(re-run Maven|For more information about the errors|After correcting the problems|To see the full stack trace|Re-run Maven using|\[Help [0-9]+\])|^[[:space:]]*\[ERROR\][[:space:]]*$'
 
 for attempt in 1 2 3; do
   if mvn "$@" 2>&1 | tee "$log"; then
