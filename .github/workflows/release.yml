@@ -1,9 +1,20 @@
 name: Release
 
+# NOTE: releases build on the DEFAULT branch (master), NOT on the tag, because the
+# tag ref cannot see the GitHub Actions p2 cache that lives on master. On a cold
+# (direct tag) build Tycho re-resolves the whole p2 target platform online, and
+# 1C has REMOVED com._1c.g5.aef2 from the public p2 2026.2 feed (verified: absent
+# from artifacts.jar, direct jar 404), so validate-classpath fails with
+# "bundleLocation can't be null for artifact ... aef2". Building on master reuses
+# the warm cache where aef2 is already materialized. The tag is created at the end
+# purely as a release marker; it triggers none of this workflow.
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, e.g. 3.0.11 (no v prefix)'
+        required: true
+        type: string
 
 jobs:
   release:
@@ -35,36 +46,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-tycho-p2-
 
-      - name: Extract version from tag
-        id: version
-        run: |
-          # tag: v1.26.0 → 1.26.0
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Set version from tag
+      - name: Set version from input
         working-directory: mcp
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          # From the pom, not pinned here: a hardcoded 4.0.5 stopped loading on the move to Tycho 5.
+          # tycho-versions-plugin rewrites pom versions only; for an eclipse-plugin the version
+          # Tycho emits is read from Bundle-Version in MANIFEST.MF (and the feature version), which
+          # set-version does NOT touch. Patch them explicitly so the installed plugin reports exactly
+          # the released version (e.g. 3.0.11), final (no .qualifier) so validate-version passes.
           TYCHO=$(sed -n 's|.*<tycho\.version>\(.*\)</tycho\.version>.*|\1|p' bom/pom.xml)
-          test -n "$TYCHO"
           echo "tycho-versions-plugin: $TYCHO"
           mvn "org.eclipse.tycho:tycho-versions-plugin:$TYCHO:set-version" \
-            -DnewVersion=${{ steps.version.outputs.version }} \
+            -DnewVersion="$VERSION" \
             --batch-mode --no-transfer-progress
-
-          # tycho-versions-plugin rewrites pom versions only; for an eclipse-plugin
-          # the version Tycho emits is read from Bundle-Version in MANIFEST.MF (and the
-          # feature version), which set-version does NOT touch. Patch them from the tag
-          # explicitly so the installed plugin reports a version matching the GitHub release
-          # (e.g. tag v3.0.10 -> Bundle-Version 3.0.10) so the installed plugin reports the
-          # exact release version, instead of leaking the stale base (3.0.1) everywhere.
           MANIFEST=bundles/com.ditrix.edt.mcp.server/META-INF/MANIFEST.MF
-          sed -i -E "s/^Bundle-Version: .*/Bundle-Version: ${{ steps.version.outputs.version }}/" "$MANIFEST"
+          sed -i -E "s/^Bundle-Version: .*/Bundle-Version: $VERSION/" "$MANIFEST"
           FEATURE=features/com.ditrix.edt.mcp.server.feature/feature.xml
-          sed -i -E "s/version=\"[0-9]+\.[0-9]+\.[0-9]+\.qualifier\"/version=\"${{ steps.version.outputs.version }}\"/" "$FEATURE"
-          test "$(grep -m1 'Bundle-Version:' "$MANIFEST")" = "Bundle-Version: ${{ steps.version.outputs.version }}"
+          sed -i -E "s/version=\"[0-9]+\.[0-9]+\.[0-9]+.qualifier\"/version=\"$VERSION\"/" "$FEATURE"
+          test "$(grep -m1 'Bundle-Version:' "$MANIFEST")" = "Bundle-Version: $VERSION"
 
       - name: Maven build
         working-directory: mcp
@@ -77,17 +78,19 @@ jobs:
           MAVEN_OPTS: -Xmx2g
         run: |
           mvn -f proxy/pom.xml clean verify --batch-mode --no-transfer-progress
-          cp proxy/target/edt-mcp-proxy-*.jar "edt-mcp-proxy-v${{ steps.version.outputs.version }}.jar"
+          cp proxy/target/edt-mcp-proxy-*.jar "edt-mcp-proxy-v${{ inputs.version }}.jar"
 
       - name: Package archive
         run: |
           cd mcp/repositories/com.ditrix.edt.mcp.server.repository/target/repository
-          zip -r "$GITHUB_WORKSPACE/MCP-EDT.v${{ steps.version.outputs.version }}.zip" .
+          zip -r "$GITHUB_WORKSPACE/MCP-EDT.v${{ inputs.version }}.zip" .
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release and tag
         uses: softprops/action-gh-release@v3
         with:
-          name: MCP-EDT v${{ steps.version.outputs.version }}
+          tag_name: v${{ inputs.version }}
+          name: MCP-EDT v${{ inputs.version }}
+          target_commitish: master
           files: |
             MCP-EDT.v*.zip
             edt-mcp-proxy-v*.jar
