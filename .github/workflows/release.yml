@@ -58,13 +58,13 @@ jobs:
           # the version Tycho emits is read from Bundle-Version in MANIFEST.MF (and the
           # feature version), which set-version does NOT touch. Patch them from the tag
           # explicitly so the installed plugin reports a version matching the GitHub release
-          # (e.g. tag v3.0.10 -> Bundle-Version 3.0.10.qualifier -> 3.0.10.<timestamp>),
-          # instead of leaking the stale base into every release.
+          # (e.g. tag v3.0.10 -> Bundle-Version 3.0.10) so the installed plugin reports the
+          # exact release version, instead of leaking the stale base (3.0.1) everywhere.
           MANIFEST=bundles/com.ditrix.edt.mcp.server/META-INF/MANIFEST.MF
-          sed -i -E "s/^Bundle-Version: .*/Bundle-Version: ${{ steps.version.outputs.version }}.qualifier/" "$MANIFEST"
+          sed -i -E "s/^Bundle-Version: .*/Bundle-Version: ${{ steps.version.outputs.version }}/" "$MANIFEST"
           FEATURE=features/com.ditrix.edt.mcp.server.feature/feature.xml
-          sed -i -E "s/version=\"[0-9]+\.[0-9]+\.[0-9]+\.qualifier\"/version=\"${{ steps.version.outputs.version }}.qualifier\"/" "$FEATURE"
-          test "$(grep -m1 'Bundle-Version:' "$MANIFEST")" = "Bundle-Version: ${{ steps.version.outputs.version }}.qualifier"
+          sed -i -E "s/version=\"[0-9]+\.[0-9]+\.[0-9]+\.qualifier\"/version=\"${{ steps.version.outputs.version }}\"/" "$FEATURE"
+          test "$(grep -m1 'Bundle-Version:' "$MANIFEST")" = "Bundle-Version: ${{ steps.version.outputs.version }}"
 
       - name: Maven build
         working-directory: mcp
