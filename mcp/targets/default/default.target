@@ -43,6 +43,13 @@
 <unit id="com._1c.g5.v8.dt.rcp" version="0.0.0"/>
 <unit id="com._1c.g5.v8.dt.feature.feature.group" version="0.0.0"/>
 <unit id="com._1c.g5.v8.dt.thirdparty.feature.group" version="0.0.0"/>
+<!-- com._1c.g5.aef2 arrives only transitively via com._1c.g5.v8.dt.feature.feature.group; on a COLD
+     p2 resolve Tycho 5.0.4 does not materialize its bundleLocation for the transitively-attached IU,
+     so validate-classpath fails with "bundleLocation null". Naming it explicitly forces Tycho to
+     download it as a first-class artifact, so a cold Release build (tags do not inherit the branch
+     actions cache) resolves it with an actual location. -->
+<unit id="com._1c.g5.aef2" version="0.0.0"/>
+
 </location>
 
 <!-- LIBS -->
