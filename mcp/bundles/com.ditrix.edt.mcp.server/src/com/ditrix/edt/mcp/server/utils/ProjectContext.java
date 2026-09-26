@@ -177,6 +177,30 @@ public final class ProjectContext
     }
 
     /**
+     * Saves the whole workspace to disk, forcing any pending project-metadata /
+     * association writes (e.g. an infobase association stored on a branch context)
+     * to persist. This is the shared replacement for an inlined
+     * {@code ResourcesPlugin.getWorkspace().save(...)} in a tool - see
+     * {@code ProjectContextAdoptionRatchetTest} for why {@code tools/impl} must not
+     * add its own copy.
+     *
+     * @return {@code true} on success, {@code false} (after logging) if the save failed
+     */
+    public static boolean saveWorkspace()
+    {
+        try
+        {
+            ResourcesPlugin.getWorkspace().save(true, null);
+            return true;
+        }
+        catch (CoreException e)
+        {
+            Activator.logError("workspace save failed", e); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    /**
      * @return the resolved project handle; may be {@code null} (empty name) or a
      *         handle to a project that does not exist in the workspace
      */

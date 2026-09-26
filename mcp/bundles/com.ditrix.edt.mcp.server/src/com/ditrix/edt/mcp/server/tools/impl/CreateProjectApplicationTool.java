@@ -15,7 +15,6 @@ import java.util.Map;
 import java.util.Optional;
 
 import org.eclipse.core.resources.IProject;
-import org.eclipse.core.resources.ResourcesPlugin;
 
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociation;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager;
@@ -32,6 +31,7 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseAccess;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.InfobaseAccessSupport;
+import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.git.GitRepositoryResolver;
 import com.e1c.g5.dt.applications.ApplicationException;
 import com.e1c.g5.dt.applications.IApplication;
@@ -560,14 +560,7 @@ public class CreateProjectApplicationTool implements IMcpTool
      */
     private static void saveWorkspace()
     {
-        try
-        {
-            ResourcesPlugin.getWorkspace().save(true, null);
-        }
-        catch (Exception e) // NOSONAR non-fatal persistence best-effort
-        {
-            Activator.logError("create_project_application: workspace save after associate failed", e); //$NON-NLS-1$
-        }
+        ProjectContext.saveWorkspace();
     }
 
     /**

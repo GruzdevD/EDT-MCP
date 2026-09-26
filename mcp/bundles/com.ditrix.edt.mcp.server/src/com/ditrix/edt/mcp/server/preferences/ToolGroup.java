@@ -51,6 +51,8 @@ public enum ToolGroup
         "terminate_launch", "run_yaxunit_tests", "list_yaxunit_tests", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "ask_workmate", "get_job_status", //$NON-NLS-1$ //$NON-NLS-2$
         "cancel_job", "build_external_objects", "set_infobase_credentials", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "list_infobases", "create_project_application", "delete_project_application", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "remove_standalone_server", "set_project_checks", //$NON-NLS-1$ //$NON-NLS-2$
         "vanessa_list_launches", "vanessa_list_features", "vanessa_get_feature", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "vanessa_run_feature", "vanessa_run_by_tags", "vanessa_get_execution_status", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "vanessa_get_test_report", "vanessa_get_log", "vanessa_get_artifacts", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$

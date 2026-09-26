@@ -70,8 +70,10 @@ public class ListInfobasesToolTest
         String schema = new ListInfobasesTool().getInputSchema();
         assertTrue("groupName must be declared in the input schema", //$NON-NLS-1$
             schema.contains("\"groupName\"")); //$NON-NLS-1$
-        // The filter is optional — no required array.
-        assertFalse(schema.contains("\"required\"")); //$NON-NLS-1$
+        // The filter is optional — it must never appear in the required array
+        // (JsonSchemaBuilder always emits a "required" key, so sniff inside the array).
+        String required = schema.substring(schema.indexOf("\"required\"")); //$NON-NLS-1$
+        assertFalse(required.contains("\"groupName\"")); //$NON-NLS-1$
     }
 
     @Test
