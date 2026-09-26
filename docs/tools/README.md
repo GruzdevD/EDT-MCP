@@ -2,7 +2,7 @@
 
 One page per tool: what it does, every parameter, and how it works. Generated from the live server by `docs/generate_tool_docs.py` (re-run to refresh; the source of truth is each tool's Java).
 
-**109 tools.**
+**114 tools.**
 
 ## Core
 
@@ -20,6 +20,8 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | [`list_modules`](list_modules.md) | Discover BSL modules available in an EDT project. Parameters and examples: get_tool_guide('list_modules'). |
 | [`list_projects`](list_projects.md) | Discover projects available in the EDT workspace. Parameters and examples: get_tool_guide('list_projects'). |
 | [`list_toolsets`](list_toolsets.md) | Discover available groups of MCP tools and their visibility. Parameters and examples: get_tool_guide('list_toolsets'). |
+| [`plugin_check_for_update`](plugin_check_for_update.md) | Check whether a newer build of this plugin is published on its git repo: fetches the update-site branch (which holds the built com.ditrix.edt.mcp.server_<ver… |
+| [`plugin_update`](plugin_update.md) | Deploy the newest published build of this plugin over git: fetches the update-site branch, installs the new com.ditrix.edt.mcp.server_<version>.jar into ~/.p… |
 | [`read_module_source`](read_module_source.md) | Inspect the source of a complete BSL module. Parameters and examples: get_tool_guide('read_module_source'). |
 | [`search_in_code`](search_in_code.md) | Literal/regex full-text search across BSL modules. Matching is textual and NOT ru/en dialect-aware, so a query in one BSL language will not find the other sp… |
 
@@ -91,7 +93,9 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | [`cancel_job`](cancel_job.md) | Cancel a background job by jobId. DESTRUCTIVE. Two-phase: call once WITHOUT confirm to see the owning tool, state and progress, then again with confirm=true… |
 | [`debug_yaxunit_tests`](debug_yaxunit_tests.md) | DEPRECATED alias of run_yaxunit_tests(debug=true) - prefer that instead; the implementation is shared. DEBUG mode, so breakpoints fire: a short start returns… |
 | [`get_job_status`](get_job_status.md) | Poll any background job by the jobId its owning tool returned: state, progress journal and terminal result. Parameters and examples: get_tool_guide('get_job_… |
+| [`list_yaxunit_tests`](list_yaxunit_tests.md) | Enumerate YAXUnit test suites (common modules that register a test set via 'ЮТТесты...ДобавитьТестовыйНабор(...).ДобавитьТест(...)') and the tests within eac… |
 | [`run_yaxunit_tests`](run_yaxunit_tests.md) | Run YAXUnit tests as a named background job and return a JUnit Markdown report. The start call waits up to `timeout` (default and maximum 45s): a short run r… |
+| [`vanessa_doctor`](vanessa_doctor.md) | Read-only readiness report for a project's Vanessa Automation environment (layout, env.sh, VAParams.json, the vanessa-automation.epf runtime, Allure CLI). Do… |
 | [`vanessa_get_artifacts`](vanessa_get_artifacts.md) | List the artifacts a Vanessa Automation run produced in its out dir: junit report, Allure files, screenshots and the run log, each with a size and a coarse k… |
 | [`vanessa_get_execution_status`](vanessa_get_execution_status.md) | Poll the execution status of a Vanessa Automation BDD run started by vanessa_run_feature. Reads VA's BDDStatus.log artifact, so a run is 'running' until that… |
 | [`vanessa_get_feature`](vanessa_get_feature.md) | Read and parse a Vanessa Automation .feature file: the Feature headline, feature-level tags, each scenario's name/tags/steps, and the raw source. 'path' is a… |
@@ -99,8 +103,10 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | [`vanessa_get_test_report`](vanessa_get_test_report.md) | Parse a Vanessa Automation junit.xml report into a structured summary: per-suite counts, per-test status (passed/failed/error/skipped) and an overall verdict… |
 | [`vanessa_list_features`](vanessa_list_features.md) | List the Vanessa Automation .feature files under a project (or an explicit directory): each entry carries the path, the Feature: headline and the feature-lev… |
 | [`vanessa_list_launches`](vanessa_list_launches.md) | List EDT launch configurations suitable for launching a Vanessa Automation BDD run (optionally filtered to a project). Returns each configuration's name, pro… |
+| [`vanessa_open_allure_report`](vanessa_open_allure_report.md) | Generate and open the Allure report of a Vanessa Automation BDD run. Address the run by launchId (from vanessa_run_feature) or absolute outDir. Generates the… |
 | [`vanessa_run_by_tags`](vanessa_run_by_tags.md) | Launch a Vanessa Automation BDD run limited to scenarios/features carrying a given tag (sets the VAParams tag filter, generates the run artifacts, and starts… |
 | [`vanessa_run_feature`](vanessa_run_feature.md) | Launch a Vanessa Automation BDD run on a project (reads the out-of-repo env.sh at ~/.1c-tools/vanessa/projects/<project>/env.sh, generates the VAParams/junit… |
+| [`vanessa_setup`](vanessa_setup.md) | Turnkey provisioning of a project's Vanessa Automation environment: creates .vanessa/ (env.sh, VAParams.json, features/, out/) and downloads the vanessa-auto… |
 
 ## Profiling
 
@@ -195,9 +201,8 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 
 | Tool | Description |
 |------|-------------|
-| [`list_yaxunit_tests`](list_yaxunit_tests.md) | Enumerate YAXUnit test suites (common modules that register a test set via 'ЮТТесты...ДобавитьТестовыйНабор(...).ДобавитьТест(...)') and the tests within eac… |
-| [`plugin_check_for_update`](plugin_check_for_update.md) | Check whether a newer build of this plugin is published on its git repo: fetches the update-site branch (which holds the built com.ditrix.edt.mcp.server_<ver… |
-| [`plugin_update`](plugin_update.md) | Deploy the newest published build of this plugin over git: fetches the update-site branch, installs the new com.ditrix.edt.mcp.server_<version>.jar into ~/.p… |
-| [`vanessa_doctor`](vanessa_doctor.md) | Read-only readiness report for a project's Vanessa Automation environment (layout, env.sh, VAParams.json, the vanessa-automation.epf runtime, Allure CLI). Do… |
-| [`vanessa_open_allure_report`](vanessa_open_allure_report.md) | Generate and open the Allure report of a Vanessa Automation BDD run. Address the run by launchId (from vanessa_run_feature) or absolute outDir. Generates the… |
-| [`vanessa_setup`](vanessa_setup.md) | Turnkey provisioning of a project's Vanessa Automation environment: creates .vanessa/ (env.sh, VAParams.json, features/, out/) and downloads the vanessa-auto… |
+| [`create_project_application`](create_project_application.md) | Create a NEW application for an EDT project, bound to a git BRANCH and pointing at an EXISTING infobase (named via list_infobases) WITHOUT creating or regist… |
+| [`delete_project_application`](delete_project_application.md) | Delete an EDT project application (a project-to-infobase binding) so it no longer appears in get_applications, WITHOUT removing the infobase itself (it stays… |
+| [`list_infobases`](list_infobases.md) | List the infobases registered in EDT's global infobase panel (Инфобазы) - the file and client-server databases EDT knows of across all projects, grouped by f… |
+| [`remove_standalone_server`](remove_standalone_server.md) | Remove the WST STANDALONE-server wiring that makes an EDT project treat an infobase as an autonomous server, so a NORMAL infobase application can be created… |
+| [`set_project_checks`](set_project_checks.md) | Toggle an EDT project's MASSIVE CHECK PROCESS - the extended checks/validations that run around infobase sync and make update_database slow (or blocked). Set… |

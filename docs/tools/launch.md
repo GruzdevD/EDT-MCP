@@ -12,8 +12,8 @@ Start a 1C application in EDT debug (default) or run mode. An already-running se
 | updateBeforeLaunch | — | boolean | Default true: silently apply the configuration->DB update before launching so no 'Update database?' modal blocks the call (even on a Russian-locale EDT the dialog is auto-confirmed); false skips the update and the platform may then show that modal. Ignored for Attach. |
 | externalInfobaseChanges | — | string | How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: 'override' (default) keeps the project configuration and overwrites the infobase, 'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update with an error. Omitted, the modal is still answered (with 'override'), so an unattended call never blocks on it. |
 | standaloneServerPortConflict | — | string | Answer to EDT's standalone-server port-conflict prompt: cancel (default) = fail and name the busy ports; reassign = let EDT move the server to free ports (rewrites its configuration). |
-| standaloneRestructure | — | string | For a standalone-server target ONLY. Set to 'external' to NOT end user sessions when the platform decides a monopolistic (structural) restructure is needed: the launch aborts cleanly, the standalone server is stopped, the configuration is applied to the file infobase via an external 1cv8 DESIGNER update, the server is restarted, and the launch is retried once (inside the background launch Job). Default (absent/other) = the answerer terminates sessions. Opt-in. |
-| externalUpdate1cBinary | — | string | Absolute path to the 1C '1cv8' executable (ships DESIGNER) used by standaloneRestructure=external. Optional: falls back to the EDT_MCP_1CV8 environment variable, then a best-effort scan of common install directories. |
+| standaloneRestructure | — | string | For a standalone-server target ONLY. Set to 'external' to NOT end user sessions when the platform decides a monopolistic (structural) restructure is needed: the launch aborts cleanly, the standalone server is stopped, the configuration is applied to the file infobase via an external 1cv8 DESIGNER update, the server is restarted, and the launch is retried. Absent/other = current behaviour (the answerer terminates sessions). Requires externalUpdate1cBinary unless the EDT_MCP_1CV8 environment variable is set or 1cv8 is found on disk. |
+| externalUpdate1cBinary | — | string | Absolute path to the 1C '1cv8' executable (ships DESIGNER) used by standaloneRestructure=external. Optional then: falls back to the EDT_MCP_1CV8 environment variable, then a best-effort scan of common install directories. |
 | startupOption | — | string | The 1C /C startup option for THIS launch only (e.g. 'xddRun ...; xddReport ...'); applied to a working copy, the saved EDT configuration is not modified. Runtime-client configs only - an Attach config ignores it and is refused. |
 | externalObjectProjectName | — | string | Name of an EXTERNAL-OBJECTS project (not the configuration being debugged) whose data processor / report to run on startup; pair with externalObjectName. EDT builds the .epf itself - there is no way to run a prebuilt file with breakpoints, so import such a file into a project first. |
 | externalObjectName | — | string | Name of the external data processor / report inside externalObjectProjectName (the object NAME, not a file path); required together with it. Qualify it as 'ExternalDataProcessor.Name' / 'ExternalReport.Name' when a processor and a report share the name. |
@@ -165,6 +165,25 @@ alone, one whose launch is gone is stopped through EDT's own application lifecyc
 STARTING/STOPPING one is waited for (bounded, 30s) rather than stopped underneath the operation
 holding it. A refusal that still arrives is repaired the same way and the launch retried ONCE. See
 the `update_database` guide for the full description.
+
+## Standalone server: monopolistic restructure without ending sessions (opt-in)
+
+When the platform decides a structural (monopolistic) restructure is needed on a standalone-server
+target (`ServerApplication.*`), the default answerer ends REAL user sessions abruptly to do it. To do
+what a 1C admin does by hand instead, pass `standaloneRestructure="external"` (plus
+`externalUpdate1cBinary` unless `EDT_MCP_1CV8` is set or `1cv8` is found on disk):
+
+- The first launch aborts cleanly on the exclusive-lock question (answered with Cancel — nothing is
+  ended), the standalone server is stopped, the configuration is applied to the underlying **file**
+  infobase via an external `1cv8 DESIGNER /LoadConfigFromFiles <dir> /UpdateDBCfg` (macOS has no
+  `ibcmd`/`ring`, but `1cv8` ships DESIGNER), and the launch is retried once — the relaunch restarts
+  the server (an incremental no-op once the base is current).
+- No `ibcmd`/SSH/admin tools and no ending of user sessions. The `1cv8` executable must be installed
+  and usable on the host.
+- **Default is OFF.** Absent/any other value keeps the current behaviour (the answerer terminates
+  sessions). Opt-in is deliberate: a clean stop of a live production server is disruptive and should
+  only ever happen when the caller asks for it. The `launch` flow is async (it answers "launching"
+  immediately), so on this path the offline restructure runs inside the background launch Job.
 
 ---
 *Generated from the live MCP server (`get_tool_guide`) by `docs/generate_tool_docs.py`. Do not edit this file. Edit the tool's description/schema in its Java source and its guide body in `mcp/bundles/com.ditrix.edt.mcp.server/guides/<tool>.md`.*

@@ -868,6 +868,103 @@
   },
   {
     "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Create a NEW application for an EDT project, bound to a git BRANCH and pointing at an EXISTING infobase (named via list_infobases) WITHOUT creating or registering a new database. Unlike set_branch_infobase (which re-binds an existing application, so the branch SHARES it), this mints a DISTINCT application (new id) for this branch over the same physical infobase - a new app for a new branch on an existing base. Never touches the on-disk database. Optional access/user/password store the base connection credentials on the new application so it authenticates WITHOUT an access-settings dialog (OS auth or login/password). Parameters and examples: get_tool_guide('create_project_application').",
+    "inputSchema": {
+      "properties": {
+        "access": {
+          "enum": [
+            "INFOBASE",
+            "OS"
+          ],
+          "type": "string"
+        },
+        "applicationName": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "infobaseName": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "setDefault": {
+          "type": "boolean"
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "branch",
+        "infobaseName"
+      ],
+      "type": "object"
+    },
+    "name": "create_project_application",
+    "outputSchema": {
+      "properties": {
+        "access": {
+          "type": "string"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "applicationName": {
+          "type": "string"
+        },
+        "applications": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "binding": {
+          "type": "string"
+        },
+        "bound": {
+          "type": "object"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "credentialsStored": {
+          "type": "boolean"
+        },
+        "infobaseName": {
+          "type": "string"
+        },
+        "passwordSet": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
       "destructiveHint": true,
       "openWorldHint": false,
       "readOnlyHint": false
@@ -1031,6 +1128,9 @@
           "description": "How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: 'override' (default) keeps the project configuration and overwrites the infobase, 'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update with an error. Omitted, the modal is still answered (with 'override'), so an unattended call never blocks on it.",
           "type": "string"
         },
+        "externalUpdate1cBinary": {
+          "type": "string"
+        },
         "launchConfigurationName": {
           "type": "string"
         },
@@ -1041,6 +1141,9 @@
           "type": "array"
         },
         "projectName": {
+          "type": "string"
+        },
+        "standaloneRestructure": {
           "type": "string"
         },
         "standaloneServerPortConflict": {
@@ -1354,6 +1457,71 @@
         },
         "project": {
           "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Delete an EDT project application (a project-to-infobase binding) so it no longer appears in get_applications, WITHOUT removing the infobase itself (it stays in list_infobases and on disk). The inverse of create_project_application. Two-phase: call once WITHOUT confirm to preview, then again with confirm=true to apply. Parameters and examples: get_tool_guide('delete_project_application').",
+    "inputSchema": {
+      "properties": {
+        "applicationId": {
+          "type": "string"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "applicationId"
+      ],
+      "type": "object"
+    },
+    "name": "delete_project_application",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "applicationId": {
+          "type": "string"
+        },
+        "applicationName": {
+          "type": "string"
+        },
+        "confirmationRequired": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "remainingApplications": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "removed": {
+          "type": "boolean"
         },
         "success": {
           "type": "boolean"
@@ -2994,6 +3162,9 @@
         "externalObjectProjectName": {
           "type": "string"
         },
+        "externalUpdate1cBinary": {
+          "type": "string"
+        },
         "launchConfigurationName": {
           "type": "string"
         },
@@ -3011,6 +3182,9 @@
         "restartIfRunning": {
           "description": "Default false: if a matching session is already running, short-circuit with alreadyRunning:true and do NOT relaunch (call terminate_launch to restart). true: non-interactively terminate the existing session, then relaunch — no 'Debug session already exists' modal blocks the call.",
           "type": "boolean"
+        },
+        "standaloneRestructure": {
+          "type": "string"
         },
         "standaloneServerPortConflict": {
           "description": "Answer to EDT's standalone-server port-conflict prompt: cancel (default) = fail and name the busy ports; reassign = let EDT move the server to free ports (rewrites its configuration).",
@@ -3214,6 +3388,56 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
+    "description": "List the infobases registered in EDT's global infobase panel (Инфобазы) - the file and client-server databases EDT knows of across all projects, grouped by folder, with their connection strings and types. This is the registry to pick an EXISTING database from by name (e.g. to bind a new project application to it with create_project_application) and is independent of any one project's applications. Parameters and examples: get_tool_guide('list_infobases').",
+    "inputSchema": {
+      "properties": {
+        "groupName": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_infobases",
+    "outputSchema": {
+      "properties": {
+        "groups": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "infobases": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "recent": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Discover BSL modules available in an EDT project. Parameters and examples: get_tool_guide('list_modules').",
     "inputSchema": {
       "properties": {
@@ -3354,6 +3578,28 @@
       ],
       "type": "object"
     }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Enumerate YAXUnit test suites (common modules that register a test set via 'ЮТТесты...ДобавитьТестовыйНабор(...).ДобавитьТест(...)') and the tests within each suite for a project. Returns JSON: {project, count, testCount, suites:[{moduleName, modulePath, moduleType, parentName, tests:[{name}]}]}. Feed a whole suite's moduleName into `modules`, or individual `Module.Method` names into `tests`, of `run_yaxunit_tests` to run at that granularity. Parameters and examples: get_tool_guide('list_yaxunit_tests').",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_yaxunit_tests",
+    "outputSchema": null
   },
   {
     "annotations": {
@@ -3535,6 +3781,112 @@
   },
   {
     "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Check whether a newer build of this plugin is published on its git repo: fetches the update-site branch (which holds the built com.ditrix.edt.mcp.server_<version>.jar) and compares it with the version running in EDT. Returns installedVersion, availableVersion and updateAvailable. Authenticates with the project git credentials, so the private repo stays private. When updateAvailable is true, run plugin_update to apply. Parameters and examples: get_tool_guide('plugin_check_for_update').",
+    "inputSchema": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "repositoryUrl": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "plugin_check_for_update",
+    "outputSchema": {
+      "properties": {
+        "availableVersion": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "installedVersion": {
+          "type": "string"
+        },
+        "jar": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "updateAvailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Deploy the newest published build of this plugin over git: fetches the update-site branch, installs the new com.ditrix.edt.mcp.server_<version>.jar into ~/.p2/pool/plugins/ and rewrites bundles.info. Returns the new version and the installed jar path; the change takes effect after an EDT restart. Run plugin_check_for_update first to confirm an update is available. Parameters and examples: get_tool_guide('plugin_update').",
+    "inputSchema": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "repositoryUrl": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "plugin_update",
+    "outputSchema": {
+      "properties": {
+        "bundlesInfo": {
+          "type": "string"
+        },
+        "installedVersion": {
+          "type": "string"
+        },
+        "jar": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "newVersion": {
+          "type": "string"
+        },
+        "restartRequired": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
       "idempotentHint": true,
       "openWorldHint": false,
       "readOnlyHint": true
@@ -3629,6 +3981,80 @@
       "properties": {
         "removed": {
           "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Remove the WST STANDALONE-server wiring that makes an EDT project treat an infobase as an autonomous server, so a NORMAL infobase application can be created for it. A base wired as a standalone server is surfaced by the server provider, never as a plain type.infobase app. Destructive (deletes the standalone server + config), two-phase with confirm; the served DATABASE is never touched. Parameters and examples: get_tool_guide('remove_standalone_server').",
+    "inputSchema": {
+      "properties": {
+        "confirm": {
+          "type": "boolean"
+        },
+        "infobaseName": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "infobaseName"
+      ],
+      "type": "object"
+    },
+    "name": "remove_standalone_server",
+    "outputSchema": {
+      "properties": {
+        "allServers": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "confirmationRequired": {
+          "type": "boolean"
+        },
+        "infobaseName": {
+          "type": "string"
+        },
+        "matchedServers": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "remainingServers": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "removedServers": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
         },
         "success": {
           "type": "boolean"
@@ -3900,6 +4326,9 @@
           "description": "How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: 'override' (default) keeps the project configuration and overwrites the infobase, 'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update with an error. Omitted, the modal is still answered (with 'override'), so an unattended call never blocks on it.",
           "type": "string"
         },
+        "externalUpdate1cBinary": {
+          "type": "string"
+        },
         "launchConfigurationName": {
           "description": "Exact runtime-client launch config name (preferred; from list_configurations).",
           "type": "string"
@@ -3912,6 +4341,9 @@
         },
         "projectName": {
           "description": "EDT project name (required if launchConfigurationName is omitted).",
+          "type": "string"
+        },
+        "standaloneRestructure": {
           "type": "string"
         },
         "standaloneServerPortConflict": {
@@ -4315,6 +4747,53 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
+    "description": "Toggle an EDT project's MASSIVE CHECK PROCESS - the extended checks/validations that run around infobase sync and make update_database slow (or blocked). Set disableMassiveChecks=true before update_database and back to false after. Reversible, per-project, takes effect immediately (no restart). Parameters and examples: get_tool_guide('set_project_checks').",
+    "inputSchema": {
+      "properties": {
+        "disableMassiveChecks": {
+          "type": "boolean"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName",
+        "disableMassiveChecks"
+      ],
+      "type": "object"
+    },
+    "name": "set_project_checks",
+    "outputSchema": {
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        },
+        "disableMassiveChecks": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Change a variable while execution is paused in the debugger. WARNING: the value is EVALUATED as a BSL expression in the running application, so it can invoke code and change state beyond the named variable. Parameters and examples: get_tool_guide('set_variable').",
     "inputSchema": {
       "properties": {
@@ -4658,6 +5137,9 @@
           "description": "How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: 'override' (default) keeps the project configuration and overwrites the infobase, 'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update with an error. Omitted, the modal is still answered (with 'override'), so an unattended call never blocks on it.",
           "type": "string"
         },
+        "externalUpdate1cBinary": {
+          "type": "string"
+        },
         "fullUpdate": {
           "type": "boolean"
         },
@@ -4665,6 +5147,9 @@
           "type": "string"
         },
         "projectName": {
+          "type": "string"
+        },
+        "standaloneRestructure": {
           "type": "string"
         },
         "standaloneServerPortConflict": {
@@ -4813,6 +5298,585 @@
       "type": "object"
     },
     "name": "validate_xdto_package",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Read-only readiness report for a project's Vanessa Automation environment (layout, env.sh, VAParams.json, the vanessa-automation.epf runtime, Allure CLI). Does not download or change anything. Use vanessa_setup to provision. Parameters and examples: get_tool_guide('vanessa_doctor').",
+    "inputSchema": {
+      "properties": {
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_doctor",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "List the artifacts a Vanessa Automation run produced in its out dir: junit report, Allure files, screenshots and the run log, each with a size and a coarse kind. Address the dir by launchId or absolute outDir. Parameters and examples: get_tool_guide('vanessa_get_artifacts').",
+    "inputSchema": {
+      "properties": {
+        "launchId": {
+          "type": "integer"
+        },
+        "outDir": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "vanessa_get_artifacts",
+    "outputSchema": {
+      "properties": {
+        "artifacts": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "outDir": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Poll the execution status of a Vanessa Automation BDD run started by vanessa_run_feature. Reads VA's BDDStatus.log artifact, so a run is 'running' until that file carries a numeric verdict (0 = passed). Returns running/passed/failed plus the junit path. Parameters and examples: get_tool_guide('vanessa_get_execution_status').",
+    "inputSchema": {
+      "properties": {
+        "launchId": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "launchId"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_get_execution_status",
+    "outputSchema": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "feature": {
+          "type": "string"
+        },
+        "junitReportPath": {
+          "type": "string"
+        },
+        "launchId": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Read and parse a Vanessa Automation .feature file: the Feature headline, feature-level tags, each scenario's name/tags/steps, and the raw source. 'path' is an absolute path from vanessa_list_features. Parameters and examples: get_tool_guide('vanessa_get_feature').",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_get_feature",
+    "outputSchema": {
+      "properties": {
+        "feature": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "raw": {
+          "type": "string"
+        },
+        "scenarios": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "tags": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Read lines from a Vanessa Automation run log (BDD.log). Address it by launchId (reuses the run's out dir) or by absolute logPath; page big logs with offsetLines/limit. Returns the lines, offsets and a 'more' flag. Parameters and examples: get_tool_guide('vanessa_get_log').",
+    "inputSchema": {
+      "properties": {
+        "launchId": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "logPath": {
+          "type": "string"
+        },
+        "offsetLines": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "vanessa_get_log",
+    "outputSchema": {
+      "properties": {
+        "lines": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "more": {
+          "type": "boolean"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "returned": {
+          "type": "integer"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "totalLines": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Parse a Vanessa Automation junit.xml report into a structured summary: per-suite counts, per-test status (passed/failed/error/skipped) and an overall verdict. Pass junitReportPath directly, or launchId to reuse the path recorded by vanessa_run_feature. Parameters and examples: get_tool_guide('vanessa_get_test_report').",
+    "inputSchema": {
+      "properties": {
+        "detail": {
+          "enum": [
+            "summary",
+            "tests",
+            "steps"
+          ],
+          "type": "string"
+        },
+        "junitReportPath": {
+          "type": "string"
+        },
+        "launchId": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "vanessa_get_test_report",
+    "outputSchema": {
+      "properties": {
+        "report": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "List the Vanessa Automation .feature files under a project (or an explicit directory): each entry carries the path, the Feature: headline and the feature-level tags, plus a count. Use a returned path with vanessa_get_feature or vanessa_run_feature. Parameters and examples: get_tool_guide('vanessa_list_features').",
+    "inputSchema": {
+      "properties": {
+        "dir": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_list_features",
+    "outputSchema": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "features": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "root": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "List EDT launch configurations suitable for launching a Vanessa Automation BDD run (optionally filtered to a project). Returns each configuration's name, project and a 'vanessa' hint (name looks like a BDD/vanessa config). Use the returned name with vanessa_run_feature. Parameters and examples: get_tool_guide('vanessa_list_launches').",
+    "inputSchema": {
+      "properties": {
+        "projectFilter": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "vanessa_list_launches",
+    "outputSchema": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "launches": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Generate and open the Allure report of a Vanessa Automation BDD run. Address the run by launchId (from vanessa_run_feature) or absolute outDir. Generates the static report from the raw Allure results via the allure commandline, serves it over loopback and opens it in the in-EDT Allure Report view (or the OS browser when detached). Parameters and examples: get_tool_guide('vanessa_open_allure_report').",
+    "inputSchema": {
+      "properties": {
+        "allureBin": {
+          "type": "string"
+        },
+        "detached": {
+          "type": "boolean"
+        },
+        "generate": {
+          "type": "boolean"
+        },
+        "launchId": {
+          "type": "integer"
+        },
+        "outDir": {
+          "type": "string"
+        },
+        "reportDir": {
+          "type": "string"
+        },
+        "resultsDir": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "vanessa_open_allure_report",
+    "outputSchema": {
+      "properties": {
+        "port": {
+          "type": "integer"
+        },
+        "reportDir": {
+          "type": "string"
+        },
+        "resultsDir": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Launch a Vanessa Automation BDD run limited to scenarios/features carrying a given tag (sets the VAParams tag filter, generates the run artifacts, and starts VA_Runner on the project's EDT launch configuration). Returns a launchId for vanessa_get_execution_status / vanessa_get_test_report, like vanessa_run_feature. Parameters and examples: get_tool_guide('vanessa_run_by_tags').",
+    "inputSchema": {
+      "properties": {
+        "featureDir": {
+          "type": "string"
+        },
+        "launchConfigurationName": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "tags"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_run_by_tags",
+    "outputSchema": {
+      "properties": {
+        "configuration": {
+          "type": "string"
+        },
+        "feature": {
+          "type": "string"
+        },
+        "junitReportPath": {
+          "type": "string"
+        },
+        "launchId": {
+          "type": "string"
+        },
+        "outDir": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "tags": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Launch a Vanessa Automation BDD run on a project (reads the out-of-repo env.sh at ~/.1c-tools/vanessa/projects/<project>/env.sh, generates the VAParams/junit run artifacts, and starts the VA_Runner external object via the project's EDT launch configuration). Returns a launchId for vanessa_get_execution_status / vanessa_get_test_report; poll that status until it leaves 'running'. Parameters and examples: get_tool_guide('vanessa_run_feature').",
+    "inputSchema": {
+      "properties": {
+        "allure": {
+          "type": "boolean"
+        },
+        "asyncSteps": {
+          "type": "boolean"
+        },
+        "feature": {
+          "type": "string"
+        },
+        "launchConfigurationName": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "reportDir": {
+          "type": "string"
+        },
+        "retries": {
+          "type": "integer"
+        },
+        "scenarios": {
+          "type": "string"
+        },
+        "screenshotsOnError": {
+          "type": "boolean"
+        },
+        "tagsFilter": {
+          "type": "string"
+        },
+        "tagsIgnore": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_run_feature",
+    "outputSchema": {
+      "properties": {
+        "configuration": {
+          "type": "string"
+        },
+        "feature": {
+          "type": "string"
+        },
+        "junitReportPath": {
+          "type": "string"
+        },
+        "launchId": {
+          "type": "string"
+        },
+        "options": {
+          "type": "object"
+        },
+        "outDir": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Turnkey provisioning of a project's Vanessa Automation environment: creates .vanessa/ (env.sh, VAParams.json, features/, out/) and downloads the vanessa-automation.epf runtime (plus the optional Allure CLI) as a background job pollable with get_job_status. Idempotent: re-running never overwrites an edited env.sh. Use vanessa_doctor to see what is still missing. Parameters and examples: get_tool_guide('vanessa_setup').",
+    "inputSchema": {
+      "properties": {
+        "installAllure": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_setup",
     "outputSchema": null
   },
   {

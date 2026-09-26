@@ -18,6 +18,7 @@ import java.util.function.Predicate;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
 import org.osgi.framework.Bundle;
@@ -406,6 +407,215 @@ public final class StandaloneServerSupport
     }
 
     /**
+     * A standalone (WST) {@code IServer} flattened for tool consumption: the reflective server object,
+     * WST server name, and — from its FIRST infobase module — the module object, module display name and
+     * the raw infobaseId it serves. One independent server backs one infobase in practice; the first
+     * module is representative. All fields may be {@code null} on a server whose shape differs.
+     */
+    public static final class ServerInfo
+    {
+        /** The reflective {@code IServer} instance (pass to {@link #deleteServer}). */
+        public final Object server;
+        /** Reflective {@code IServer.getName()} — the WST server display name. */
+        public final String serverName;
+        /** The first {@code StandaloneServerInfobase} module of the server (may be {@code null}). */
+        public final Object module;
+        /** Reflective module {@code getName()}. */
+        public final String moduleName;
+        /** The raw infobase id the server serves ({@link #infobaseIdOf}). */
+        public final String infobaseId;
+
+        public ServerInfo(Object server, String serverName, Object module, String moduleName, String infobaseId)
+        {
+            this.server = server;
+            this.serverName = serverName;
+            this.module = module;
+            this.moduleName = moduleName;
+            this.infobaseId = infobaseId;
+        }
+    }
+
+    /**
+     * Enumerates the standalone (WST) servers known to {@code IStandaloneServerService.getServers()},
+     * flattened via {@link ServerInfo} (one entry per server). Returns an empty list on no servers or
+     * on a reflective miss — never throws.
+     */
+    public static List<ServerInfo> listServers(Object service)
+    {
+        List<ServerInfo> out = new ArrayList<>();
+        if (service == null)
+        {
+            return out;
+        }
+        try
+        {
+            Method getServers = findMethod(service.getClass(), "getServers", 0); //$NON-NLS-1$
+            if (getServers == null)
+            {
+                return out;
+            }
+            Object result = getServers.invoke(service);
+            if (!(result instanceof List))
+            {
+                return out;
+            }
+            for (Object server : (List<?>)result)
+            {
+                if (server == null)
+                {
+                    continue;
+                }
+                String serverName = null;
+                try
+                {
+                    Method getName = findMethod(server.getClass(), "getName", 0); //$NON-NLS-1$
+                    Object n = getName == null ? null : getName.invoke(server);
+                    serverName = n == null ? null : n.toString();
+                }
+                catch (Throwable ignore) // NOSONAR best-effort read
+                {
+                    // keep fields null
+                }
+                Object module = null;
+                String moduleName = null;
+                String infobaseId = null;
+                try
+                {
+                    Object modules = server.getClass().getMethod("getModules").invoke(server); //$NON-NLS-1$
+                    if (modules instanceof Object[] && ((Object[])modules).length > 0)
+                    {
+                        module = ((Object[])modules)[0];
+                        if (module != null)
+                        {
+                            Method getName = findMethod(module.getClass(), "getName", 0); //$NON-NLS-1$
+                            Object n = getName == null ? null : getName.invoke(module);
+                            moduleName = n == null ? null : n.toString();
+                            infobaseId = infobaseIdOf(module);
+                        }
+                    }
+                }
+                catch (Throwable ignore) // NOSONAR best-effort read
+                {
+                    // drop module fields
+                }
+                out.add(new ServerInfo(server, serverName, module, moduleName, infobaseId));
+            }
+        }
+        catch (Throwable t) // NOSONAR deliberate catch-all at a reflective/best-effort boundary
+        {
+            Activator.logError("standalone-server: server enumeration failed", t); //$NON-NLS-1$
+        }
+        return out;
+    }
+
+    /**
+     * Enumerates the PERSISTED standalone-server infobase registrations — the entries of infobases.yaml
+     * as the {@code StandaloneServerInfobaseModuleFactoryDelegate} holds them in its in-memory {@code modules}
+     * map. Unlike {@link #listServers} (which reflects {@code IStandaloneServerService.getServers()} and is
+     * therefore EMPTY until a server is actually started), this reads the delegate's map, which is populated
+     * from infobases.yaml on feature activation regardless of whether any server is running. This is what a
+     * naming-only removal targets: the same entries {@link #removeFromInfobaseRegistry} deletes.
+     *
+     * <p>Each entry yields a {@link ServerInfo} with the live module instance ({@code module}), its display
+     * name ({@code moduleName}) and raw infobaseId ({@code infobaseId}); {@code server}/{@code serverName}
+     * are {@code null} (no live {@code IServer} exists for a stopped standalone server). Returns an empty
+     * list on no registrations or on a reflective miss — never throws.
+     */
+    public static List<ServerInfo> listRegisteredServers()
+    {
+        List<ServerInfo> out = new ArrayList<>();
+        Object delegate = resolveStandaloneDelegate(new NullProgressMonitor());
+        if (delegate == null)
+        {
+            return out;
+        }
+        try
+        {
+            Field modulesF = findField(delegate.getClass(), "modules"); //$NON-NLS-1$
+            if (modulesF == null)
+            {
+                return out;
+            }
+            modulesF.setAccessible(true); // NOSONAR reflective access is required (EDT internals, no Require-Bundle)
+            Object mapObj = modulesF.get(delegate);
+            if (!(mapObj instanceof Map))
+            {
+                return out;
+            }
+            for (Object module : ((Map<?, ?>)mapObj).values())
+            {
+                if (module == null)
+                {
+                    continue;
+                }
+                String moduleName = null;
+                try
+                {
+                    Method getName = findMethod(module.getClass(), "getName", 0); //$NON-NLS-1$
+                    Object n = getName == null ? null : getName.invoke(module);
+                    moduleName = n == null ? null : n.toString();
+                }
+                catch (Throwable ignore) // NOSONAR best-effort read
+                {
+                    // keep moduleName null
+                }
+                out.add(new ServerInfo(null, null, module, moduleName, infobaseIdOf(module)));
+            }
+        }
+        catch (Throwable t) // NOSONAR deliberate catch-all at a reflective/best-effort boundary
+        {
+            Activator.logError("standalone-server: persisted registry enumeration failed", t); //$NON-NLS-1$
+        }
+        return out;
+    }
+
+    /**
+     * Resolves the live {@code StandaloneServerInfobaseModuleFactoryDelegate} instance (which owns the
+     * in-memory {@code modules} map behind infobases.yaml) via the WST module-factory registry. Shared by
+     * {@link #removeFromInfobaseRegistry} and {@link #listRegisteredServers}. Returns {@code null} when
+     * the delegate cannot be reached (bundle/factory absent, reflective miss).
+     */
+    private static Object resolveStandaloneDelegate(IProgressMonitor monitor)
+    {
+        try
+        {
+            Bundle wst = Platform.getBundle(WST_SERVER_CORE_BUNDLE_ID);
+            if (wst == null)
+            {
+                return null;
+            }
+            Class<?> serverPlugin = wst.loadClass(SERVER_PLUGIN_CLASS);
+            Object[] factories = (Object[])serverPlugin.getMethod("getModuleFactories").invoke(null); //$NON-NLS-1$
+            Object factory = null;
+            for (Object f : factories)
+            {
+                Object id = f.getClass().getMethod(METHOD_GET_ID).invoke(f);
+                if (MODULE_FACTORY_ID.equals(id))
+                {
+                    factory = f;
+                    break;
+                }
+            }
+            if (factory == null)
+            {
+                return null;
+            }
+            Method getDelegate = findMethod(factory.getClass(), "getDelegate", 1); //$NON-NLS-1$
+            if (getDelegate == null)
+            {
+                return null;
+            }
+            Object delegate = getDelegate.invoke(factory, monitor);
+            return delegate;
+        }
+        catch (Throwable t) // NOSONAR reflective best-effort boundary
+        {
+            Activator.logError("standalone-server: could not resolve the standalone registry delegate", t); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /**
      * Best-effort removal of the orphaned infobases.yaml entry that {@code deleteServer} leaves behind
      * (EDT never removes it — a confirmed platform gap). Reflectively reaches the
      * {@code StandaloneServerInfobaseModuleFactoryDelegate} via the WST module-factory registry, removes
@@ -447,33 +657,7 @@ public final class StandaloneServerSupport
         }
         try
         {
-            Bundle wst = Platform.getBundle(WST_SERVER_CORE_BUNDLE_ID);
-            if (wst == null)
-            {
-                return RegistryCleanup.FAILED;
-            }
-            Class<?> serverPlugin = wst.loadClass(SERVER_PLUGIN_CLASS);
-            Object[] factories = (Object[])serverPlugin.getMethod("getModuleFactories").invoke(null); //$NON-NLS-1$
-            Object factory = null;
-            for (Object f : factories)
-            {
-                Object id = f.getClass().getMethod(METHOD_GET_ID).invoke(f);
-                if (MODULE_FACTORY_ID.equals(id))
-                {
-                    factory = f;
-                    break;
-                }
-            }
-            if (factory == null)
-            {
-                return RegistryCleanup.FAILED;
-            }
-            Method getDelegate = findMethod(factory.getClass(), "getDelegate", 1); //$NON-NLS-1$
-            if (getDelegate == null)
-            {
-                return RegistryCleanup.FAILED;
-            }
-            Object delegate = getDelegate.invoke(factory, monitor);
+            Object delegate = resolveStandaloneDelegate(monitor);
             if (delegate == null)
             {
                 return RegistryCleanup.FAILED;

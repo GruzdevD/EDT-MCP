@@ -54,6 +54,7 @@ public final class ToolAnnotationClassifier
         "delete_project", //$NON-NLS-1$
         "delete_launch_config", //$NON-NLS-1$
         "delete_infobase", //$NON-NLS-1$
+        "delete_project_application", //$NON-NLS-1$
         "cancel_job", //$NON-NLS-1$
         // merge_rules in mode 'write' REPLACES the rules file named by basedOn, and the decisions
         // that file held are gone with it - an overwrite, not an addition, which is the whole

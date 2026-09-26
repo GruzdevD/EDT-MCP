@@ -17,8 +17,8 @@ DEPRECATED alias of run_yaxunit_tests(debug=true) - prefer that instead; the imp
 | updateScope | — | string | Which projects to rebuild+update before the run: 'all' (configuration + dependent extensions, default), 'configuration', or 'extension:<ProjectName>' (comma-separate several). Within that scope only the projects whose sources changed are recomputed, so a freshly edited extension's .cfe is regenerated and loaded into the infobase before the run. Unknown extension names fail the call (the error lists the available names). Only applies when updateBeforeLaunch=true. |
 | externalInfobaseChanges | — | string | How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: 'override' (default) keeps the project configuration and overwrites the infobase, 'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update with an error. Omitted, the modal is still answered (with 'override'), so an unattended call never blocks on it. |
 | standaloneServerPortConflict | — | string | Answer to EDT's standalone-server port-conflict prompt: cancel (default) = fail and name the busy ports; reassign = let EDT move the server to free ports (rewrites its configuration). |
-| standaloneRestructure | — | string | For a standalone-server target ONLY. Set to 'external' to NOT end user sessions when the platform decides a monopolistic (structural) restructure is needed: the run aborts cleanly, the standalone server is stopped, the configuration is applied to the file infobase via an external 1cv8 DESIGNER update, the server is restarted, and the run is retried once. Default (absent/other) = the answerer terminates sessions. Opt-in. |
-| externalUpdate1cBinary | — | string | Absolute path to the 1C '1cv8' executable (ships DESIGNER) used by standaloneRestructure=external. Optional: falls back to the EDT_MCP_1CV8 environment variable, then a best-effort scan of common install directories. |
+| standaloneRestructure | — | string | For a standalone-server target ONLY. Set to 'external' to NOT end user sessions when the platform decides a monopolistic (structural) restructure is needed: the launch aborts cleanly, the standalone server is stopped, the configuration is applied to the file infobase via an external 1cv8 DESIGNER update, the server is restarted, and the launch is retried. Absent/other = current behaviour (the answerer terminates sessions). Requires externalUpdate1cBinary unless the EDT_MCP_1CV8 environment variable is set or 1cv8 is found on disk. |
+| externalUpdate1cBinary | — | string | Absolute path to the 1C '1cv8' executable (ships DESIGNER) used by standaloneRestructure=external. Optional then: falls back to the EDT_MCP_1CV8 environment variable, then a best-effort scan of common install directories. |
 
 ## Guide
 # debug_yaxunit_tests (deprecated)
@@ -42,6 +42,11 @@ The parameters match `run_yaxunit_tests(debug=true)`:
 - Filter with `extensions`, `modules`, `tests`, and `tags`. Each accepts an array or a comma-separated string. Pin `tests` to one `Module.Method` for a predictable debug cycle.
 - `timeout` is the start-call wait only, default and maximum 45 seconds. It does not limit the background job. A larger value is clamped.
 - `updateBeforeLaunch` defaults to `true` and performs the pre-launch recompute/update chain. `updateScope` narrows that chain; `externalInfobaseChanges` selects how its blocking external-change prompt is answered.
+- `standaloneRestructure="external"` (opt-in) and `externalUpdate1cBinary` forward to
+  `run_yaxunit_tests`, so a needed monopolistic restructure on a standalone-server target can be
+  done offline — stopping the server, applying `1cv8 DESIGNER /LoadConfigFromFiles /UpdateDBCfg` to
+  the file infobase, restarting, and retrying — instead of ending live user sessions. See the
+  `run_yaxunit_tests` / `update_database` guides. Default is OFF.
 
 The progress journal uses the same `resolve`, `prep:terminate`, `prep:check-changes`, `prep:recompute`, `prep:settle`, `prep:db-update`, and `spawn` phases as `run_yaxunit_tests`; `prep:recompute` appears only when the gate found something to recompute. A phase that stops advancing may be slow work or an EDT modal dialog; inspect EDT instead of waiting indefinitely.
 

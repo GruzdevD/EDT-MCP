@@ -12,9 +12,9 @@ Apply the current EDT configuration to an infobase. DESTRUCTIVE - restructures d
 | confirm | — | boolean | true = apply the update; default false = preview only (resolves the target and reports what would change WITHOUT mutating the infobase). |
 | externalInfobaseChanges | — | string | How to answer EDT's blocking 'Infobase configuration changes' modal when the infobase was changed outside EDT (Designer, ibcmd, a CLI pipeline) since the last EDT interaction: 'override' (default) keeps the project configuration and overwrites the infobase, 'import' pulls the external changes into the PROJECT sources, 'cancel' aborts the update with an error. Omitted, the modal is still answered (with 'override'), so an unattended call never blocks on it. |
 | standaloneServerPortConflict | — | string | Answer to EDT's standalone-server port-conflict prompt: cancel (default) = fail and name the busy ports; reassign = let EDT move the server to free ports (rewrites its configuration). |
-| standaloneRestructure | — | string | For a standalone-server target ONLY. Set to 'external' to NOT end user sessions when the platform decides a monopolistic (structural) restructure is needed: the update aborts cleanly, the standalone server is stopped, the configuration is applied to the file infobase via an external 1cv8 DESIGNER update, and the server is restarted. Default (absent/other) = the answerer terminates sessions. Opt-in. |
-| externalUpdate1cBinary | — | string | Absolute path to the 1C '1cv8' executable (ships DESIGNER) used by standaloneRestructure=external. Optional: falls back to the EDT_MCP_1CV8 environment variable, then a best-effort scan of common install directories. |
 | terminateRunningClients | — | boolean | Before applying, terminate any 1C client THIS EDT launched on the target infobase to free the exclusive lock (default true). false keeps a running client — the update then fails if that client holds the infobase exclusively. |
+| standaloneRestructure | — | string | For a standalone-server target ONLY. Set to 'external' to NOT end user sessions when the platform decides a monopolistic (structural) restructure is needed: the launch aborts cleanly, the standalone server is stopped, the configuration is applied to the file infobase via an external 1cv8 DESIGNER update, the server is restarted, and the launch is retried. Absent/other = current behaviour (the answerer terminates sessions). Requires externalUpdate1cBinary unless the EDT_MCP_1CV8 environment variable is set or 1cv8 is found on disk. |
+| externalUpdate1cBinary | — | string | Absolute path to the 1C '1cv8' executable (ships DESIGNER) used by standaloneRestructure=external. Optional then: falls back to the EDT_MCP_1CV8 environment variable, then a best-effort scan of common install directories. |
 
 ## Guide
 Applies the EDT configuration to an application's database (infobase) — the equivalent of "Update database configuration" in Designer. Supports a full reload or an incremental (changes-only) update.
@@ -71,6 +71,53 @@ Pass `terminateRunningClients=false` to keep the client running; then the old ma
 ## Database restructure (auto-confirmed)
 
 When the update changes the DB structure (new/changed objects), EDT pops a blocking **"Restructure data" / «Реорганизация информации»** confirmation dialog listing the structural changes. Because `confirm=true` has already approved this irreversible update, the tool **auto-presses that dialog's default "Accept" button** so the unattended call completes without a human click — otherwise the MCP call would hang on the modal. The EDT update API offers no per-call switch for this, so it is handled by intercepting the dialog only for the duration of this update; the auto-press is written to the EDT log. A structural restructure can include data-deleting changes (dropped attributes/objects) — that is part of applying the configuration you confirmed. Applies to both file infobases and standalone servers.
+
+## Standalone server: "exclusive access to the infobase" (auto-answered)
+
+On a standalone server the update path can hit the platform's exclusivity questions instead.
+When the server holds the base in a way that blocks a structural change, EDT asks
+**"Exclusive access to the infobase is not available"** / «Ошибка исключительной блокировки
+информационной базы» and offers **"Terminate sessions and retry"**; when it is to end those
+sessions itself, EDT follows with the warning
+**"Terminating sessions will cause an abnormal termination of user sessions! Proceed?"** /
+«Завершение сеансов приведет к аварийному завершению работы пользователей! Выполнить завершение
+сеансов?» whose **default answer is "Cancel"**. In interactive EDT a human answers both; in an
+unattended run nobody does, so `update_database` would fail with "Delegate provides no answer". The
+plugin registers the platform's `IInfobaseSynchonizationQuestionHandler` as an OSGi service and
+answers the exclusivity question with "Terminate sessions and retry" and the warning with
+"Terminate sessions and continue" (never the default "Cancel"): EDT then ends the sessions itself
+and completes the restructure — the same mechanism interactive EDT uses. No `ibcmd`/SSH or server
+administration is involved, so it works on macOS and Windows alike. Every other question is left
+untouched.
+
+Each question is recognized by its own distinguishing text: the exclusivity question by the
+`Ошибка исключительной блокировки информационной базы` marker (matched first), and the warning by
+its unique `Выполнить завершение сеансов?` suffix. The shared phrase `Завершение сеансов приведет`
+appears in both questions' messages and is deliberately NOT used as the warning marker, otherwise the
+exclusivity question would be mistaken for the warning and left without its terminate-and-retry
+answer.
+
+## Standalone server: NOT ending live sessions (opt-in `standaloneRestructure=external`)
+
+The auto-answer above is convenient but destructive on a live server: the answerer tidies up by
+ending REAL user sessions abruptly. When a structural restructure is genuinely needed on a
+standalone-server target (`ServerApplication.*`), you can opt IN to the clean offline alternative
+instead — pass `standaloneRestructure="external"` (plus `externalUpdate1cBinary` unless the
+`EDT_MCP_1CV8` env var is set or `1cv8` is found on disk):
+
+- The tool stops the standalone server cleanly, applies the configuration to the underlying
+  **file** infobase through an external `1cv8 DESIGNER /LoadConfigFromFiles <dir> /UpdateDBCfg`
+  (macOS has no `ibcmd`/`ring`, but the `1cv8` binary ships DESIGNER), restarts the server, and the
+  update/launch is reattempted once — an incremental no-op when the offline update already brought
+  the base current.
+- No `ibcmd`/SSH/admin tools and no ending of user sessions: the server is stopped cleanly, updated
+  offline, and restarted. The `1cv8` executable must already be installed and usable on the host.
+- **Default is OFF.** Absent/any other value keeps the current behaviour above (the answerer
+  terminates sessions). Opt-in is deliberate: a clean stop of a live production server is itself
+  disruptive and should only ever happen when the caller asks for it.
+
+Result payloads gain `standaloneRestructure: "external-applied"` and a message describing the
+offline update when this path ran.
 
 ## Examples
 
