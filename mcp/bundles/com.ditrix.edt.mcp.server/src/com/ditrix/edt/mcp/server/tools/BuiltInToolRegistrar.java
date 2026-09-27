@@ -22,6 +22,7 @@ import com.ditrix.edt.mcp.server.tools.impl.CreateInfobaseTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateProjectApplicationTool;
 import com.ditrix.edt.mcp.server.tools.impl.SetInfobaseCredentialsTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateLaunchConfigTool;
+import com.ditrix.edt.mcp.server.tools.impl.CreateSpecterLaunchConfigTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateMetadataTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateProjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.DebugStatusTool;
@@ -48,6 +49,7 @@ import com.ditrix.edt.mcp.server.tools.impl.GetEventLogTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetFormLayoutSnapshotTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetFormScreenshotTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetJobStatusTool;
+import com.ditrix.edt.mcp.server.tools.impl.GetLaunchStateTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetMarkersTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetMcpHistoryTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetMetadataDetailsTool;
@@ -214,12 +216,14 @@ public final class BuiltInToolRegistrar
         catalogue.add(new ListConfigurationsTool());
         catalogue.add(new CreateLaunchConfigTool());
         catalogue.add(new DeleteLaunchConfigTool());
+        catalogue.add(new CreateSpecterLaunchConfigTool());
         catalogue.add(new RunYaxunitTestsTool());
         catalogue.add(new ListYaxunitTestsTool());
         catalogue.add(new AskWorkmateTool());
         catalogue.add(new GetJobStatusTool());
         catalogue.add(new CancelJobTool());
         catalogue.add(new TerminateLaunchTool());
+        catalogue.add(new GetLaunchStateTool());
 
         // Debug inspection tools (breakpoints + suspended state)
         catalogue.add(new SetBreakpointTool());

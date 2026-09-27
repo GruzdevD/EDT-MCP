@@ -70,7 +70,10 @@ public final class LaunchConfigUtils
 
     /** All debug-launch config types understood by this plugin. */
     public static final List<String> ALL_DEBUG_CONFIG_TYPE_IDS = Collections.unmodifiableList(
-        Arrays.asList(LAUNCH_CONFIG_TYPE_ID, TYPE_REMOTE_RUNTIME, TYPE_LOCAL_RUNTIME));
+        Arrays.asList(LAUNCH_CONFIG_TYPE_ID, TYPE_REMOTE_RUNTIME, TYPE_LOCAL_RUNTIME,
+            // Specter UI-testing launcher type (plugin ru.ozon.uitp.e2e). Present only when
+            // the Specter plugin is installed; a lookup for an absent type simply misses.
+            "ru.ozon.uitp.e2e.launcher.specter")); //$NON-NLS-1$
 
     /** Launch configuration attribute: target project name. */
     public static final String ATTR_PROJECT_NAME = "com._1c.g5.v8.dt.debug.core.ATTR_PROJECT_NAME"; //$NON-NLS-1$
