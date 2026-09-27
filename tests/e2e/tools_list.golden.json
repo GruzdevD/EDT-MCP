@@ -965,6 +965,61 @@
   },
   {
     "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Create a Specter UI-testing launch configuration that references a base EDT runtime-client configuration. Parameters and examples: get_tool_guide('create_specter_launch_config').",
+    "inputSchema": {
+      "properties": {
+        "baseLaunchConfig": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "testingPort": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "baseLaunchConfig"
+      ],
+      "type": "object"
+    },
+    "name": "create_specter_launch_config",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "baseLaunchConfig": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "testingPort": {
+          "type": "integer"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
       "destructiveHint": true,
       "openWorldHint": false,
       "readOnlyHint": false
@@ -2240,6 +2295,68 @@
     },
     "name": "get_job_status",
     "outputSchema": null
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Full visibility into launch processes (the State view over MCP): every EDT launch (live and recently terminated) with its OS processes, console output tail and exit codes, plus all running 1C executables (1cv8/1cv8c/ibsrv/...) with pid and start time, and any modal dialogs waiting for a button. Use this when a launch or a DB update appears hung. Full parameters and examples: call get_tool_guide('get_launch_state').",
+    "inputSchema": {
+      "properties": {
+        "includeTerminated": {
+          "type": "boolean"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "tailLines": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_launch_state",
+    "outputSchema": {
+      "properties": {
+        "diagnostics": {
+          "type": "object"
+        },
+        "launchCount": {
+          "type": "integer"
+        },
+        "launches": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "modalWindows": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "osProcessCount": {
+          "type": "integer"
+        },
+        "osProcesses": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
   },
   {
     "annotations": {
