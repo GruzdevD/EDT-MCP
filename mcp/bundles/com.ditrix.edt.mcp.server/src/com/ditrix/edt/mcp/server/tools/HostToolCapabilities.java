@@ -126,6 +126,31 @@ public final class HostToolCapabilities
         define("get_translation_project_info", Capability.HEADLESS, "Core/file service path; platform readiness and ordinary tool preconditions still apply");
         define("sort_metadata", Capability.HEADLESS, "EDT 2026.2.2 real headless probe returned content on the caller thread; stdio_headless exercises this path");
         define("edt_dialog", Capability.WINDOWED_ONLY, "Reads and presses SWT shells of the workbench display");
+
+        // Fork tool family (GruzdevD releases): infobase/application management, self-update,
+        // launch-state view, Specter launch configs, and Vanessa orchestration.
+        define("create_project_application", Capability.HEADLESS, "Core/file service path; platform readiness and ordinary tool preconditions still apply");
+        define("delete_project_application", Capability.HEADLESS, "Core/file service path; platform readiness and ordinary tool preconditions still apply");
+        define("list_infobases", Capability.HEADLESS, "Core/file service path; platform readiness and ordinary tool preconditions still apply");
+        define("list_yaxunit_tests", Capability.HEADLESS, "Core/file service path; platform readiness and ordinary tool preconditions still apply");
+        define("create_specter_launch_config", Capability.HEADLESS, "Core/file service path; creates a launch configuration; platform readiness and ordinary tool preconditions still apply");
+        define("get_launch_state", Capability.HEADLESS_DEGRADED, "Launch and OS-process state reads run on the debug platform; the modal-window probe requires a live client process and remains unmeasured on a headless host");
+        define("plugin_check_for_update", Capability.HEADLESS_DEGRADED, "Provisioning/p2 self-update preflight; applying an update restarts the platform and remains unmeasured on a headless host");
+        define("plugin_update", Capability.HEADLESS_DEGRADED, "Provisioning/p2 self-update; the platform restart path is unmeasured on a headless host");
+        define("remove_standalone_server", Capability.HEADLESS_DEGRADED, "Runs EDT's application cleanup like standalone_server, whose server behaviour delegate lives in a UI bundle; unmeasured on a headless host");
+        define("set_project_checks", Capability.HEADLESS, "Core/file service path; .cset and preference writes verified on disk");
+        define("vanessa_doctor", Capability.HEADLESS_DEGRADED, "Vanessa automation orchestration; launch/delegate behaviour unmeasured on a headless host");
+        define("vanessa_get_artifacts", Capability.HEADLESS, "Pure local artifact lookup of the Vanessa results directory; ordinary preconditions still apply");
+        define("vanessa_get_execution_status", Capability.HEADLESS_DEGRADED, "Vanessa automation orchestration; launch/delegate behaviour unmeasured on a headless host");
+        define("vanessa_get_feature", Capability.HEADLESS, "Pure local feature-file read; ordinary preconditions still apply");
+        define("vanessa_get_log", Capability.HEADLESS, "Pure local log read; ordinary preconditions still apply");
+        define("vanessa_get_test_report", Capability.HEADLESS, "Pure local report read; ordinary preconditions still apply");
+        define("vanessa_list_features", Capability.HEADLESS, "Pure local feature listing; ordinary preconditions still apply");
+        define("vanessa_list_launches", Capability.HEADLESS, "Core/file service path; ordinary preconditions still apply");
+        define("vanessa_open_allure_report", Capability.WINDOWED_ONLY, "Opens the Allure report in a workbench browser");
+        define("vanessa_run_by_tags", Capability.HEADLESS_DEGRADED, "Vanessa automation launch path exists; delegate/dialog behaviour unmeasured on a headless host");
+        define("vanessa_run_feature", Capability.HEADLESS_DEGRADED, "Vanessa automation launch path exists; delegate/dialog behaviour unmeasured on a headless host");
+        define("vanessa_setup", Capability.HEADLESS_DEGRADED, "Vanessa automation setup path exists; delegate/dialog behaviour unmeasured on a headless host");
     }
 
     private HostToolCapabilities() { }
