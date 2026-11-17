@@ -34,7 +34,7 @@ public final class VanessaFeatureScanner
     }
 
     /** Recursively finds {@code *.feature} files under {@code root}, sorted. */
-    static List<Path> findFeatures(Path root) throws IOException
+    public static List<Path> findFeatures(Path root) throws IOException
     {
         List<Path> out = new ArrayList<>();
         if (root == null || !Files.isDirectory(root))
@@ -60,7 +60,7 @@ public final class VanessaFeatureScanner
      * @return {@code {feature, tags[]}}
      * @throws IOException if the file cannot be read
      */
-    static Map<String, Object> header(Path path) throws IOException
+    public static Map<String, Object> header(Path path) throws IOException
     {
         Map<String, Object> out = new LinkedHashMap<>();
         List<String> tags = new ArrayList<>();
