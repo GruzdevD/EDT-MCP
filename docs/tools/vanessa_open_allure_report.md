@@ -10,7 +10,7 @@ Generate and open the Allure report of a Vanessa Automation BDD run. Address the
 | resultsDir | — | string | Override the raw Allure results dir (default: the out dir's allure subdir, or the Preferences setting). |
 | reportDir | — | string | Override the dir the generated report is placed in (default: sibling of the results dir, or the Preferences setting). |
 | detached | — | boolean | Open in the OS browser instead of the in-EDT view. Default false. |
-| ALLURE_BIN | — | string | Override the allure commandline path (otherwise env.sh ALLURE_BIN, ~/.1c-tools/allure, PATH). |
+| allureBin | — | string | Override the allure commandline path (otherwise env.sh ALLURE_BIN, ~/.1c-tools/allure, PATH). |
 | generate | — | boolean | Generate the report before opening. Default true; false expects an existing allure-report dir. |
 
 ## Guide
