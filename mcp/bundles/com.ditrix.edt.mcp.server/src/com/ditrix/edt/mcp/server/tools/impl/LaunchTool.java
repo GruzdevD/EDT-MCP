@@ -2826,7 +2826,6 @@ public class LaunchTool implements IMcpTool
                 return launchError;
             }
             return null;
-            return null;
         }
         catch (CoreException e)
         {

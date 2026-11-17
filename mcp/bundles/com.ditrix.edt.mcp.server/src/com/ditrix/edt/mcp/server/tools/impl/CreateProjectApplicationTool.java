@@ -350,8 +350,9 @@ public class CreateProjectApplicationTool implements IMcpTool
         if (user != null || password != null || access != null)
         {
             InfobaseAccess accessKind = InfobaseAccessSupport.parseAccess(access);
-            String storeError =
+            InfobaseAccessSupport.StoreResult storeResult =
                 InfobaseAccessSupport.storeCredentials(base, user, password, accessKind);
+            String storeError = storeResult == null ? null : storeResult.error();
             credentials = new CredentialRecord(storeError == null,
                 user == null ? "" : user, accessKind.getName(), //$NON-NLS-1$
                 password != null && !password.isEmpty());

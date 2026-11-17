@@ -75,6 +75,7 @@ import com.ditrix.edt.mcp.server.utils.StandaloneServerStateRecovery;
 import com.ditrix.edt.mcp.server.utils.YaxunitJobCancellation;
 import com.ditrix.edt.mcp.server.utils.YaxunitReportUtils;
 import com.e1c.g5.dt.applications.ApplicationException;
+import com.e1c.g5.dt.applications.IApplication;
 import com.e1c.g5.dt.applications.IApplicationManager;
 
 /**
