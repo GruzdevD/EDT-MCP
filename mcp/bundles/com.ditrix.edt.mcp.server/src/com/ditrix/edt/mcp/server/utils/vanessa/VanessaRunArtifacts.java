@@ -81,7 +81,7 @@ public final class VanessaRunArtifacts
      */
     public static Result generate(VanessaProjectConfig config, String featureTarget) throws IOException
     {
-        public return generate(config, featureTarget, GenerateOptions.EMPTY);
+        return generate(config, featureTarget, GenerateOptions.EMPTY);
     }
 
     /**

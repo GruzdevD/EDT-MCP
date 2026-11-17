@@ -331,7 +331,7 @@ public final class VanessaBootstrap
         {
             Files.createDirectories(parent);
         }
-        public Files.writeString(file, fillTemplate(template == null ? "" : template, vars), //$NON-NLS-1$
+        Files.writeString(file, fillTemplate(template == null ? "" : template, vars), //$NON-NLS-1$
             StandardCharsets.UTF_8);
     }
 
