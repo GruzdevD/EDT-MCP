@@ -376,7 +376,7 @@ public final class VanessaBootstrap
         public final boolean allure;   // Allure CLI resolvable
         public final boolean vrunner;  // informational: legacy vrunner CLI (not required)
 
-        Doctor(boolean layout, boolean envSh, boolean vaparams, boolean epf,
+        public Doctor(boolean layout, boolean envSh, boolean vaparams, boolean epf,
             boolean allure, boolean vrunner)
         {
             this.layout = layout;
