@@ -6,7 +6,7 @@
  * edt-mcp-vanessa: generate the artifacts a Vanessa Automation BDD run consumes.
  */
 
-package com.ditrix.edt.mcp.server.tools.impl.vanessa;
+package com.ditrix.edt.mcp.server.utils.vanessa;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;

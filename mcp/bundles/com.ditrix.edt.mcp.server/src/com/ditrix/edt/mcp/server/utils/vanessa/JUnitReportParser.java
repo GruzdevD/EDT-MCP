@@ -6,7 +6,7 @@
  * edt-mcp-vanessa: JUnit XML report parsing for Vanessa Automation BDD runs.
  */
 
-package com.ditrix.edt.mcp.server.tools.impl.vanessa;
+package com.ditrix.edt.mcp.server.utils.vanessa;
 
 import java.io.File;
 import java.util.ArrayList;

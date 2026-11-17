@@ -7,6 +7,7 @@
 package com.ditrix.edt.mcp.server.tools.impl;
 
 import java.util.Map;
+import java.util.Locale;
 
 import org.eclipse.core.resources.IProject;
 
@@ -179,7 +180,7 @@ public class SetProjectChecksTool implements IMcpTool
         {
             return null;
         }
-        value = value.trim().toLowerCase();
+        value = value.trim().toLowerCase(Locale.ROOT);
         if ("true".equals(value) || "1".equals(value) || "yes".equals(value)) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         {
             return Boolean.TRUE;

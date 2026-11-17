@@ -23,3 +23,8 @@ private repository stays private.
 - Uses a fresh clone of the configured repository under `~/.1c-tools`, resolving git credentials
   (e.g. from the local git config) the same way the plugin's other git operations do.
 - Runs in the background; poll `get_job_status` for the result.
+
+## Parameters
+
+- `repositoryUrl` — Git remote to fetch the artifact branch from (defaults to the project repo).
+- `branch` — branch holding the built plugin jar (default `update-site`).

@@ -8,6 +8,7 @@
 
 package com.ditrix.edt.mcp.server.tools.impl.selfupdate;
 
+import com.ditrix.edt.mcp.server.utils.PluginSelfUpdate;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Map;

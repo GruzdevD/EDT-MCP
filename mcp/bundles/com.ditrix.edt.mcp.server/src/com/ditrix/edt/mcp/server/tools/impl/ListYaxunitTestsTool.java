@@ -7,6 +7,7 @@
 package com.ditrix.edt.mcp.server.tools.impl;
 
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -111,7 +112,7 @@ public class ListYaxunitTestsTool implements IMcpTool
         String projectName = JsonUtils.extractStringArgument(params, McpKeys.PROJECT_NAME);
         if (projectName != null && !projectName.isEmpty())
         {
-            return "yaxunit-tests-" + projectName.toLowerCase() + ".json"; //$NON-NLS-1$ //$NON-NLS-2$
+            return "yaxunit-tests-" + projectName.toLowerCase(Locale.ROOT) + ".json"; //$NON-NLS-1$ //$NON-NLS-2$
         }
         return "yaxunit-tests.json"; //$NON-NLS-1$
     }

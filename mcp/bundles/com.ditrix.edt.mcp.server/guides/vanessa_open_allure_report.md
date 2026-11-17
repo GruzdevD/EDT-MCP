@@ -24,3 +24,13 @@ opens it.
 - Needs the `allure` commandline: the built-in rule checks for it under `~/.1c-tools/allure` (see
   `vanessa_doctor`). Point a custom binary via `allureBin`.
 - Runs in the background; poll `get_job_status` for the result.
+
+## Parameters
+
+- `launchId` — address the run by its launch id (mutually exclusive with `outDir`).
+- `resultsDir` — override the raw Allure results dir (default: the out dir's `allure` subdir,
+  or the Preferences setting).
+- `reportDir` — override the dir the generated report is placed in (default: sibling of the
+  results dir, or the Preferences setting).
+- `generate` — generate the report before opening (default `true`; `false` expects an
+  existing `allure-report` dir).

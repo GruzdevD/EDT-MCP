@@ -6,7 +6,7 @@
  * edt-mcp-vanessa: turnkey creation of the VA_Runner external-object project.
  */
 
-package com.ditrix.edt.mcp.server.tools.impl.vanessa;
+package com.ditrix.edt.mcp.server.utils.vanessa;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;

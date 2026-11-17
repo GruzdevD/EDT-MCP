@@ -6,6 +6,7 @@
 
 package com.ditrix.edt.mcp.server.tools.impl.selfupdate;
 
+import com.ditrix.edt.mcp.server.utils.PluginSelfUpdate;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;

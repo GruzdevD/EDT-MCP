@@ -45,7 +45,7 @@ import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.McpServer;
 import com.ditrix.edt.mcp.server.UpdateChecker;
 import com.ditrix.edt.mcp.server.protocol.McpConstants;
-import com.ditrix.edt.mcp.server.tools.impl.vanessa.VaRunnerProjectFactory;
+import com.ditrix.edt.mcp.server.utils.vanessa.VaRunnerProjectFactory;
 import com.ditrix.edt.mcp.server.transport.HttpTransport;
 import com.ditrix.edt.mcp.server.transport.StdioPluginSupport;
 import com.ditrix.edt.mcp.server.transport.TransportStatus;

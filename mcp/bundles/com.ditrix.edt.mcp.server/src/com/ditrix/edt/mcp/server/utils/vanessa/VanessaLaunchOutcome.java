@@ -6,11 +6,11 @@
  * edt-mcp-vanessa: shared result of a Vanessa Automation BDD launch.
  */
 
-package com.ditrix.edt.mcp.server.tools.impl.vanessa;
+package com.ditrix.edt.mcp.server.utils.vanessa;
 
 /**
  * What a Vanessa Automation launch attempt produced, once the shared launch
- * path ({@link VanessaRunFeatureTool#launch}) has generated the run artifacts,
+ * path ({@link com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaRunFeatureTool#launch}) has generated the run artifacts,
  * launched VA_Runner on the EDT launch configuration and registered a
  * {@link VanessaLaunchRunner.RunHandle}. Both {@code vanessa_run_feature} and
  * {@code vanessa_run_by_tags} build their responses from this so the launch

@@ -8,11 +8,13 @@
 
 package com.ditrix.edt.mcp.server.tools.impl.vanessa;
 
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaLaunchRunner;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -145,8 +147,8 @@ public class VanessaGetArtifactsTool implements IMcpTool
     /** Coarse classification of a run artifact by its path. */
     static String kind(Path p)
     {
-        String lower = p.toString().toLowerCase();
-        String file = p.getFileName().toString().toLowerCase();
+        String lower = p.toString().toLowerCase(Locale.ROOT);
+        String file = p.getFileName().toString().toLowerCase(Locale.ROOT);
         if (lower.contains("allure")) //$NON-NLS-1$
         {
             return "allure"; //$NON-NLS-1$

@@ -8,13 +8,15 @@
 
 package com.ditrix.edt.mcp.server.tools.impl.vanessa;
 
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaLaunchRunner;
 import java.util.Map;
+import java.util.Locale;
 
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
-import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaLaunchRunner.RunHandle;
-import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaLaunchRunner.State;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaLaunchRunner.RunHandle;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaLaunchRunner.State;
 
 /**
  * Polls the execution status of a Vanessa BDD run previously started by
@@ -93,7 +95,7 @@ public class VanessaGetExecutionStatusTool implements IMcpTool
             .put("launchId", id) //$NON-NLS-1$
             .put("project", handle.project) //$NON-NLS-1$
             .put("feature", handle.feature) //$NON-NLS-1$
-            .put("status", state.name().toLowerCase()); //$NON-NLS-1$
+            .put("status", state.name().toLowerCase(Locale.ROOT)); //$NON-NLS-1$
         if (state != State.RUNNING)
         {
             result.put("junitReportPath", handle.junitReportPath); //$NON-NLS-1$

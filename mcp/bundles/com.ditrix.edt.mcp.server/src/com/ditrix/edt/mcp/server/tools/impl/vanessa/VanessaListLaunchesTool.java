@@ -9,6 +9,7 @@
 package com.ditrix.edt.mcp.server.tools.impl.vanessa;
 
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.List;
 import java.util.Map;
 
@@ -113,7 +114,7 @@ public class VanessaListLaunchesTool implements IMcpTool
                 if (projectFilter != null && (project == null || !project.contains(projectFilter)))
                 {
                     // Match on name too, so a filter like "vanessa" still helps.
-                    if (name == null || !name.toLowerCase().contains(projectFilter.toLowerCase()))
+                    if (name == null || !name.toLowerCase(Locale.ROOT).contains(projectFilter.toLowerCase(Locale.ROOT)))
                     {
                         continue;
                     }
@@ -143,7 +144,7 @@ public class VanessaListLaunchesTool implements IMcpTool
         {
             return false;
         }
-        String lower = name.toLowerCase();
+        String lower = name.toLowerCase(Locale.ROOT);
         return lower.contains("vanessa") || lower.contains("bdd") || lower.contains("vrunner"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 }

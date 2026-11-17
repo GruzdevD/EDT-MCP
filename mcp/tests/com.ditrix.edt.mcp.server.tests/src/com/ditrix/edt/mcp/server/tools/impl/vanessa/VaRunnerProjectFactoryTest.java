@@ -6,6 +6,8 @@
 
 package com.ditrix.edt.mcp.server.tools.impl.vanessa;
 
+import com.ditrix.edt.mcp.server.utils.vanessa.VaRunnerProjectFactory;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaBootstrap;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 

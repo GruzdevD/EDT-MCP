@@ -8,6 +8,7 @@
 
 package com.ditrix.edt.mcp.server.tools.impl.vanessa;
 
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaFeatureScanner;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;

@@ -6,13 +6,14 @@
  * edt-mcp-vanessa: locate and lightly parse Vanessa Automation gherkin features.
  */
 
-package com.ditrix.edt.mcp.server.tools.impl.vanessa;
+package com.ditrix.edt.mcp.server.utils.vanessa;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,7 +44,7 @@ final class VanessaFeatureScanner
         try (Stream<Path> s = Files.walk(root))
         {
             s.filter(Files::isRegularFile)
-                .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".feature")) //$NON-NLS-1$
+                .filter(p -> p.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".feature")) //$NON-NLS-1$
                 .sorted()
                 .forEach(out::add);
         }

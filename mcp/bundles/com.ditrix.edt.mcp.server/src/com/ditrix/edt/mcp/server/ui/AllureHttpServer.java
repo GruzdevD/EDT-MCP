@@ -14,6 +14,7 @@ import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import com.ditrix.edt.mcp.server.Activator;
@@ -139,7 +140,7 @@ public final class AllureHttpServer
 
     private static String contentType(Path file)
     {
-        String n = file.getFileName().toString().toLowerCase();
+        String n = file.getFileName().toString().toLowerCase(Locale.ROOT);
         int dot = n.lastIndexOf('.'); //$NON-NLS-1$
         String ext = dot >= 0 ? n.substring(dot + 1) : ""; //$NON-NLS-1$
         String ct = TYPES.get(ext);

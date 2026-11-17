@@ -8,6 +8,10 @@
 
 package com.ditrix.edt.mcp.server.tools.impl.vanessa;
 
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaBootstrap;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaLaunchOutcome;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaProjectConfig;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaRunArtifacts;
 import java.util.Map;
 
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;

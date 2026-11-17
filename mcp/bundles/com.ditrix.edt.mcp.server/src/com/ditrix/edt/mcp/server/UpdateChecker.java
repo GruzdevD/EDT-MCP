@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.ditrix.edt.mcp.server.preferences.PreferenceConstants;
 import com.ditrix.edt.mcp.server.protocol.McpConstants;
-import com.ditrix.edt.mcp.server.tools.impl.selfupdate.PluginSelfUpdate;
+import com.ditrix.edt.mcp.server.utils.PluginSelfUpdate;
 
 /**
  * Checks whether a newer build of the EDT MCP Server plugin is published on its

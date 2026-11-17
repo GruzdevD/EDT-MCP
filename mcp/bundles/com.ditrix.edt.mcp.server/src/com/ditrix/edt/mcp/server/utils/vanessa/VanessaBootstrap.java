@@ -6,7 +6,7 @@
  * edt-mcp-vanessa: turnkey Vanessa Automation provisioning ("Package A").
  */
 
-package com.ditrix.edt.mcp.server.tools.impl.vanessa;
+package com.ditrix.edt.mcp.server.utils.vanessa;
 
 import java.io.IOException;
 import java.io.InputStream;

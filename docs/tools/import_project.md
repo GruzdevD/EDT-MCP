@@ -1,17 +1,49 @@
 # import_project
 
-Import an existing project directory into the EDT workspace (linked, not copied) and wait for it to become ready. Parameters and examples: get_tool_guide('import_project').
+Register an EXISTING EDT project directory (a git worktree, a second checkout, a copy) that already contains a .project file into the workspace as a LINKED project: files stay in place, nothing is copied or moved. Use it to give a parallel task its own copy of a configuration project (a slot): point path at the worktree directory, optionally rename it via projectName. The project is also EGit-shared (Team > Share Project equivalent) when a .git is found at or above the directory, so it resolves to its OWN repository/branch; result reports gitConnected, gitRepository, gitBranch and gitWarning. To start an EMPTY new project use create_project; to build a project from a configuration XML dump use import_configuration_from_xml. Parameters and examples: get_tool_guide('import_project').
 
 ## Parameters
 | Parameter | Required | Type | Description |
 | --- | --- | --- | --- |
-| path | yes | string | ABSOLUTE path to the directory that contains `.project` (used in place, linked — not copied). |
-| projectName | — | string | Optional new name for the project in the workspace. Needed when the `.project` name already exists in the workspace (e.g. the main checkout is imported). The rename is workspace-level; the on-disk `.project` file is NOT rewritten. |
+| path | yes | string | ABSOLUTE path to the directory that contains .project (used in place, linked - not copied). |
+| projectName | — | string | Optional new name for the project in the workspace. Needed when the .project name already exists in the workspace (e.g. the main checkout is imported). The rename is workspace-level; the on-disk .project file is NOT rewritten. |
 
 ## Guide
-Imports a project from disk into the current EDT workspace by linking its location (the project files stay where they are). After the import the tool waits for the project lifecycle to reach STARTED and, when the directory is a git repository, connects the project to the shared repository (EGit `ConnectProviderOperation`) so team operations (branch list, commit, push) work immediately.
+Registers an EXISTING EDT project directory - one that already contains a `.project` file (a git worktree, a second checkout, a copy) - into the workspace as a LINKED project: the files stay where they are, nothing is copied or moved, and the project opens and builds like any workspace project.
 
-Typical loop for a fresh slot from git: `git clone`/checkout the branch to a directory → `import_project({path: "<dir>", projectName: "afm.UMFO-<NNNNN>"})` → create the application/infobase. If the `.project` name collides with an already imported project, pass `projectName` — the workspace name changes, the disk copy is untouched.
+## When to use it (parallel task slots)
+
+To run 2-3+ tasks in parallel inside one configuration project, give each task its own git worktree and register it:
+
+1. `git worktree add ../afm-feature-branch <branch>` from the main checkout.
+2. Call `import_project` with `path` pointing at that worktree directory. If its `.project` name collides with the imported main checkout, pass a distinct `projectName` (e.g. `afm-slot2`). The tool also EGit-shares the project (the headless equivalent of Team > Share Project) when a `.git` is found at or above the directory - this makes the slot resolve to ITS OWN repository/branch instead of falling back to the main checkout's mapping. Without it, branch-infobase association machinery reads the main checkout's CURRENT branch and attaches the wrong infobase context.
+3. Work against the slot by its project name in the EDT tools. The slot needs its own infobase binding: `create_infobase` (register mode) + `set_branch_infobase` (attach), then `update_database` against the slot.
+4. When the task is done: `delete_project` (default `deleteContent=false` keeps the worktree on disk) and remove the worktree with git.
+
+## Parameter details
+
+- **path** (required): ABSOLUTE path to the directory that contains `.project`. The directory is used in place (linked, NOT copied). To start an EMPTY new project use `create_project`; to build a project from a configuration XML dump use `import_configuration_from_xml`.
+- **projectName** (optional): register the project under this workspace name instead of the name in the on-disk `.project`. Needed when that name already exists in the workspace (e.g. the main checkout is imported). The rename is workspace-level: the on-disk `.project` file is NOT rewritten.
 
 ## Result
-JSON with `success`, `action`, `project` (workspace name), `location` (absolute linked directory), `state` (`ready` when lifecycle STARTED was reached, `created` otherwise), `renamed`, and git-connection fields (`gitConnected`, `gitRepository`, `gitBranch`, `gitWarning` when the connect failed but the import succeeded).
+
+JSON with `action` (`imported` = registered and opened, `opened` = existed closed and was opened, `alreadyOpen` = nothing to do, `importing` = still running past the wait window), `project`, `location`, `state` (`ready` when the DT lifecycle STARTED was reached within the wait window, `created` if still indexing), `renamed`, and a `message`.
+
+Git-sharing fields (fail-open: a sharing problem never fails the import):
+
+- `gitConnected` - whether the project is EGit-shared after this call.
+- `gitRepository` - absolute path of the repository the project is shared with, when known.
+- `gitBranch` - current branch short name of the shared repository, when known.
+- `gitWarning` - present when EGit sharing was skipped or failed. The common case: no `.git` anywhere above the project (a plain copy of the project subdirectory without the repository) - the slot will fall back to the main checkout's git context for infobase associations. Copy the whole clone (including `.git`) or use a git worktree as the slot source.
+
+## Gotchas
+
+- Name conflict: if a project with the effective name already exists at a DIFFERENT location, the tool refuses; pass a different `projectName` or remove the old project first (`delete_project`).
+- If the same project already exists at the SAME location, the call is idempotent (it just opens/reports it).
+- A directory without `.project` at its root is rejected with a hint to `create_project` / `import_configuration_from_xml`.
+- First build of a freshly imported configuration can take a while: `state='created'` means the project is registered but still indexing; re-check with `list_projects`.
+- The import runs as a workspace Job; a call that exceeds the 120-second wait window returns `action='importing'` rather than an error - do not re-issue the call, check `list_projects` instead.
+- Terminate any running launch against the main project before switching work onto a slot, so the two do not hold the same resources.
+
+---
+*Generated from the live MCP server (`get_tool_guide`) by `docs/generate_tool_docs.py`. Do not edit this file. Edit the tool's description/schema in its Java source and its guide body in `mcp/bundles/com.ditrix.edt.mcp.server/guides/<tool>.md`.*

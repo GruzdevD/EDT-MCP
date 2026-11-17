@@ -6,7 +6,7 @@
  * edt-mcp-vanessa: locate raw Allure results and generate a static report.
  */
 
-package com.ditrix.edt.mcp.server.tools.impl.vanessa;
+package com.ditrix.edt.mcp.server.utils.vanessa;
 
 import java.io.File;
 import java.io.IOException;

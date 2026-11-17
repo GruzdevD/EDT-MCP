@@ -6,7 +6,7 @@
  * edt-mcp-vanessa: git-based plugin self-update support.
  */
 
-package com.ditrix.edt.mcp.server.tools.impl.selfupdate;
+package com.ditrix.edt.mcp.server.utils;
 
 import java.io.IOException;
 import java.net.URL;

@@ -1,6 +1,6 @@
 # create_infobase
 
-Create a file infobase or register an existing file/cluster infobase and bind it to an EDT project. EDT may open a Designer connection during binding when a runtime is installed. Passing user/password/access STORES those credentials in EDT's infobase settings - the secret PERSISTS beyond this call and is reused by later connections. Parameters and examples: get_tool_guide('create_infobase').
+Create a file infobase or register an existing file/cluster infobase and bind it to an EDT project. IDEMPOTENT: when an infobase is already registered with EDT at infobaseFile, nothing is created - action='alreadyExists' and the existing reference is (re)associated with the project. EDT may open a Designer connection during binding when a runtime is installed. Passing user/password/access STORES those credentials in EDT's infobase settings - the secret PERSISTS beyond this call and is reused by later connections. Parameters and examples: get_tool_guide('create_infobase').
 
 ## Parameters
 | Parameter | Required | Type | Description |
@@ -35,6 +35,16 @@ create_infobase projectName="MyProject" mode="register" infobaseServer="localhos
 Server results carry `infobaseServer` and `infobaseRef` instead of `infobaseFile`, including when binding read-back reports a refusal. Use a comma-separated list of `host[:port]` or `[IPv6][:port]` entries, with ports 1–65535 and no whitespace. `infobaseRef` must be a plain cluster name without slashes. Do not pass a URL, connection string or credentials in either address field. Optional `user`/`password`/`access` use the same EDT credential storage and verification as file registration; passwords are not echoed. The tool checks the entire EDT launcher list (including groups) and refuses an already registered address before adding a record or writing credentials. Use the existing application from `get_applications`, or bind the existing launcher entry in EDT. If association fails or read-back establishes NOT_BOUND, the tool rolls back its new association, launcher entry and requested credentials. The error reports each rollback outcome; it never deletes the database. An UNVERIFIED read-back retains the registration and asks for a later `get_applications` check.
 
 The project branch/context is rechecked before association and after application read-back. A context change compensates this call's association, launcher entry and credentials in both `create` and `register` modes. Database files are kept, including files just created by this call; inspect them before retrying `mode=create`. When `setDefault=true`, the prior explicit project default is captured before creation. Restoration re-resolves that application before and after the native write; an absent, failed or timed-out lookup is UNVERIFIED and retains the owned handles. Rollback restores it before removing the new application, provided the current stored default still belongs to this call; a newer choice is preserved. `defaultRollback` reports RESTORED, PRESERVED_OTHER, PENDING or UNVERIFIED. PENDING sets defaultWriteInProgress=true: an admitted native default write may still finish after the response. Wait for the restoration operation to finish (or restart EDT if it is stuck) before inspecting/changing the default or retrying cleanup; all owned handles remain retained. If restoration cannot be verified, `rollbackCompleted=false` and the owned application/association/registration are retained for inspection instead of leaving a default pointing at a removed application.
+
+## Idempotency (`action='alreadyExists'`)
+
+Before creating or registering anything, the tool checks whether an infobase is **already registered with EDT** at the requested `infobaseFile` (the global infobase panel is matched by the file path). If it is, nothing is created, nothing fails, and no duplicate appears:
+
+- `action` is **`alreadyExists`**; the message says nothing was created.
+- The EXISTING reference is (re)associated with the project (heals a partial previous run that created the database but never surfaced it as the project's application), then the same read-back (see "The three binding outcomes") reports `applications` / `applicationId` / `boundToProject`.
+- Requested `user`/`password`/`access` are stored against the existing reference; `setDefault` is applied to the application the read-back found.
+
+This makes environment-setup scripts safely re-runnable: re-issuing the same `create_infobase` call is a no-op (plus association/credentials), not an error and not a second database.
 
 ## Application kind: infobase vs standalone server
 
@@ -112,7 +122,7 @@ Credentials for a registered standalone server are stored against the **applicat
 
 ## Result
 
-JSON with `action` (`'created'` for `create`, `'registered'` for `register`), `project`, `infobaseFile`, `infobaseName`, a `message` (on the refusal below that text is in `error` instead), and — depending on what the read-back below established — `applications` (same shape as `get_applications`; omitted when no read produced a snapshot at all), `applicationId` (for chaining into `update_database`; present whenever the application was found and the platform gave it an id) and `boundToProject`.
+JSON with `action` (`'created'` for `create`, `'registered'` for `register`, `'alreadyExists'` for the idempotent hit — see above), `project`, `infobaseFile`, `infobaseName`, a `message` (on the refusal below that text is in `error` instead), and — depending on what the read-back below established — `applications` (same shape as `get_applications`; omitted when no read produced a snapshot at all), `applicationId` (for chaining into `update_database`; present whenever the application was found and the platform gave it an id) and `boundToProject`.
 
 ### The three binding outcomes (issue #412)
 

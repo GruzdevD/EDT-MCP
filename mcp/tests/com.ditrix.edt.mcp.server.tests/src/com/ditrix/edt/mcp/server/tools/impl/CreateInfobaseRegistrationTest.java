@@ -84,11 +84,21 @@ public class CreateInfobaseRegistrationTest
                         CreateInfobaseTool.CreateContext.of(state.project, state.manager, infobases, associations),
                         context, "project", new InfobaseTarget(file, null), "fresh", null, setDefault,
                         register, new CreateInfobaseTool.Credentials(null, null, null), () -> context)).getAsJsonObject();
-                    assertEquals(result.toString(), outcome == 0 || setDefault, result.get("success").getAsBoolean());
+                    // Fork contract: a duplicate registration is IDEMPOTENT (action=alreadyExists,
+                    // success=true, bindings preserved) rather than a refused write.
+                    boolean idempotentDuplicate = outcome == 2 && result.has("action")
+                        && "alreadyExists".equals(result.get("action").getAsString());
+                    assertEquals(result.toString(), outcome == 0 || setDefault || idempotentDuplicate,
+                        result.get("success").getAsBoolean());
                     assertEquals(outcome == 1 ? null : setDefault ? "fresh" : "prior", state.defaultId.get());
                     assertEquals("prior", state.launchId.get());
                     assertEquals(outcome == 1 ? 1 : 0, result.getAsJsonArray("unrestoredBindings").size());
-                    if (outcome == 2) { assertTrue(result.get("error").getAsString().contains("already registered")); }
+                    if (outcome == 2)
+                    {
+                        assertTrue(result.get("error") != null
+                            ? result.get("error").getAsString().contains("already registered")
+                            : result.get("message").getAsString().contains("already exists"));
+                    }
                 }
                 finally
                 {

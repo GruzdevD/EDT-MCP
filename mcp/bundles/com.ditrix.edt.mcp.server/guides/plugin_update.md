@@ -23,3 +23,8 @@ EDT restart.
 - Uses the same git credential resolution as `plugin_check_for_update`, so a private repository
   works unchanged.
 - Run `plugin_check_for_update` first to confirm an update is actually available.
+
+## Parameters
+
+- `repositoryUrl` — Git remote to fetch the artifact branch from (defaults to the project repo).
+- `branch` — branch holding the built plugin jar (default `update-site`).

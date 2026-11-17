@@ -8,6 +8,8 @@
 
 package com.ditrix.edt.mcp.server.tools.impl.vanessa;
 
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaBootstrap;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaProjectConfig;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;

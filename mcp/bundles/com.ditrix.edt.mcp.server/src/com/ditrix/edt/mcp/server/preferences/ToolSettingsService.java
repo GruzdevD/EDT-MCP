@@ -113,6 +113,32 @@ public final class ToolSettingsService // NOSONAR intentional singleton (Eclipse
 
     private static final Set<String> READ_ONLY_V24_ADDITIONS = Set.of("manage_profiling_results", "manage_tech_log"); //$NON-NLS-1$ //$NON-NLS-2$
 
+    /** v25: the fork's application-surface tools plus the selfupdate/import writers. */
+    private static final Set<String> READ_ONLY_V25_ADDITIONS = Set.of(
+        "create_project_application", //$NON-NLS-1$
+        "create_specter_launch_config", //$NON-NLS-1$
+        "delete_project_application", //$NON-NLS-1$
+        "get_launch_state", //$NON-NLS-1$
+        "import_project", //$NON-NLS-1$
+        "list_infobases", //$NON-NLS-1$
+        "list_yaxunit_tests", //$NON-NLS-1$
+        "plugin_check_for_update", //$NON-NLS-1$
+        "plugin_update", //$NON-NLS-1$
+        "remove_standalone_server", //$NON-NLS-1$
+        "set_project_checks", //$NON-NLS-1$
+        "vanessa_doctor", //$NON-NLS-1$
+        "vanessa_get_artifacts", //$NON-NLS-1$
+        "vanessa_get_execution_status", //$NON-NLS-1$
+        "vanessa_get_feature", //$NON-NLS-1$
+        "vanessa_get_log", //$NON-NLS-1$
+        "vanessa_get_test_report", //$NON-NLS-1$
+        "vanessa_list_features", //$NON-NLS-1$
+        "vanessa_list_launches", //$NON-NLS-1$
+        "vanessa_open_allure_report", //$NON-NLS-1$
+        "vanessa_run_by_tags", //$NON-NLS-1$
+        "vanessa_run_feature", //$NON-NLS-1$
+        "vanessa_setup"); //$NON-NLS-1$
+
     /** Actual disabled-name additions registered for each Analysis Only migration. */
     static final Map<Integer, Set<String>> ANALYSIS_ONLY_MIGRATION_ADDITIONS_BY_VERSION = Map.ofEntries(
         Map.entry(1, STORED_PROFILE_V1_ADDITIONS),
@@ -136,7 +162,8 @@ public final class ToolSettingsService // NOSONAR intentional singleton (Eclipse
         Map.entry(21, READ_ONLY_V21_ADDITIONS),
         Map.entry(22, READ_ONLY_V22_ADDITIONS),
         Map.entry(23, READ_ONLY_V23_ADDITIONS),
-        Map.entry(24, READ_ONLY_V24_ADDITIONS));
+        Map.entry(24, READ_ONLY_V24_ADDITIONS),
+        Map.entry(25, READ_ONLY_V25_ADDITIONS));
 
     /** Actual disabled-name additions registered for each Code Review migration. */
     static final Map<Integer, Set<String>> CODE_REVIEW_MIGRATION_ADDITIONS_BY_VERSION = Map.ofEntries(
@@ -160,7 +187,8 @@ public final class ToolSettingsService // NOSONAR intentional singleton (Eclipse
         Map.entry(21, READ_ONLY_V21_ADDITIONS),
         Map.entry(22, READ_ONLY_V22_ADDITIONS),
         Map.entry(23, READ_ONLY_V23_ADDITIONS),
-        Map.entry(24, READ_ONLY_V24_ADDITIONS));
+        Map.entry(24, READ_ONLY_V24_ADDITIONS),
+        Map.entry(25, READ_ONLY_V25_ADDITIONS));
 
     /*
      * Frozen history for v1-v12 and the one-shot v13 stamp only. Newer preset-owed steps use
@@ -578,6 +606,10 @@ public final class ToolSettingsService // NOSONAR intentional singleton (Eclipse
             if (storedVersion < 24)
             {
                 changed |= storedPreset(store).isReadOnly() && disabled.addAll(READ_ONLY_V24_ADDITIONS);
+            }
+            if (storedVersion < 25)
+            {
+                changed |= storedPreset(store).isReadOnly() && disabled.addAll(READ_ONLY_V25_ADDITIONS);
             }
             if (changed)
             {

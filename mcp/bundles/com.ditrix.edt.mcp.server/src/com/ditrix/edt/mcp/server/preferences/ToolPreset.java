@@ -66,7 +66,10 @@ public enum ToolPreset
             "resync_to_disk", //$NON-NLS-1$
             "manage_tech_log",
             "project_checks", //$NON-NLS-1$
-            "clean_project"); //$NON-NLS-1$
+            "clean_project", //$NON-NLS-1$
+            "import_project", //$NON-NLS-1$
+            "plugin_check_for_update", //$NON-NLS-1$
+            "plugin_update"); //$NON-NLS-1$
 
         private ReadOnlyPolicy()
         {

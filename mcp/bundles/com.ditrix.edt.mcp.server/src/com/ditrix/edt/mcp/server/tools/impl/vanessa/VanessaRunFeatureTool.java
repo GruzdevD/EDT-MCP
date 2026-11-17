@@ -8,6 +8,11 @@
 
 package com.ditrix.edt.mcp.server.tools.impl.vanessa;
 
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaBootstrap;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaLaunchOutcome;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaLaunchRunner;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaProjectConfig;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaRunArtifacts;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -20,7 +25,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.impl.LaunchTool;
-import com.ditrix.edt.mcp.server.tools.impl.vanessa.VanessaLaunchRunner.RunHandle;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaLaunchRunner.RunHandle;
 
 /**
  * Launches a Vanessa Automation BDD run on a project, mirroring the project's

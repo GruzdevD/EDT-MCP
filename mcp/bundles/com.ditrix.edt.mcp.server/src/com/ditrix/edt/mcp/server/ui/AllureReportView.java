@@ -32,7 +32,7 @@ import org.eclipse.ui.part.ViewPart;
 
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.preferences.PreferenceConstants;
-import com.ditrix.edt.mcp.server.tools.impl.vanessa.AllureReportService;
+import com.ditrix.edt.mcp.server.utils.vanessa.AllureReportService;
 
 /**
  * An EDT view that renders the generated Allure report through SWT {@link Browser},

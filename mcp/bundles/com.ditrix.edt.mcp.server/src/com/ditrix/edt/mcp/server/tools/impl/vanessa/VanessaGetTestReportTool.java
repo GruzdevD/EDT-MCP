@@ -8,7 +8,10 @@
 
 package com.ditrix.edt.mcp.server.tools.impl.vanessa;
 
+import com.ditrix.edt.mcp.server.utils.vanessa.JUnitReportParser;
+import com.ditrix.edt.mcp.server.utils.vanessa.VanessaLaunchRunner;
 import java.util.Map;
+import java.util.Locale;
 
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
@@ -121,7 +124,7 @@ public class VanessaGetTestReportTool implements IMcpTool
     {
         if (raw != null)
         {
-            String v = raw.trim().toLowerCase();
+            String v = raw.trim().toLowerCase(Locale.ROOT);
             if ("summary".equals(v)) //$NON-NLS-1$
             {
                 return JUnitReportParser.Detail.SUMMARY;
