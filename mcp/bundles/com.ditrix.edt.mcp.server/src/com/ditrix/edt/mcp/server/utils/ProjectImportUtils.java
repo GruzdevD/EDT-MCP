@@ -44,6 +44,29 @@ public final class ProjectImportUtils
     public static boolean importLinkedProject(IWorkspace workspace, String dir, IProgressMonitor monitor)
         throws CoreException
     {
+        return importLinkedProject(workspace, dir, null, monitor);
+    }
+
+    /**
+     * Same as {@link #importLinkedProject(IWorkspace, String, IProgressMonitor)}, but the project
+     * is registered in the workspace under {@code projectName} instead of the name found in the
+     * on-disk {@code .project}. The rename is workspace-level: the descriptor is loaded, its name
+     * replaced and the project created from it — the on-disk {@code .project} file is NOT
+     * rewritten. Needed when the on-disk name already exists in the workspace (e.g. a git
+     * worktree of the same configuration whose main checkout is imported).
+     *
+     * @param workspace the workspace to import into
+     * @param dir the absolute on-disk directory holding the project's {@code .project}
+     * @param projectName the workspace name for the project; {@code null}/blank = use the
+     *        {@code .project} name
+     * @param monitor a progress monitor ({@code null}-allowed)
+     * @return {@code true} when the project ended up present and open
+     * @throws CoreException if the descriptor cannot be loaded or the project cannot be created/opened
+     */
+    public static boolean importLinkedProject(IWorkspace workspace, String dir, String projectName,
+        IProgressMonitor monitor)
+        throws CoreException
+    {
         IPath projectDir = IPath.fromOSString(dir);
         IPath descPath = projectDir.append(IProjectDescription.DESCRIPTION_FILE_NAME);
         if (!descPath.toFile().isFile())
@@ -52,6 +75,10 @@ public final class ProjectImportUtils
         }
 
         IProjectDescription description = workspace.loadProjectDescription(descPath);
+        if (projectName != null && !projectName.isBlank() && !projectName.equals(description.getName()))
+        {
+            description.setName(projectName);
+        }
         IProject project = workspace.getRoot().getProject(description.getName());
         if (!project.exists())
         {

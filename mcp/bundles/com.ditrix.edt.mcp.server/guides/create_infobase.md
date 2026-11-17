@@ -7,6 +7,16 @@ Creates a new FILE infobase (1C:Enterprise database) OR registers an existing on
 
 FILE infobases only. SERVER and WEB infobases are out of scope for v1 and are rejected with a clear "not yet supported" error.
 
+## Idempotency (`action='alreadyExists'`)
+
+Before creating or registering anything, the tool checks whether an infobase is **already registered with EDT** at the requested `infobaseFile` (the global infobase panel is matched by the file path). If it is, nothing is created, nothing fails, and no duplicate appears:
+
+- `action` is **`alreadyExists`**; the message says nothing was created.
+- The EXISTING reference is (re)associated with the project (heals a partial previous run that created the database but never surfaced it as the project's application), then the same read-back (see "The three binding outcomes") reports `applications` / `applicationId` / `boundToProject`.
+- Requested `user`/`password`/`access` are stored against the existing reference; `setDefault` is applied to the application the read-back found.
+
+This makes environment-setup scripts safely re-runnable: re-issuing the same `create_infobase` call is a no-op (plus association/credentials), not an error and not a second database.
+
 ## Application kind: infobase vs standalone server
 
 `applicationKind` selects what is created:
@@ -80,7 +90,7 @@ Credentials for a registered standalone server are stored against the **applicat
 
 ## Result
 
-JSON with `action` (`'created'` for `create`, `'registered'` for `register`), `project`, `infobaseFile`, `infobaseName`, a `message` (on the refusal below that text is in `error` instead), and — depending on what the read-back below established — `applications` (same shape as `get_applications`; omitted when no read produced a snapshot at all), `applicationId` (for chaining into `update_database`; present whenever the application was found and the platform gave it an id) and `boundToProject`.
+JSON with `action` (`'created'` for `create`, `'registered'` for `register`, `'alreadyExists'` for the idempotent hit — see above), `project`, `infobaseFile`, `infobaseName`, a `message` (on the refusal below that text is in `error` instead), and — depending on what the read-back below established — `applications` (same shape as `get_applications`; omitted when no read produced a snapshot at all), `applicationId` (for chaining into `update_database`; present whenever the application was found and the platform gave it an id) and `boundToProject`.
 
 ### The three binding outcomes (issue #412)
 

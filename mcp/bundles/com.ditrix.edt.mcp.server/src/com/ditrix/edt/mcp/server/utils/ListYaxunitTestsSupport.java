@@ -56,9 +56,15 @@ public final class ListYaxunitTestsSupport
     static final String RU_ADD_TEST_SET =
         RU_ADD_TEST + "\\u043E\\u0432\\u044B\\u0439\\u041D\\u0430\\u0431\\u043E\\u0440"; //$NON-NLS-1$
 
-    /** Matches {@code ДобавитьТест("Имя")} and captures the test-name literal. */
+    /**
+     * Matches {@code ДобавитьТест("Имя")} and captures the test-name literal.
+     * <p>The closing parenthesis is deliberately NOT required: YAXUnit also accepts the
+     * two-argument form {@code ДобавитьТест("Имя", "Описание")}, and a module that
+     * registers every test this way must still be recognised as a suite - otherwise it
+     * silently disappears from the listing together with all its tests.</p>
+     */
     private static final Pattern TEST_NAME_PATTERN = Pattern.compile(
-        "(?i)" + RU_ADD_TEST + "\\s*\\(\\s*\"([^\"]+)\"\\s*\\)"); //$NON-NLS-1$ //$NON-NLS-2$
+        "(?i)" + RU_ADD_TEST + "\\s*\\(\\s*\"([^\"]+)\""); //$NON-NLS-1$
 
     /** Matches a {@code ДобавитьТестовыйНабор(...)} call - the suite registration marker. */
     private static final Pattern TEST_SET_PATTERN = Pattern.compile(

@@ -215,7 +215,7 @@ All tools are organized into 11 semantic groups:
 
 | Group | Description | Tools |
 |-------|-------------|-------|
-| **Core / Project** | Essential server, project, configuration, history, and XML export/import tools | `get_edt_version`, `get_server_status`, `get_tool_guide`, `list_toolsets`, `enable_toolset`, `list_projects`, `get_configuration_properties`, `clean_project`, `revalidate_objects`, `resync_to_disk`, `get_check_description`, `export_configuration_to_xml`, `import_configuration_from_xml`, `delete_project`, `create_project`, `get_event_log`, `get_mcp_history` |
+| **Core / Project** | Essential server, project, configuration, history, and XML export/import tools | `get_edt_version`, `get_server_status`, `get_tool_guide`, `list_toolsets`, `enable_toolset`, `list_projects`, `get_configuration_properties`, `clean_project`, `revalidate_objects`, `resync_to_disk`, `get_check_description`, `export_configuration_to_xml`, `import_configuration_from_xml`, `delete_project`, `create_project`, `import_project`, `get_event_log`, `get_mcp_history` |
 | **Errors & Problems** | Error reporting, validation, and workspace markers (bookmarks, tasks) | `get_problem_summary`, `get_project_errors`, `get_markers`, `apply_quick_fix`, `validate_xdto_package` |
 | **Code Intelligence** | Content assist, documentation, metadata and common-picture browsing, and references | `get_content_assist`, `get_platform_documentation`, `get_metadata_objects`, `get_metadata_details`, `list_subsystems`, `get_subsystem_content`, `find_references`, `list_common_pictures`, `export_common_picture` |
 | **Tags** | Metadata tag management | `get_tags`, `get_objects_by_tags` |

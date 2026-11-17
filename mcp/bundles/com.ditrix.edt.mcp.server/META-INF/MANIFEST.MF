@@ -15,6 +15,7 @@ Bundle-ClassPath: .,
  lib/snakeyaml-2.2.jar
 Require-Bundle: org.eclipse.core.runtime,
  org.eclipse.core.resources,
+ org.eclipse.team.core,
  org.eclipse.ui,
  org.eclipse.jface,
  org.eclipse.ui.ide,

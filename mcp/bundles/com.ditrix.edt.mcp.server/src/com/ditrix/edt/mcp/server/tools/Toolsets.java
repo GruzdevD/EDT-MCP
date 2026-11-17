@@ -180,6 +180,7 @@ public final class Toolsets
         assign(PROJECT,
             "clean_project", "revalidate_objects", "resync_to_disk", "update_database", "delete_project", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
             "export_configuration_to_xml", "import_configuration_from_xml", "build_external_objects", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "import_project", //$NON-NLS-1$
             "create_infobase", "delete_infobase", "set_infobase_credentials", "create_project", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "list_infobases", "create_project_application", "delete_project_application", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "remove_standalone_server", "set_project_checks", //$NON-NLS-1$ //$NON-NLS-2$

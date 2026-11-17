@@ -77,6 +77,23 @@ public class ListYaxunitTestsToolTest
             ListYaxunitTestsSupport.extractTestNames(src));
     }
 
+    /**
+     * A module may register every test in the two-argument form
+     * {@code ДобавитьТест("Имя", "Описание")}. Such a module is still a suite and must
+     * contribute its tests - otherwise it silently vanishes from the listing.
+     */
+    @Test
+    public void testExtractTestNamesAcceptsTwoArgumentRegistration()
+    {
+        String src = "\t\t.ДобавитьТестовыйНабор(\"Набор с описаниями\")\n"
+            + "\t\t\t.ДобавитьТест(\"Тест_Первый\", \"Первое описание\")\n"
+            + "\t\t\t.ДобавитьТест(\"Тест_Второй\",\n"
+            + "\t\t\t\t\"Описание на следующей строке\")\n";
+        assertTrue(ListYaxunitTestsSupport.isTestSuiteSource(src));
+        assertEquals(Arrays.asList("Тест_Первый", "Тест_Второй"),
+            ListYaxunitTestsSupport.extractTestNames(src));
+    }
+
     @Test
     public void testExtractTestNamesDeduplicates()
     {

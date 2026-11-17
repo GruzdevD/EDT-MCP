@@ -32,8 +32,12 @@ import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager;
 import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAssociationSettings;
 import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseReferences;
 import com._1c.g5.v8.dt.platform.services.core.operations.IInfobaseCreationOperation;
+import com._1c.g5.v8.dt.platform.services.model.FileConnectionString;
+import com._1c.g5.v8.dt.platform.services.model.Group;
+import com._1c.g5.v8.dt.platform.services.model.IConnectionString;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com._1c.g5.v8.dt.platform.services.model.ModelFactory;
+import com._1c.g5.v8.dt.platform.services.model.Section;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
@@ -117,6 +121,13 @@ public class CreateInfobaseTool implements IMcpTool
 
     /** {@code action} value (and message verb) for mode='register'. */
     private static final String ACTION_REGISTERED = "registered"; //$NON-NLS-1$
+
+    /**
+     * {@code action} value for the IDEMPOTENT hit: an infobase is already registered with EDT at
+     * the requested {@code infobaseFile}, so nothing was created - the existing reference is
+     * (re)associated with the project and reported as-is.
+     */
+    private static final String ACTION_EXISTS = "alreadyExists"; //$NON-NLS-1$
 
     /** Output key: the application update state. */
     private static final String KEY_UPDATE_STATE = "updateState"; //$NON-NLS-1$
@@ -205,7 +216,9 @@ public class CreateInfobaseTool implements IMcpTool
     public String getDescription()
     {
         return "Prepare an infobase for an EDT project by creating a database or registering an existing " //$NON-NLS-1$
-            + "one. Passing user/password/access STORES those credentials in EDT's infobase settings - " //$NON-NLS-1$
+            + "one. IDEMPOTENT: when an infobase is already registered with EDT at infobaseFile, nothing " //$NON-NLS-1$
+            + "is created - action='alreadyExists' and the existing reference is (re)associated with the " //$NON-NLS-1$
+            + "project. Passing user/password/access STORES those credentials in EDT's infobase settings - " //$NON-NLS-1$
             + "the secret PERSISTS beyond this call and is reused by later connections. Parameters and " //$NON-NLS-1$
             + "examples: get_tool_guide('create_infobase')."; //$NON-NLS-1$
     }
@@ -269,7 +282,9 @@ public class CreateInfobaseTool implements IMcpTool
     {
         return JsonSchemaBuilder.object()
             .booleanProperty("success", "Whether the operation succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
-            .stringProperty(McpKeys.ACTION, "'created' (mode=create) or 'registered' (mode=register).") //$NON-NLS-1$
+            .stringProperty(McpKeys.ACTION, "'created' (mode=create), 'registered' (mode=register) or " //$NON-NLS-1$
+                + "'alreadyExists' (an infobase is already registered at infobaseFile - nothing was " //$NON-NLS-1$
+                + "created; the existing reference was (re)associated with the project).") //$NON-NLS-1$
             .stringProperty(KEY_APPLICATION_KIND,
                 "'infobase' or 'standaloneServer' — the kind of application created.") //$NON-NLS-1$
             .stringProperty(McpKeys.PROJECT, "Name of the configuration project.") //$NON-NLS-1$
@@ -548,6 +563,26 @@ public class CreateInfobaseTool implements IMcpTool
         if (infobaseName == null || infobaseName.isEmpty())
         {
             infobaseName = generateDefaultInfobaseName(ibManager, projectName);
+        }
+
+        // --- 3b. Idempotency: an infobase already registered with EDT at this path is NOT an
+        // error and must not be re-created (a re-run of an environment setup used to fail or
+        // duplicate). The existing reference is (re)associated with the project and reported.
+        InfobaseReference existing = findExistingInfobaseByPath(ibManager, infobaseDir);
+        if (existing != null)
+        {
+            Activator.logInfo("create_infobase: infobase at " + infobaseDir //$NON-NLS-1$
+                + " already registered as '" + existing.getName() + "' - skipping creation"); //$NON-NLS-1$ //$NON-NLS-2$
+            String associateError = associateInfobase(assocManager, project, existing,
+                infobaseDir, projectName, register);
+            if (associateError != null)
+            {
+                return associateError;
+            }
+            String credNote = storeCredentialsIfRequested(existing, credentials, register);
+            ResultContext rc = new ResultContext(projectName, infobaseDir, existing.getName(),
+                appManager, project);
+            return buildExistingInfobaseResult(rc, existing, setDefault, credNote);
         }
 
         // --- 4. Prepare the directory ---
@@ -2483,6 +2518,159 @@ public class CreateInfobaseTool implements IMcpTool
                 + (newAppId != null
                     ? "'. Use update_database to push the configuration into the infobase." //$NON-NLS-1$
                     : "'. The read-back reported no id for the application - look it up with " //$NON-NLS-1$
+                        + "get_applications before update_database."); //$NON-NLS-1$
+        }
+        else
+        {
+            // UNVERIFIED: boundToProject is deliberately ABSENT — we did not establish either answer.
+            message = unverifiedMessage(subject, rc.projectName, readBack.unverifiedReason);
+        }
+        result.put(McpKeys.MESSAGE, message + note);
+
+        return result.toJson();
+    }
+
+    /**
+     * Finds an infobase ALREADY registered with EDT (in the global infobase panel) whose FILE
+     * connection string points at {@code infobaseDir}. Read-only: walks the same tree
+     * {@code list_infobases} walks ({@link IInfobaseManager#getAll()}) and matches the
+     * {@link FileConnectionString#getFile()} path against the requested directory (normalized
+     * absolute paths, with a case-insensitive fallback for the case-insensitive macOS filesystem).
+     * Returns {@code null} when nothing matches - and also when any single reference cannot be
+     * read (that reference just cannot match; it must not abort the whole walk).
+     *
+     * @param ibManager the infobase manager (never {@code null} - resolved by the caller)
+     * @param infobaseDir the requested infobase directory
+     * @return the existing reference at that path, or {@code null}
+     */
+    private static InfobaseReference findExistingInfobaseByPath(IInfobaseManager ibManager,
+            Path infobaseDir)
+    {
+        String requested;
+        try
+        {
+            requested = infobaseDir.toAbsolutePath().normalize().toString();
+        }
+        catch (Exception e) // NOSONAR defensive: an unreadable path simply finds nothing
+        {
+            return null;
+        }
+        try
+        {
+            for (Section root : ibManager.getAll())
+            {
+                InfobaseReference found = findExistingInSection(root, requested);
+                if (found != null)
+                {
+                    return found;
+                }
+            }
+            return null;
+        }
+        catch (Exception e)
+        {
+            Activator.logError("create_infobase: could not walk the infobase registry for the " //$NON-NLS-1$
+                + "idempotency check of " + infobaseDir, e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /** Depth-first walk of the infobase tree matching a leaf by file path (see the walker above). */
+    private static InfobaseReference findExistingInSection(Section section, String requested)
+    {
+        if (section instanceof Group)
+        {
+            for (Section child : ((Group)section).getSubsections())
+            {
+                InfobaseReference found = findExistingInSection(child, requested);
+                if (found != null)
+                {
+                    return found;
+                }
+            }
+            return null;
+        }
+        if (!(section instanceof InfobaseReference))
+        {
+            return null;
+        }
+        InfobaseReference ref = (InfobaseReference)section;
+        try
+        {
+            IConnectionString cs = ref.getConnectionString();
+            if (!(cs instanceof FileConnectionString))
+            {
+                return null;
+            }
+            String file = ((FileConnectionString)cs).getFile();
+            if (file == null || file.isEmpty())
+            {
+                return null;
+            }
+            String normalized = java.nio.file.Paths.get(file).toAbsolutePath().normalize().toString();
+            return (normalized.equals(requested) || normalized.equalsIgnoreCase(requested)) ? ref : null;
+        }
+        catch (Exception e)
+        {
+            return null; // An unreadable reference cannot match; the walk continues.
+        }
+    }
+
+    /**
+     * Builds the IDEMPOTENT success result for an infobase that was ALREADY registered at the
+     * requested path ({@code action='alreadyExists'}): the existing reference was (re)associated
+     * with the project, so the same bounded read-back (issue #412) applies - bound, measured
+     * absent (an error that keeps the payload), or unverified. The database itself was never
+     * touched, and the message says so.
+     *
+     * @param rc the result context (the project, the requested path, the EXISTING reference's name)
+     * @param ibRef the pre-existing infobase reference (the read-back matcher target)
+     * @param setDefault whether the caller asked for the application to become the project default
+     * @param credNote optional credentials note to append to the message ({@code null} = none)
+     */
+    static String buildExistingInfobaseResult(ResultContext rc, InfobaseReference ibRef,
+            boolean setDefault, String credNote)
+    {
+        ApplicationReadBack readBack = pollForNewApplication(rc.appManager, rc.project,
+            app -> isMatchingNewInfobaseApp(app, ibRef));
+
+        String setDefaultNote = setDefault ? applySetDefault(rc.appManager, rc.project, readBack) : null;
+        String note = concatNotes(setDefaultNote, credNote);
+        String subject = "Infobase '" + rc.infobaseName + "' already exists at '" //$NON-NLS-1$ //$NON-NLS-2$
+            + rc.infobaseDir.toAbsolutePath() + "'"; //$NON-NLS-1$
+
+        if (readBack.outcome == BindingOutcome.NOT_BOUND)
+        {
+            // Nothing was mutated in this call, so the failure keeps the idempotent verb: the
+            // database is intact and registered - only the project application did not surface.
+            return notBoundResult(rc, ACTION_EXISTS, readBack, subject,
+                subject + ", but it did NOT appear as an application of project '" + rc.projectName //$NON-NLS-1$
+                    + "' after (re)association - check get_applications('" + rc.projectName //$NON-NLS-1$
+                    + "'); the database itself is intact and was NOT touched." + note).toJson();
+        }
+
+        ToolResult result = ToolResult.success()
+            .put(McpKeys.ACTION, ACTION_EXISTS)
+            .put(McpKeys.PROJECT, rc.projectName)
+            .put(KEY_INFOBASE_FILE, rc.infobaseDir.toAbsolutePath().toString())
+            .put(KEY_INFOBASE_NAME, rc.infobaseName);
+        putApplications(result, readBack);
+
+        String appId = readBack.appId();
+        if (appId != null)
+        {
+            result.put(McpKeys.APPLICATION_ID, appId);
+        }
+
+        String message;
+        if (readBack.outcome == BindingOutcome.BOUND)
+        {
+            result.put(KEY_BOUND_TO_PROJECT, true);
+            message = subject + "; nothing was created - the existing infobase is associated with " //$NON-NLS-1$
+                + "project '" + rc.projectName + "'"
+                + (appId != null
+                    ? ". Use update_database to push the configuration into the infobase." //$NON-NLS-1$
+                    : ". The read-back reported no id for the application - look it up with " //$NON-NLS-1$
                         + "get_applications before update_database."); //$NON-NLS-1$
         }
         else
