@@ -5,6 +5,7 @@
  */
 package com.ditrix.edt.mcp.server.preferences;
 
+import static com.ditrix.edt.mcp.server.preferences.ToolMigrationTestSupport.READ_ONLY_V25_ADDITIONS;
 import static org.junit.Assert.*;
 
 import java.util.HashSet;
@@ -24,9 +25,10 @@ public class ProjectChecksMigrationTest
         {
             PreferenceStore store = stored(preset, 16);
             ToolSettingsService.ensureMigratedForTest(store);
-            Set<String> expected = preset.equals("analysis-only")
+            Set<String> expected = new HashSet<>(preset.equals("analysis-only")
                 ? Set.of("owner_disabled_tool", "project_checks", "infobase_extensions", "clone_metadata_object", "sort_metadata", "open_editor", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log")
-                : Set.of("owner_disabled_tool", "project_checks", "infobase_extensions", "clone_metadata_object", "sort_metadata", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log");
+                : Set.of("owner_disabled_tool", "project_checks", "infobase_extensions", "clone_metadata_object", "sort_metadata", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log"));
+            expected.addAll(READ_ONLY_V25_ADDITIONS);
             assertEquals(expected, disabled(store));
             assertEquals(preset, store.getString(PreferenceConstants.PREF_TOOL_PRESET_ID));
             assertEquals(PreferenceConstants.TOOL_PREFS_MIGRATION_VERSION,

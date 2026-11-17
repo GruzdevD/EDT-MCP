@@ -5,9 +5,11 @@
  */
 package com.ditrix.edt.mcp.server.preferences;
 
+import static com.ditrix.edt.mcp.server.preferences.ToolMigrationTestSupport.READ_ONLY_V25_ADDITIONS;
 import static org.junit.Assert.*;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -20,7 +22,7 @@ public class CloneMetadataObjectMigrationTest
     @Test
     public void version20RegistersOnlyTheCloneToolAndKeepsPriorSteps()
     {
-        assertEquals(24, PreferenceConstants.TOOL_PREFS_MIGRATION_VERSION);
+        assertEquals(25, PreferenceConstants.TOOL_PREFS_MIGRATION_VERSION);
         for (var additions : List.of(ToolSettingsService.ANALYSIS_ONLY_MIGRATION_ADDITIONS_BY_VERSION,
             ToolSettingsService.CODE_REVIEW_MIGRATION_ADDITIONS_BY_VERSION))
         {
@@ -28,6 +30,7 @@ public class CloneMetadataObjectMigrationTest
             assertEquals(Set.of("project_checks"), additions.get(17));
             assertEquals(Set.of("infobase_extensions"), additions.get(18));
             assertEquals(Set.of("clone_metadata_object"), additions.get(20));
+            assertEquals(READ_ONLY_V25_ADDITIONS, additions.get(25));
         }
     }
 
@@ -38,9 +41,11 @@ public class CloneMetadataObjectMigrationTest
         {
             PreferenceStore store = stored(19, id, Set.of("owner_disabled", "obsolete_owner_tool"));
             ToolSettingsService.ensureMigratedForTest(store);
-            assertEquals(Set.of("owner_disabled", "obsolete_owner_tool", "clone_metadata_object", "sort_metadata", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log"), disabled(store));
+            Set<String> expected = new HashSet<>(Set.of("owner_disabled", "obsolete_owner_tool", "clone_metadata_object", "sort_metadata", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log"));
+            expected.addAll(READ_ONLY_V25_ADDITIONS);
+            assertEquals(expected, disabled(store));
             assertEquals(id, store.getString(PreferenceConstants.PREF_TOOL_PRESET_ID));
-            assertEquals(24, store.getInt(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION));
+            assertEquals(25, store.getInt(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION));
         }
     }
 
@@ -58,10 +63,12 @@ public class CloneMetadataObjectMigrationTest
             }
         });
         ToolSettingsService.ensureMigratedForTest(store);
-        assertEquals(List.of(Set.of("owner_disabled", "open_editor", "clone_metadata_object", "sort_metadata", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log")), published);
+        Set<String> expected = new HashSet<>(Set.of("owner_disabled", "open_editor", "clone_metadata_object", "sort_metadata", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log"));
+        expected.addAll(READ_ONLY_V25_ADDITIONS);
+        assertEquals(List.of(expected), published);
         assertEquals(List.of(PreferenceConstants.PREF_DISABLED_TOOLS,
             PreferenceConstants.PREF_TOOL_PREFS_MIGRATION), writes);
-        assertEquals(24, store.getInt(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION));
+        assertEquals(25, store.getInt(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION));
         writes.clear();
         ToolSettingsService.ensureMigratedForTest(store);
         assertTrue(writes.isEmpty());
@@ -78,7 +85,7 @@ public class CloneMetadataObjectMigrationTest
             assertEquals(before, store.getString(PreferenceConstants.PREF_DISABLED_TOOLS));
             assertEquals(!id.isEmpty(), store.contains(PreferenceConstants.PREF_TOOL_PRESET_ID));
             assertEquals(id, store.getString(PreferenceConstants.PREF_TOOL_PRESET_ID));
-            assertEquals(24, store.getInt(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION));
+            assertEquals(25, store.getInt(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION));
         }
     }
 
@@ -104,14 +111,16 @@ public class CloneMetadataObjectMigrationTest
     @Test
     public void alreadyDisabledLaterToolsNeedOnlyTheVersionStamp()
     {
-        PreferenceStore store = stored(19, "analysis-only", Set.of("owner_disabled", "clone_metadata_object", "sort_metadata", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log"));
+        Set<String> complete = new HashSet<>(Set.of("owner_disabled", "clone_metadata_object", "sort_metadata", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log"));
+        complete.addAll(READ_ONLY_V25_ADDITIONS);
+        PreferenceStore store = stored(19, "analysis-only", complete);
         String before = store.getString(PreferenceConstants.PREF_DISABLED_TOOLS);
         List<String> writes = new ArrayList<>();
         store.addPropertyChangeListener(event -> writes.add(event.getProperty()));
         ToolSettingsService.ensureMigratedForTest(store);
         assertEquals(before, store.getString(PreferenceConstants.PREF_DISABLED_TOOLS));
         assertEquals(List.of(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION), writes);
-        assertEquals(24, store.getInt(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION));
+        assertEquals(25, store.getInt(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION));
     }
 
     @Test

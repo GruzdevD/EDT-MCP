@@ -4,7 +4,7 @@ This reference provides generated descriptions, parameters and guides; [tool ove
 
 One page per tool: what it does, every parameter, and how it works. Generated from the live server by `docs/generate_tool_docs.py` (re-run to refresh; the source of truth is each tool's Java).
 
-**131 tools.**
+**134 tools.**
 
 ## Core
 
@@ -100,8 +100,10 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 |------|-------------|
 | [`ask_workmate`](ask_workmate.md) | Start a background question to the 1C:Workmate plugin and return its jobId. Hands the question to an EXTERNAL agent: by default (shareMcpTools) Workmate may… *(not enabled by default)* |
 | [`cancel_job`](cancel_job.md) | Cancel a background job by jobId. DESTRUCTIVE. Two-phase: call once WITHOUT confirm to see the owning tool, state and progress, then again with confirm=true… |
+| [`create_specter_launch_config`](create_specter_launch_config.md) | Create a Specter UI-testing launch configuration that references a base EDT runtime-client configuration. |
 | [`debug_yaxunit_tests`](debug_yaxunit_tests.md) | DEPRECATED alias of run_yaxunit_tests(debug=true) - prefer that instead; the implementation is shared. DEBUG mode, so breakpoints fire: a short start returns… |
 | [`get_job_status`](get_job_status.md) | Poll any background job by the jobId its owning tool returned: state, progress journal and terminal result. Parameters and examples: get_tool_guide('get_job_… |
+| [`get_launch_state`](get_launch_state.md) | Full visibility into launch processes (the State view over MCP): every EDT launch (live and recently terminated) with its OS processes, console output tail and exit codes, plus all running 1C executables and any modal dialogs waiting for a button. |
 | [`list_yaxunit_tests`](list_yaxunit_tests.md) | Enumerate YAXUnit test suites (common modules that register a test set via 'ЮТТесты...ДобавитьТестовыйНабор(...).ДобавитьТест(...)') and the tests within eac… |
 | [`run_yaxunit_tests`](run_yaxunit_tests.md) | Run YAXUnit tests as a named background job and return a JUnit Markdown report. The start call waits up to `timeout` (default and maximum 45s): a short run r… |
 | [`vanessa_doctor`](vanessa_doctor.md) | Read-only readiness report for a project's Vanessa Automation environment (layout, env.sh, VAParams.json, the vanessa-automation.epf runtime, Allure CLI). Do… |
@@ -184,6 +186,7 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | [`get_problem_summary`](get_problem_summary.md) | See validation problem counts grouped by project, severity, check, module or object. Parameters and examples: get_tool_guide('get_problem_summary'). |
 | [`get_project_errors`](get_project_errors.md) | Find detailed validation errors and warnings in an EDT project. Parameters and examples: get_tool_guide('get_project_errors'). |
 | [`import_configuration_from_xml`](import_configuration_from_xml.md) | Create an EDT project from exported 1C configuration XML files. Use platformVersion for the new project's runtime, derived from the dump by default (xmlVersi… |
+| [`import_project`](import_project.md) | Register an EXISTING EDT project directory (a git worktree, a second checkout, a copy) that already contains a .project file into the workspace as a LINKED project, EGit-shared; reports gitConnected/gitRepository/gitBranch. |
 | [`import_project_from_file`](import_project_from_file.md) | Create a NEW EDT project from a 1C binary file: .cf (configuration), .cfe (extension; baseProjectName required) or .epf/.erf (external data processor/report)… |
 | [`infobase_extensions`](infobase_extensions.md) | List installed infobase extensions and install, update or uninstall .cfe files. DESTRUCTIVE: call once WITHOUT confirm to preview a write, then with confirm=… |
 | [`infobase_sessions`](infobase_sessions.md) | List or terminate sessions on a running standalone-server infobase. DESTRUCTIVE for terminate: pass confirm=true; bulk termination skips Designer, while its… |

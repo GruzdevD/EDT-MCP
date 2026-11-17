@@ -5,6 +5,7 @@
  */
 package com.ditrix.edt.mcp.server.preferences;
 
+import static com.ditrix.edt.mcp.server.preferences.ToolMigrationTestSupport.READ_ONLY_V25_ADDITIONS;
 import static org.junit.Assert.*;
 
 import java.util.HashSet;
@@ -20,13 +21,14 @@ public class ProjectChecksVersion17Test
     @Test
     public void version17IsRegisteredWithoutTakingTheVersion16Step()
     {
-        assertEquals(24, PreferenceConstants.TOOL_PREFS_MIGRATION_VERSION);
+        assertEquals(25, PreferenceConstants.TOOL_PREFS_MIGRATION_VERSION);
         for (var additions : List.of(ToolSettingsService.ANALYSIS_ONLY_MIGRATION_ADDITIONS_BY_VERSION,
             ToolSettingsService.CODE_REVIEW_MIGRATION_ADDITIONS_BY_VERSION))
         {
             assertEquals(Set.of("get_form_screenshot"), additions.get(15));
             assertEquals(Set.of("business_process_route_map"), additions.get(16));
             assertEquals(Set.of("project_checks"), additions.get(17));
+            assertEquals(READ_ONLY_V25_ADDITIONS, additions.get(25));
         }
     }
 
@@ -49,9 +51,13 @@ public class ProjectChecksVersion17Test
         {
             PreferenceStore store = stored(id, 14);
             ToolSettingsService.ensureMigratedForTest(store);
-            Set<String> expected = id.equals("analysis-only")
+            Set<String> expected = new HashSet<>(id.equals("analysis-only")
                 ? Set.of("owner_disabled", "get_form_screenshot", "business_process_route_map", "project_checks", "infobase_extensions", "clone_metadata_object", "sort_metadata", "open_editor", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log")
-                : Set.of("owner_disabled", "get_form_screenshot");
+                : Set.of("owner_disabled", "get_form_screenshot"));
+            if (id.equals("analysis-only"))
+            {
+                expected.addAll(READ_ONLY_V25_ADDITIONS);
+            }
             assertEquals(expected, disabled(store));
             assertEquals(PreferenceConstants.TOOL_PREFS_MIGRATION_VERSION,
                 store.getInt(PreferenceConstants.PREF_TOOL_PREFS_MIGRATION));
@@ -67,6 +73,7 @@ public class ProjectChecksVersion17Test
             Set<String> expected = new HashSet<>(version < 16
                 ? Set.of("owner_disabled", "business_process_route_map", "project_checks", "infobase_extensions", "clone_metadata_object", "sort_metadata", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log")
                 : Set.of("owner_disabled", "project_checks", "infobase_extensions", "clone_metadata_object", "sort_metadata", "edt_dialog", "standalone_server", "manage_profiling_results", "manage_tech_log"));
+            expected.addAll(READ_ONLY_V25_ADDITIONS);
             if (id.equals("analysis-only"))
             {
                 expected.add("open_editor");
