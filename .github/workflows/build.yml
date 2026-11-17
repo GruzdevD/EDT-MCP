@@ -66,10 +66,9 @@ jobs:
           path: |
             ~/.m2/repository/.cache/tycho
             ~/.m2/repository/p2
-          key: ${{ runner.os }}-tycho-p2-${{ hashFiles('**/*.target') }}-${{ steps.edt-channel.outputs.edt-build }}
+          key: ${{ runner.os }}-tycho-p2-v2-${{ hashFiles('**/*.target') }}-${{ steps.edt-channel.outputs.edt-build }}
           restore-keys: |
-            ${{ runner.os }}-tycho-p2-${{ hashFiles('**/*.target') }}-
-            ${{ runner.os }}-tycho-p2-
+            ${{ runner.os }}-tycho-p2-v2-${{ hashFiles('**/*.target') }}-
 
       - name: Cache SonarQube packages
         uses: actions/cache@v6
