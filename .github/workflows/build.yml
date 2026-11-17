@@ -84,6 +84,17 @@ jobs:
           MAVEN_OPTS: -Xmx2g -XX:+UseParallelGC
         run: bash "$GITHUB_WORKSPACE/.github/scripts/mvn-retry.sh" clean verify --batch-mode --no-transfer-progress -T 1C
 
+      - name: Dump OSGi test-runtime log on failure
+        if: failure()
+        run: |
+          for f in mcp/tests/com.ditrix.edt.mcp.server.tests/target/work/configuration/*.log \
+                   mcp/tests/com.ditrix.edt.mcp.server.tests/target/work/data/.metadata/.log; do
+            if [ -f "$f" ]; then
+              echo "===== $f ====="
+              cat "$f" || true
+            fi
+          done
+
       - name: JaCoCo coverage report
         working-directory: mcp
         # targets/default is named alongside the bundle because Tycho 5 resolves the target
