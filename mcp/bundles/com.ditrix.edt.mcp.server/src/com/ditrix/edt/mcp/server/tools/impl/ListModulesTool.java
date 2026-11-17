@@ -6,6 +6,7 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -17,8 +18,6 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.Path;
-import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.metadata.mdclass.AccumulationRegister;
 import com._1c.g5.v8.dt.metadata.mdclass.BusinessProcess;
@@ -47,6 +46,8 @@ import com.ditrix.edt.mcp.server.utils.MarkdownUtils;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 import com.ditrix.edt.mcp.server.utils.Pagination;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
+import com.ditrix.edt.mcp.server.utils.ReadToolExecution;
+import com.ditrix.edt.mcp.server.utils.Refusals;
 
 /**
  * Tool to list all BSL modules in a project or for a specific metadata object.
@@ -108,7 +109,7 @@ public class ListModulesTool implements IMcpTool
         String projectName = JsonUtils.extractStringArgument(params, McpKeys.PROJECT_NAME);
         if (projectName != null && !projectName.isEmpty())
         {
-            return "modules-" + projectName.toLowerCase() + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
+            return "modules-" + projectName.toLowerCase(Locale.ROOT) + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
         }
         return "modules-list.md"; //$NON-NLS-1$
     }
@@ -141,8 +142,7 @@ public class ListModulesTool implements IMcpTool
         final String filter = nameFilter;
         final int maxResults = limit;
 
-        Display display = PlatformUI.getWorkbench().getDisplay();
-        display.syncExec(() -> {
+        ReadToolExecution.dispatch(() -> {
             try
             {
                 String result = listModulesInternal(projectName, mdType, objName, filter, maxResults);
@@ -150,7 +150,7 @@ public class ListModulesTool implements IMcpTool
             }
             catch (Exception e)
             {
-                Activator.logError("Error listing modules", e); //$NON-NLS-1$
+                Refusals.log("Error listing modules", e); //$NON-NLS-1$
                 resultRef.set(ToolResult.error(e.getMessage()).toJson());
             }
         });
@@ -169,7 +169,7 @@ public class ListModulesTool implements IMcpTool
         IProject project = ctx.project();
 
         List<ModuleInfo> modules = new ArrayList<>();
-        String type = metadataType.toLowerCase();
+        String type = metadataType.toLowerCase(Locale.ROOT);
 
         // For "all" mode, use filesystem scan — covers ALL metadata types
         if ("all".equals(type)) //$NON-NLS-1$
@@ -178,7 +178,16 @@ public class ListModulesTool implements IMcpTool
             return formatOutput(projectName, modules, limit, metadataType);
         }
 
-        // For specific type filters, use EDT API
+        return ReadToolExecution.read(project, NAME,
+            () -> listMetadataModules(ctx, projectName, metadataType, objectName, nameFilter, limit));
+    }
+
+    private String listMetadataModules(ProjectContext ctx, String projectName, String metadataType,
+        String objectName, String nameFilter, int limit)
+    {
+        IProject project = ctx.project();
+        List<ModuleInfo> modules = new ArrayList<>();
+        String type = metadataType.toLowerCase(Locale.ROOT);
         ProjectContext.ConfigurationResult resolved = ctx.resolveConfiguration();
         if (!resolved.ok())
         {
@@ -451,7 +460,7 @@ public class ListModulesTool implements IMcpTool
         }
 
         if (nameFilter != null && !nameFilter.isEmpty()
-            && !modulePath.toLowerCase().contains(nameFilter.toLowerCase()))
+            && !modulePath.toLowerCase(Locale.ROOT).contains(nameFilter.toLowerCase(Locale.ROOT)))
         {
             return;
         }
@@ -540,7 +549,7 @@ public class ListModulesTool implements IMcpTool
         String modulePath = fullPath.startsWith("src/") ? fullPath.substring(4) : fullPath; //$NON-NLS-1$
 
         if (nameFilter != null && !nameFilter.isEmpty()
-            && !modulePath.toLowerCase().contains(nameFilter.toLowerCase()))
+            && !modulePath.toLowerCase(Locale.ROOT).contains(nameFilter.toLowerCase(Locale.ROOT)))
         {
             return;
         }
@@ -599,12 +608,27 @@ public class ListModulesTool implements IMcpTool
                               String moduleType, String parentType, String parentName, String nameFilter)
     {
         if (nameFilter != null && !nameFilter.isEmpty()
-            && !modulePath.toLowerCase().contains(nameFilter.toLowerCase()))
+            && !modulePath.toLowerCase(Locale.ROOT).contains(nameFilter.toLowerCase(Locale.ROOT)))
         {
             return;
         }
 
-        IFile file = BslModuleUtils.resolveModuleFile(project, modulePath);
+        IFile file;
+        try
+        {
+            file = BslModuleUtils.resolveModuleFile(project, modulePath);
+        }
+        catch (RuntimeException e)
+        {
+            // Only an ambiguous candidate (an argument refusal) is skipped; an unreadable resource
+            // tree is a state refusal and must fail the listing instead of returning a partial list.
+            if (!(e instanceof IllegalArgumentException) || Refusals.messageOf(e) == null)
+            {
+                throw e;
+            }
+            Refusals.log("Skipped module candidate", e); //$NON-NLS-1$
+            return;
+        }
         if (file.exists())
         {
             ModuleInfo info = new ModuleInfo();

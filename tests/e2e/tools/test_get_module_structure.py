@@ -165,3 +165,21 @@ def test_missing_project_name_errors_clearly():
     # deliberately rather than weakening the assertion.
     assert_error_quality(e, names=["projectName"], suggests=[])
     assert_no_diff("a rejected call must not change the project on disk")
+
+
+@e2e_test(tool="get_module_structure", kind="read")
+def test_object_names_in_another_case_resolve_the_real_ast():
+    for module, method in (("CommonModules/cALC/module.BSL", "Add"),
+                           ("CommonModules/ВЫЧИСЛЕНИЕ/MODULE.bsl", "Маркер")):
+        result = call("get_module_structure", {"projectName": PROJECT, "modulePath": module})
+        assert_ok(result, "structure with a differently-cased object and module file name")
+        assert_contains(result.text, "### Methods", "the real module's methods table must be returned")
+        assert_contains(result.text, method, "the real module's method must be in the AST report")
+    assert_no_diff("case-insensitive structure lookup must leave the fixture unchanged")
+
+
+@e2e_test(tool="get_module_structure", kind="read")
+def test_windowed_formatter_contract():
+    from read_host_contracts import contract_get_module_structure
+    contract_get_module_structure(call, "WINDOWED")
+    assert_no_diff("pinned formatter reads must not change fixture files")

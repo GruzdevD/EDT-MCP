@@ -6,6 +6,7 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -15,11 +16,11 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.Subsystem;
+import com.ditrix.edt.mcp.server.utils.ReadToolExecution;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
@@ -82,7 +83,7 @@ public class GetSubsystemContentTool implements IMcpTool
         String fqn = JsonUtils.extractStringArgument(params, KEY_SUBSYSTEM_FQN);
         if (fqn != null && !fqn.isEmpty())
         {
-            String safe = fqn.replace('.', '-').toLowerCase();
+            String safe = fqn.replace('.', '-').toLowerCase(Locale.ROOT);
             return "subsystem-" + safe + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
         }
         return "subsystem-content.md"; //$NON-NLS-1$
@@ -114,11 +115,10 @@ public class GetSubsystemContentTool implements IMcpTool
         final boolean recursiveMode = recursive;
         final String lang = language;
 
-        Display display = PlatformUI.getWorkbench().getDisplay();
-        display.syncExec(() -> {
+        ReadToolExecution.dispatch(() -> {
             try
             {
-                resultRef.set(getSubsystemContentInternal(projectName, fqn, recursiveMode, lang));
+                resultRef.set(ReadToolExecution.readOnHost(projectName, NAME, () -> getSubsystemContentInternal(projectName, fqn, recursiveMode, lang)));
             }
             catch (Exception e)
             {
@@ -138,14 +138,27 @@ public class GetSubsystemContentTool implements IMcpTool
         {
             return resolved.errorJson();
         }
-        Configuration config = resolved.configuration();
+        return renderContent(resolved.configuration(), subsystemFqn, recursive, language);
+    }
 
+    /**
+     * Renders the subsystem {@code subsystemFqn} addresses in {@code config} - or, when it addresses
+     * none (a missing subsystem, a malformed or non-subsystem FQN), the "subsystem not found"
+     * {@code modify_metadata} gives for the same address ({@link SubsystemUtils#notFoundMessage}).
+     * Package-visible for tests.
+     *
+     * @param config the project's configuration
+     * @param subsystemFqn the requested address, as written
+     * @param recursive whether to collect the content of nested subsystems too
+     * @param language the requested synonym language, or {@code null}
+     * @return the Markdown, or the error JSON
+     */
+    String renderContent(Configuration config, String subsystemFqn, boolean recursive, String language)
+    {
         Subsystem subsystem = SubsystemUtils.resolveByFqn(config, subsystemFqn);
         if (subsystem == null)
         {
-            return ToolResult.error("Subsystem not found: " + subsystemFqn //$NON-NLS-1$
-                + ". Check the FQN is 'Subsystem.<Name>' (type token must be 'Subsystem'); " //$NON-NLS-1$
-                + "use list_subsystems to see available subsystems.").toJson(); //$NON-NLS-1$
+            return ToolResult.error(SubsystemUtils.notFoundMessage(subsystemFqn)).toJson();
         }
 
         String effectiveLanguage = SubsystemUtils.resolveLanguage(language, config);

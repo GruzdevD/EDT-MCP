@@ -15,7 +15,8 @@ RESPONSE SHAPE
 JSON tool (getResponseType() == JSON); payload in r.structured:
   success path: {"success": true, "action": "created", "project", "infobaseFile",
                  "infobaseName", ["applications": [...]], ["applicationId": "..."],
-                 ["boundToProject": true], "message"}
+                 ["boundToProject": true], ["verification": "verified" |
+                 "mismatched" | "not_verifiable"], ["verificationReason"], "message"}
   error path:   {"success": false, "error": "..."} - and, for the not-bound refusal below,
                 the same action/infobaseFile/infobaseName/applications payload plus
                 "boundToProject": false
@@ -30,6 +31,11 @@ JSON tool (getResponseType() == JSON); payload in r.structured:
   or an application's identity was unreadable), so the call stays successful and the
   message says UNVERIFIED. The applications echo itself is omitted when no read produced
   a snapshot at all.
+
+  verification is present when a requested credential write reaches read-back.
+  verificationReason explains mismatched and not_verifiable outcomes and is absent for
+  verified. not_verifiable means EDT accepted the write but could not prove a persisted
+  entry; the message must not claim that credentials were stored.
 
 CI / HEADLESS STRATEGY (IMPORTANT)
 -----------------------------------
@@ -58,6 +64,7 @@ import shutil
 import tempfile
 
 from harness import (
+    cleanup_cluster_registration_probe,
     call,
     assert_ok,
     assert_error,
@@ -67,6 +74,7 @@ from harness import (
     e2e_test,
     PROJECT,
     LIVE_INFOBASE,
+    snapshot_application_bindings,
 )
 
 # Sentinel for a project name that does not exist in the workspace.
@@ -210,6 +218,7 @@ def test_standalone_register_without_database_errors_naming_path():
 
     It also proves the old routing rejection is gone: standaloneServer+register is now a supported
     combination, so the error must NOT be the former 'not supported' message."""
+    before = snapshot_application_bindings(PROJECT)
     os.makedirs(_NO_DB_DIR, exist_ok=True)
     try:
         r = call("create_infobase",
@@ -225,12 +234,182 @@ def test_standalone_register_without_database_errors_naming_path():
             ("standaloneServer+register must no longer be rejected as 'not supported': %r" % err)
     finally:
         shutil.rmtree(_NO_DB_DIR, ignore_errors=True)
+    assert snapshot_application_bindings(PROJECT) == before, "refused registration changed application bindings"
     assert_no_diff("a rejected call must not touch the fixture")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# LIVE ROUND-TRIP (Tier-2 — gated behind EDT_MCP_LIVE_INFOBASE=1)
+# CLUSTER REGISTRATION (EDT may connect during association)
 # ──────────────────────────────────────────────────────────────────────────────
+
+def _cluster_params(**overrides):
+    params = {"projectName": PROJECT, "mode": "register",
+              "infobaseServer": "localhost:1541", "infobaseRef": "McpRegistrationProbe"}
+    params.update(overrides)
+    return params
+
+
+@e2e_test(tool="create_infobase", kind="action")
+def test_server_registration_invalid_combinations():
+    cases = [
+        ({"mode": "create"}, ["register"], ["Create", "register"]),
+        ({"infobaseFile": "C:/infobases/probe"}, ["infobaseFile"], ["either", "not both"]),
+        ({"infobaseRef": ""}, ["infobaseRef"], ["required together"]),
+        ({"infobaseServer": ""}, ["infobaseServer"], ["required together"]),
+        ({"applicationKind": "standaloneServer"}, ["applicationKind"], ["infobase"]),
+        ({"infobaseServer": "https://host/base"}, ["infobaseServer"], ["plain", "not a URL"]),
+        ({"infobaseRef": 'base;Usr=probe'}, ["infobaseRef"], ["plain", "connection string"]),
+        ({"infobaseRef": "https://host/base"}, ["infobaseRef"], ["plain", "URL"]),
+        ({"infobaseRef": "a\\b"}, ["infobaseRef"], ["plain", "path"]),
+        ({"infobaseServer": "[::ffff:192.0.2.1]:1541", "infobaseRef": "base/invalid"},
+         ["infobaseRef"], ["plain", "path"]),
+        ({"infobaseServer": " host:1541"}, ["infobaseServer"], ["remove", "whitespace"]),
+        ({"infobaseServer": "host:99999"}, ["infobaseServer"], ["1-65535"]),
+        ({"infobaseServer": "host:abc"}, ["infobaseServer"], ["host[:port]"]),
+    ]
+    for overrides, names, suggests in cases:
+        result = call("create_infobase", _cluster_params(**overrides))
+        error = assert_error(result, "invalid cluster registration %r" % overrides)
+        assert_error_quality(error, names=names, suggests=suggests)
+        if names == ["infobaseServer"] and overrides.get("infobaseServer", ""):
+            assert "infobaseRef" not in error, error
+        if names == ["infobaseRef"] and overrides.get("infobaseRef", ""):
+            assert "infobaseServer" not in error, error
+        assert "Usr=probe" not in error, error
+    assert_no_diff("rejected cluster registration must not touch source files")
+
+
+@e2e_test(tool="create_infobase", kind="action")
+def test_blank_server_fields_follow_file_registration_validation():
+    os.makedirs(_NO_DB_DIR, exist_ok=True)
+    try:
+        result = call("create_infobase", _cluster_params(
+            infobaseServer="", infobaseRef="  ", infobaseFile=_NO_DB_DIR))
+        error = assert_error(result, "file registration with blank optional server fields")
+        assert_error_quality(error, names=["edt_standalone_register_no_db_e2e"], suggests=["create"])
+        assert "not both" not in error and "required together" not in error, error
+    finally:
+        shutil.rmtree(_NO_DB_DIR, ignore_errors=True)
+    assert_no_diff()
+
+
+@e2e_test(tool="create_infobase", kind="action")
+def test_server_registration_nonexistent_project():
+    result = call("create_infobase", _cluster_params(projectName=NONEXISTENT_PROJECT))
+    error = assert_error(result, "cluster registration project resolution")
+    assert_error_quality(error, names=[NONEXISTENT_PROJECT], suggests=["list_projects"])
+    assert_no_diff()
+
+
+@e2e_test(tool="create_infobase", kind="action")
+def test_server_registration_application_roundtrip():
+    _server_registration_roundtrip(set_default=False)
+
+
+@e2e_test(tool="create_infobase", kind="action")
+def test_server_registration_sets_and_cleans_an_explicit_default():
+    _server_registration_roundtrip(set_default=True)
+
+
+def _server_registration_roundtrip(set_default):
+    """Register a synthetic address, read its real EDT binding, remove ONLY registration.
+
+    The tool never creates, updates or deletes this synthetic database. EDT may attempt a
+    Designer connection during association if a runtime is installed; binding read-back
+    must still work independently of database reachability.
+    """
+    probe = "McpRegistrationProbe_" + os.urandom(8).hex()
+    name = "McpServerRegistration_" + probe
+    before = call("get_applications", {"projectName": PROJECT})
+    assert_ok(before, "probe must be absent before registration")
+    assert not any(app.get("name") == name for app in before.structured["applications"]), before.structured
+    if set_default and before.structured["defaultApplication"] != "none":
+        from harness import E2ESkip
+        raise E2ESkip("default-write probe requires a measured absent default; preserve the fixture's existing/unknown preference")
+    application_id = None
+    registration_id = None
+    anchor_probe = "McpRegistrationProbe_" + os.urandom(8).hex()
+    anchor_name = "McpServerRegistration_" + anchor_probe
+    anchor_registration_id = None
+    try:
+        if set_default and not before.structured["applications"]:
+            # With just one application EDT returns an implicit default even if setDefault
+            # is a no-op. Keep a second owned application so that defect MUST fail below.
+            anchor = call("create_infobase", _cluster_params(infobaseName=anchor_name,
+                          infobaseRef=anchor_probe, setDefault=False))
+            anchor_registration_id = (anchor.structured or {}).get("registrationId")
+            assert_ok(anchor, "register a second application to exclude EDT's implicit-default fallback")
+            assert anchor.structured["boundToProject"] is True, anchor.structured
+        params = _cluster_params(infobaseName=name, infobaseRef=probe, setDefault=set_default)
+        # A real secure-storage provider is required for the credential variant, like the
+        # other live credential tests; CI still exercises normal launcher deregistration.
+        if os.environ.get("EDT_MCP_LIVE_INFOBASE") == "1":
+            params.update(user="CleanupProbe", password="synthetic-cleanup-password")
+        result = call("create_infobase", params)
+        registration_id = (result.structured or {}).get("registrationId")
+        assert_ok(result, "register cluster address")
+        data = result.structured
+        if "user" in params:
+            assert data["verification"] == "verified", data
+        assert data["action"] == "registered", data
+        assert data["infobaseServer"] == "localhost:1541", data
+        assert data["infobaseRef"] == probe, data
+        assert "infobaseFile" not in data, data
+        assert data["boundToProject"] is True, data
+        application_id = data["applicationId"]
+        assert registration_id, data
+        apps = call("get_applications", {"projectName": PROJECT})
+        assert_ok(apps, "read cluster binding")
+        matches = [app for app in apps.structured["applications"] if app.get("id") == application_id]
+        assert len(matches) == 1, apps.structured
+        assert matches[0]["type"] == "com.e1c.g5.dt.applications.type.infobase", matches
+        assert matches[0]["name"] == name, matches
+        if set_default:
+            assert len(apps.structured["applications"]) >= 2, apps.structured
+            assert apps.structured["defaultApplication"] == "resolved", apps.structured
+            assert apps.structured["defaultApplicationId"] == application_id, apps.structured
+        # A retry must refuse before adding a second UUID or changing the existing binding.
+        duplicate = call("create_infobase", _cluster_params(infobaseName=name, infobaseRef=probe))
+        duplicate_error = assert_error(duplicate, "duplicate cluster address")
+        assert_error_quality(duplicate_error, names=["address"], suggests=["get_applications"])
+        apps = call("get_applications", {"projectName": PROJECT})
+        assert_ok(apps, "binding after duplicate refusal")
+        assert [app["id"] for app in apps.structured["applications"] if app.get("name") == name] == [application_id]
+    finally:
+        try:
+            cleanup_apps = call("get_applications", {"projectName": PROJECT})
+            assert_ok(cleanup_apps, "read uniquely named probe for cleanup")
+            for app in cleanup_apps.structured["applications"]:
+                if app.get("name") in {name, anchor_name}:
+                    removed = call("delete_infobase", {"projectName": PROJECT, "applicationId": app["id"],
+                                     "deleteRegistration": True, "confirm": True})
+                    assert_ok(removed, "remove only synthetic cluster registration")
+                    assert removed.structured["deleteRegistration"] is True, removed.structured
+                    assert removed.structured["databaseFilesDeleted"] is False, removed.structured
+        finally:
+            leftovers = 0
+            cleanup_errors = []
+            for cleanup_name, cleanup_probe, cleanup_id in (
+                    (name, probe, registration_id),
+                    (anchor_name, anchor_probe, anchor_registration_id)):
+                try:
+                    leftovers += cleanup_cluster_registration_probe(
+                        cleanup_name, "localhost:1541", cleanup_probe, cleanup_id)
+                except Exception as exc:
+                    cleanup_errors.append(f"{cleanup_name}: {exc}")
+            assert not cleanup_errors, "Fallback cleanup errors: " + "; ".join(cleanup_errors)
+            assert leftovers == 0, "EDT leaked %d launcher registrations; removed by fallback cleanup" % leftovers
+    apps = call("get_applications", {"projectName": PROJECT})
+    assert_ok(apps, "verify cluster registration removal")
+    assert not any(app.get("id") == application_id for app in apps.structured["applications"]), apps.structured
+    assert not any(app.get("name") in {name, anchor_name} for app in apps.structured["applications"]), apps.structured
+    if set_default:
+        assert apps.structured["defaultApplication"] == "none", apps.structured
+        assert "defaultApplicationId" not in apps.structured, apps.structured
+    assert_no_diff("cluster registration must not write source files")
+
+
+# LIVE ROUND-TRIP (Tier-2 — gated behind EDT_MCP_LIVE_INFOBASE=1)
 
 @e2e_test(tool="create_infobase", kind="action")
 def test_live_create_verify_delete_roundtrip():
@@ -409,3 +588,65 @@ def test_live_standalone_register_over_existing_infobase():
         _ensure_standalone_register_absent()
 
     assert_no_diff("the round-trip must not touch the committed fixture (TestConfiguration)")
+
+
+@e2e_test(tool="create_infobase", kind="action")
+def test_live_standalone_register_os_empty_credentials_is_not_verifiable():
+    """A standalone-server registration with OS access and no user/password must carry the
+    three-state credential result. This exact shape matches EDT's default fallback, so it is
+    accepted but cannot be reported as a verified or failed credential store."""
+    requires_live_infobase("create_infobase OS credential-verification result")
+
+    _ensure_standalone_register_absent()
+    try:
+        # Reuse the standalone-register fixture: seed the existing file infobase first, then wrap it.
+        r_seed = call("create_infobase",
+                      {"projectName": PROJECT,
+                       "infobaseFile": _SRV_IB_DIR,
+                       "infobaseName": _SRV_IB_NAME})
+        assert_ok(r_seed, "seed plain infobase for OS credential verification")
+        assert os.path.isfile(os.path.join(_SRV_IB_DIR, "1Cv8.1CD")), \
+            "the OS-verification fixture must contain 1Cv8.1CD"
+
+        r_reg = call("create_infobase",
+                     {"projectName": PROJECT,
+                      "infobaseFile": _SRV_IB_DIR,
+                      "infobaseName": _SRV_IB_NAME,
+                      "applicationKind": "standaloneServer",
+                      "mode": "register",
+                      "access": "OS"})
+        assert_ok(r_reg, "standalone register with OS access and empty credentials")
+        sc = r_reg.structured
+        assert isinstance(sc, dict), "structured must be a dict: %r" % sc
+        assert sc.get("action") == "registered", \
+            "OS-access case must complete the standalone registration: %r" % sc
+        assert sc.get("applicationKind") == "standaloneServer", \
+            "OS-access case must report the standalone-server kind: %r" % sc
+
+        assert "verification" in sc, \
+            "a credential write that reached read-back must report verification: %r" % sc
+        assert sc["verification"] == "not_verifiable", \
+            "OS access with empty credentials must be not_verifiable: %r" % sc
+        assert "verificationReason" in sc, \
+            "not_verifiable must carry verificationReason: %r" % sc
+        expected_reason = (
+            "OS access with an empty user and empty password is also EDT's default fallback, "
+            "so the read-back cannot prove that a stored entry exists."
+        )
+        assert sc["verificationReason"] == expected_reason, \
+            "not_verifiable must carry the exact EDT-fallback reason: %r" % sc
+
+        message = sc.get("message") or ""
+        message_lower = message.lower()
+        assert "edt accepted the connection-credentials update" in message_lower, \
+            "not_verifiable must report the accepted write without claiming verification: %r" % sc
+        assert "read-back could not verify a stored entry" in message_lower, \
+            "not_verifiable must state what read-back could not establish: %r" % sc
+        assert "stored connection credentials" not in message_lower, \
+            "not_verifiable must not claim a confirmed credential store: %r" % sc
+        assert "connection credentials were not stored" not in message_lower, \
+            "not_verifiable is distinct from a failed credential write: %r" % sc
+    finally:
+        _ensure_standalone_register_absent()
+
+    assert_no_diff("the OS-verification round-trip must not touch the committed fixture")

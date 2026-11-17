@@ -7,7 +7,7 @@ name: MCP Conformance (reusable)
 # the committed baseline of intentional gaps, so the gate catches protocol REGRESSIONS
 # — not the known, deliberate gaps.
 #
-# Runs entirely on STOCK GitHub-hosted runners (ubuntu-latest): no docker image, no
+# Runs entirely on STOCK GitHub-hosted runners (ubuntu-24.04, pinned): no docker image, no
 # self-hosted runner. The `build` job builds the MCP plugin; the `conformance` job then
 # uses the `setup-edt` composite to materialize Eclipse + 1C:EDT of inputs.edt (from the
 # public p2) + the built plugin, boots EDT headless under Xvfb, and the conformance
@@ -15,10 +15,9 @@ name: MCP Conformance (reusable)
 # platform license needed.
 #
 # Note: the plugin is COMPILED against the 2026.2 target platform (mcp/targets) but to
-# release 17 with BREE JavaSE-17, so one artifact resolves on 2026.1 and 2026.2 alike. This
-# gate runs it on 2026.2; the older EDT is the one covered by the bytecode level rather than
-# by a job here. EDT version ⇄ Eclipse base ⇄ JDK is one tuple: 2026.2 is
-# Eclipse 4.38 on Java 25, so a caller pinning an older EDT must pass its own trio.
+# release 17 with BREE JavaSE-17. All CI runs on the latest EDT; earlier versions are not
+# guaranteed. EDT version ⇄ Eclipse base ⇄ JDK is one tuple: 2026.2 is Eclipse 4.38 on
+# Java 25.
 
 on:
   workflow_call:
@@ -55,7 +54,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -72,14 +71,26 @@ jobs:
           java-version: 25
           cache: maven
 
+      # Maven is pinned, not the runner image's: see the action for why 3.10 breaks Tycho.
+      - name: Set up Maven
+        uses: ./.github/actions/setup-maven
+
+      # Before Maven: an inconsistent or drifted EDT channel must fail with its real reason, not
+      # with Tycho's opaque "bundleLocation can't be null". The served build also keys the cache,
+      # so a new EDT build saves a fresh cache instead of re-downloading its jars on every run.
+      - name: EDT channel guard
+        id: edt-channel
+        uses: ./.github/actions/edt-channel-guard
+
       - name: Cache Tycho P2 repositories
         uses: actions/cache@v6
         with:
           path: |
             ~/.m2/repository/.cache/tycho
             ~/.m2/repository/p2
-          key: ${{ runner.os }}-tycho-p2-${{ hashFiles('**/*.target') }}
+          key: ${{ runner.os }}-tycho-p2-${{ hashFiles('**/*.target') }}-${{ steps.edt-channel.outputs.edt-build }}
           restore-keys: |
+            ${{ runner.os }}-tycho-p2-${{ hashFiles('**/*.target') }}-
             ${{ runner.os }}-tycho-p2-
 
       - name: Build the MCP plugin (p2 repository)
@@ -97,7 +108,7 @@ jobs:
 
   conformance:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:

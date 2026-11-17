@@ -11,12 +11,39 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
+import org.eclipse.core.resources.IProject;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 
+import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociation;
+import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager;
+import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAssociationException;
+import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAssociationContext;
+import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAssociationSettings;
+import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
+import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
+import com.ditrix.edt.mcp.server.utils.git.BranchBindingLock;
+import com.ditrix.edt.mcp.server.utils.git.GitCheckoutSupport;
 
 /**
  * Tests for {@link CreateGitBranchTool}.
@@ -143,5 +170,236 @@ public class CreateGitBranchToolTest
         assertTrue("error must name the bad project", result.contains(NONEXISTENT_PROJECT)); //$NON-NLS-1$
         assertTrue("error must steer to list_projects", result.contains("list_projects")); //$NON-NLS-1$ //$NON-NLS-2$
         assertFalse("a rejected call must not claim success", result.contains("\"success\":true")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    // ==================== #684: the binding at creation is keyed by the created FULL ref ====================
+
+    private static final String SHORT = "feature/x"; //$NON-NLS-1$
+
+    private static final String FULL = "refs/heads/feature/x"; //$NON-NLS-1$
+
+    private static InfobaseReference infobase(String name)
+    {
+        InfobaseReference ref = mock(InfobaseReference.class);
+        when(ref.getName()).thenReturn(name);
+        return ref;
+    }
+
+    private static InfobaseAssociationContext attachedContext(IInfobaseAssociationManager manager, IProject project,
+        InfobaseReference ref)
+    {
+        ArgumentCaptor<InfobaseAssociationSettings> settings = ArgumentCaptor.forClass(InfobaseAssociationSettings.class);
+        verify(manager).associate(eq(project), eq(ref), settings.capture());
+        return settings.getValue().getContext();
+    }
+
+    @Test
+    public void theBindingAtCreationUsesTheFullBranchRef()
+    {
+        IInfobaseAssociationManager manager = mock(IInfobaseAssociationManager.class);
+        IProject project = mock(IProject.class);
+        InfobaseReference ref = infobase("Base1"); //$NON-NLS-1$
+        List<String> warnings = new ArrayList<>();
+
+        CreateGitBranchTool.bindResolved(manager, project, SHORT, FULL, "app1", ref, false, //$NON-NLS-1$
+            ToolResult.success(), warnings);
+
+        assertTrue("no warning expected: " + warnings, warnings.isEmpty()); //$NON-NLS-1$
+        assertEquals(InfobaseAssociationContext.of(FULL), attachedContext(manager, project, ref));
+    }
+
+    @Test
+    public void theBindingAtCreationNeverUsesTheShortKey()
+    {
+        IInfobaseAssociationManager manager = mock(IInfobaseAssociationManager.class);
+        IProject project = mock(IProject.class);
+        InfobaseReference ref = infobase("Base1"); //$NON-NLS-1$
+
+        CreateGitBranchTool.bindResolved(manager, project, SHORT, FULL, "app1", ref, true, //$NON-NLS-1$
+            ToolResult.success(), new ArrayList<>());
+
+        InfobaseAssociationContext shortKey = InfobaseAssociationContext.of(SHORT);
+        verify(manager, never()).associate(any(), any(), argThat(s -> s != null && shortKey.equals(s.getContext())));
+        verify(manager, never()).setDefaultInfobase(any(), any(), eq(shortKey));
+    }
+
+    @Test
+    public void setDefaultAtCreationUsesTheFullBranchRef()
+    {
+        IInfobaseAssociationManager manager = mock(IInfobaseAssociationManager.class);
+        IProject project = mock(IProject.class);
+        InfobaseReference ref = infobase("Base1"); //$NON-NLS-1$
+
+        CreateGitBranchTool.bindResolved(manager, project, SHORT, FULL, "app1", ref, true, //$NON-NLS-1$
+            ToolResult.success(), new ArrayList<>());
+
+        verify(manager).setDefaultInfobase(project, ref, InfobaseAssociationContext.of(FULL));
+    }
+
+    @Test
+    public void theBindingFollowsTheRefThatWasActuallyCreated()
+    {
+        // JGit creates refs/heads/<name> for ANY name, so a caller passing 'refs/heads/x' gets the branch
+        // refs/heads/refs/heads/x - the binding must land on THAT ref, not on a different branch 'x'.
+        IInfobaseAssociationManager manager = mock(IInfobaseAssociationManager.class);
+        IProject project = mock(IProject.class);
+        InfobaseReference ref = infobase("Base1"); //$NON-NLS-1$
+
+        CreateGitBranchTool.bindResolved(manager, project, "refs/heads/x", "refs/heads/refs/heads/x", "app1", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            ref, false, ToolResult.success(), new ArrayList<>());
+
+        assertEquals(InfobaseAssociationContext.of("refs/heads/refs/heads/x"), //$NON-NLS-1$
+            attachedContext(manager, project, ref));
+    }
+
+    @Test
+    public void theBindingAtCreationReadsBackTheFullBranchRef()
+    {
+        IInfobaseAssociationManager manager = mock(IInfobaseAssociationManager.class);
+        IProject project = mock(IProject.class);
+        InfobaseReference ref = infobase("ReadBackBase"); //$NON-NLS-1$
+        IInfobaseAssociation association = mock(IInfobaseAssociation.class);
+        when(association.getInfobases()).thenReturn(Arrays.asList(ref));
+        when(manager.getAssociation(project, InfobaseAssociationContext.of(FULL))).thenReturn(Optional.of(association));
+        ToolResult ok = ToolResult.success();
+
+        CreateGitBranchTool.bindResolved(manager, project, SHORT, FULL, "app1", ref, false, ok, //$NON-NLS-1$
+            new ArrayList<>());
+
+        String json = ok.toJson();
+        assertTrue("the read-back must come from the full-ref context: " + json, //$NON-NLS-1$
+            json.contains("\"infobases\":[\"ReadBackBase\"]")); //$NON-NLS-1$
+    }
+
+    // ==================== #684 gate: a default EDT refuses after a done attach ====================
+    //
+    // EDT records a default only for an infobase bound to the CHECKED-OUT branch; with checkout=false the
+    // new branch is not checked out, so setDefaultInfobase throws IllegalArgumentException after the attach.
+
+    private static ToolResult bindWithRefusedDefault(RuntimeException refusal, InfobaseReference ref,
+        List<String> warnings, IInfobaseAssociationManager manager, IProject project)
+    {
+        IInfobaseAssociation association = mock(IInfobaseAssociation.class);
+        when(association.getInfobases()).thenReturn(Arrays.asList(ref));
+        when(manager.getAssociation(project, InfobaseAssociationContext.of(FULL))).thenReturn(Optional.of(association));
+        doThrow(refusal).when(manager).setDefaultInfobase(any(), any(), any());
+        ToolResult ok = ToolResult.success();
+        CreateGitBranchTool.bindResolved(manager, project, SHORT, FULL, "app1", ref, true, ok, warnings); //$NON-NLS-1$
+        return ok;
+    }
+
+    @Test
+    public void aDefaultEdtRefusesIsAWarningAndTheAttachIsStillReadBack()
+    {
+        IInfobaseAssociationManager manager = mock(IInfobaseAssociationManager.class);
+        IProject project = mock(IProject.class);
+        InfobaseReference ref = infobase("Base1"); //$NON-NLS-1$
+        List<String> warnings = new ArrayList<>();
+
+        ToolResult ok = bindWithRefusedDefault(
+            new IllegalArgumentException("Project P is not associated with infobase Base1"), ref, warnings, //$NON-NLS-1$
+            manager, project);
+
+        assertEquals(InfobaseAssociationContext.of(FULL), attachedContext(manager, project, ref));
+        assertEquals("exactly one warning, about the default: " + warnings, 1, warnings.size()); //$NON-NLS-1$
+        assertTrue(warnings.get(0), warnings.get(0).contains(
+            "but EDT did not record it as the branch's default infobase (EDT: Project P is not associated " //$NON-NLS-1$
+                + "with infobase Base1)")); //$NON-NLS-1$
+        String json = ok.toJson();
+        assertTrue("the attach stands, so its read-back is reported: " + json, //$NON-NLS-1$
+            json.contains("\"infobases\":[\"Base1\"]")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void aDefaultRefusedWithAnAssociationErrorAtCreationIsNotAFailedAttach()
+    {
+        IInfobaseAssociationManager manager = mock(IInfobaseAssociationManager.class);
+        IProject project = mock(IProject.class);
+        InfobaseReference ref = infobase("Base1"); //$NON-NLS-1$
+        List<String> warnings = new ArrayList<>();
+
+        ToolResult ok = bindWithRefusedDefault(new InfobaseAssociationException("store failed"), ref, warnings, //$NON-NLS-1$
+            manager, project);
+
+        assertEquals(warnings.toString(), 1, warnings.size());
+        assertFalse("the attach did not fail: " + warnings, warnings.get(0).contains("attaching application")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(warnings.get(0), warnings.get(0).contains(
+            "but EDT failed to store it as the branch's default infobase: store failed.")); //$NON-NLS-1$
+        assertFalse("a store failure is not cured by a checkout, so no checkout advice: " + warnings, //$NON-NLS-1$
+            warnings.get(0).contains("switch_git_branch")); //$NON-NLS-1$
+        assertFalse("nor the refusal's explanation: " + warnings, warnings.get(0).contains("CHECKED-OUT")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(ok.toJson(), ok.toJson().contains("\"bound\"")); //$NON-NLS-1$
+    }
+
+    @Test(timeout = 60_000)
+    public void theAttachAtCreationWaitsWhileACheckoutHoldsTheSharedLock() throws Exception
+    {
+        // The attach is a binding write: it takes the lock set_branch_infobase's binding changes and this server's
+        // checkouts take (#656), so it cannot land inside a detach's re-check.
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread checkout = new Thread(() -> {
+            if (BranchBindingLock.tryLock())
+            {
+                try
+                {
+                    held.countDown();
+                    release.await(30, TimeUnit.SECONDS);
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                }
+                finally
+                {
+                    BranchBindingLock.unlock();
+                }
+            }
+        });
+        IInfobaseAssociationManager manager = mock(IInfobaseAssociationManager.class);
+        IProject project = mock(IProject.class);
+        InfobaseReference ref = infobase("Base1"); //$NON-NLS-1$
+        CountDownLatch attached = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            attached.countDown();
+            return null;
+        }).when(manager).associate(any(), any(), any());
+        List<String> warnings = new ArrayList<>();
+        Thread attach = new Thread(() -> CreateGitBranchTool.bindResolved(manager, project, SHORT, FULL, "app1", //$NON-NLS-1$
+            ref, false, ToolResult.success(), warnings));
+        checkout.start();
+        try
+        {
+            assertTrue("the checkout must take the lock", held.await(10, TimeUnit.SECONDS)); //$NON-NLS-1$
+            attach.start();
+            assertFalse("the attach must wait while a checkout holds the lock", //$NON-NLS-1$
+                attached.await(500, TimeUnit.MILLISECONDS));
+            release.countDown();
+            assertTrue("the attach must go on once the checkout is done", //$NON-NLS-1$
+                attached.await(10, TimeUnit.SECONDS));
+            attach.join(10_000);
+            assertTrue("no warning expected: " + warnings, warnings.isEmpty()); //$NON-NLS-1$
+        }
+        finally
+        {
+            release.countDown();
+            checkout.join(10_000);
+            attach.join(10_000);
+        }
+    }
+
+    /**
+     * A checkout Job that outlived its bounded wait may still be finishing, and is recorded as a running branch
+     * change (#656): the warning must not claim the branch is not checked out, and names the detach it blocks.
+     */
+    @Test
+    public void aTimedOutCheckoutWarningSaysTheCheckoutMayStillBeFinishingAndBlocksADetach()
+    {
+        String warning = CreateGitBranchTool.timedOutCheckoutWarning("feature/x"); //$NON-NLS-1$
+        assertEquals("Checkout of the newly created branch 'feature/x' timed out after " //$NON-NLS-1$
+            + GitCheckoutSupport.CHECKOUT_TIMEOUT_SECONDS
+            + " seconds; the branch was created, and its checkout may still be finishing - a " //$NON-NLS-1$
+            + "set_branch_infobase detach of the repository's projects is refused until it ends.", warning); //$NON-NLS-1$
+        assertFalse(warning, warning.contains("is not checked out")); //$NON-NLS-1$
     }
 }

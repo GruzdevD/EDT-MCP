@@ -6,6 +6,7 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -25,9 +26,11 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.MarkdownUtils;
 import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
 import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils;
+import com.ditrix.edt.mcp.server.utils.StartingLaunches;
 
 /**
  * Terminates 1C launches started from this EDT instance. The set of
@@ -78,6 +81,7 @@ public class TerminateLaunchTool implements IMcpTool
     private static final String R_TIMEOUT = "timeout"; //$NON-NLS-1$
     private static final String R_ALREADY_TERMINATED = "already_terminated"; //$NON-NLS-1$
     private static final String R_ERROR = "error"; //$NON-NLS-1$
+    private static final String R_STILL_STARTING = "still_starting"; //$NON-NLS-1$
 
     /** Input key: deprecated alias of the 'timeout' wait window in seconds. */
     private static final String KEY_TIMEOUT_SECONDS = "timeoutSeconds"; //$NON-NLS-1$
@@ -127,7 +131,8 @@ public class TerminateLaunchTool implements IMcpTool
                 "Required (true) when all=true; guards against accidental mass termination.") //$NON-NLS-1$
             .booleanProperty("force", //$NON-NLS-1$
                 "On polite-termination timeout, escalate to an OS-level process kill; " //$NON-NLS-1$
-                    + "may lose unsaved 1C state. Default false. Ignored for Attach.") //$NON-NLS-1$
+                    + "may lose unsaved 1C state. Also required to abort a launch EDT is still " //$NON-NLS-1$
+                    + "starting (refused otherwise). Default false. Ignored for Attach.") //$NON-NLS-1$
             .integerProperty(R_TIMEOUT,
                 "Polite-wait window per launch in seconds, clamped to [1, 120]. " //$NON-NLS-1$
                     + "Default from EDT preferences (factory default 10).") //$NON-NLS-1$
@@ -151,7 +156,7 @@ public class TerminateLaunchTool implements IMcpTool
         String name = JsonUtils.extractStringArgument(params, KEY_LAUNCH_CONFIGURATION_NAME);
         if (name != null && !name.isEmpty())
         {
-            String safe = name.replaceAll(UNSAFE_FILENAME_CHARS, "-").toLowerCase(); //$NON-NLS-1$
+            String safe = name.replaceAll(UNSAFE_FILENAME_CHARS, "-").toLowerCase(Locale.ROOT); //$NON-NLS-1$
             return "terminate-" + safe + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
         }
         boolean all = JsonUtils.extractBooleanArgument(params, "all", false); //$NON-NLS-1$
@@ -160,7 +165,7 @@ public class TerminateLaunchTool implements IMcpTool
             String project = JsonUtils.extractStringArgument(params, KEY_PROJECT_NAME);
             if (project != null && !project.isEmpty())
             {
-                String safe = project.replaceAll(UNSAFE_FILENAME_CHARS, "-").toLowerCase(); //$NON-NLS-1$
+                String safe = project.replaceAll(UNSAFE_FILENAME_CHARS, "-").toLowerCase(Locale.ROOT); //$NON-NLS-1$
                 return "terminate-all-" + safe + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
             }
             return "terminate-all.md"; //$NON-NLS-1$
@@ -172,8 +177,8 @@ public class TerminateLaunchTool implements IMcpTool
         String appId = JsonUtils.extractStringArgument(params, KEY_APPLICATION_ID);
         if (project != null && !project.isEmpty() && appId != null && !appId.isEmpty())
         {
-            String safeProject = project.replaceAll(UNSAFE_FILENAME_CHARS, "-").toLowerCase(); //$NON-NLS-1$
-            String safeAppId = appId.replaceAll(UNSAFE_FILENAME_CHARS, "-").toLowerCase(); //$NON-NLS-1$
+            String safeProject = project.replaceAll(UNSAFE_FILENAME_CHARS, "-").toLowerCase(Locale.ROOT); //$NON-NLS-1$
+            String safeAppId = appId.replaceAll(UNSAFE_FILENAME_CHARS, "-").toLowerCase(Locale.ROOT); //$NON-NLS-1$
             // Truncate to keep the path short — agents sometimes pass long UUIDs.
             if (safeAppId.length() > 16)
             {
@@ -629,9 +634,83 @@ public class TerminateLaunchTool implements IMcpTool
      * to {@link IProcess#terminate()} with a short grace wait. Records the outcome code
      * and any note on {@code result}; propagates {@link DebugException} to the caller.
      */
+    /** The OS process is gone; only EDT's debug session outlived it, so force cannot help. */
+    static final String CLIENT_EXITED_NOTE = "The 1C client process has exited, but EDT has not finished " //$NON-NLS-1$
+        + "ending its debug session (seen after terminating while profiling). launch with " //$NON-NLS-1$
+        + "restartIfRunning=true replaces it."; //$NON-NLS-1$
+
+    /** Nothing to kill: the launch has no process and no debug target yet. */
+    static final String EMPTY_LAUNCH_NOTE = "The launch has no 1C client process or debug target: it is still " //$NON-NLS-1$
+        + "starting (check edt_dialog action=list) or was cancelled at an EDT dialog. launch with " //$NON-NLS-1$
+        + "restartIfRunning=true replaces it."; //$NON-NLS-1$
+
+    /** EDT is still starting the launch, and the call did not ask to interrupt that. */
+    static String stillStartingNote(StartingLaunches.Phase phase)
+    {
+        return "Not terminated: EDT is still starting this launch (state: " + phase.token() + "). " //$NON-NLS-1$ //$NON-NLS-2$
+            + StartingLaunches.note(phase) + " Pass force=true to abort the start anyway."; //$NON-NLS-1$
+    }
+
+    /** The start was cancelled on request. */
+    static final String START_CANCELLED_NOTE = "The start was cancelled before the 1C client started. An " //$NON-NLS-1$
+        + "interrupted infobase load leaves an EDT 'Error synchronizing application' dialog: dismiss it with " //$NON-NLS-1$
+        + "edt_dialog, and expect the next launch to load the configuration again."; //$NON-NLS-1$
+
+    /** The launch ended without a client; only its leftover entry was removed. */
+    static final String ABANDONED_REMOVED_NOTE = "Its start had already ended without a 1C client; the leftover " //$NON-NLS-1$
+        + "launch was removed."; //$NON-NLS-1$
+
+    /**
+     * Ends a launch that has no client yet, which a plain terminate cannot: Eclipse never reports an empty launch
+     * as terminated. A start this tool's sibling {@code launch} is still running is left alone unless
+     * {@code force} is set, because cancelling it interrupts EDT's infobase load.
+     *
+     * @return {@code true} when the launch was handled here
+     */
+    static boolean endEmptyLaunch(ILaunch launch, int timeoutSeconds, boolean force, TerminationResult result)
+    {
+        if (!LaunchLifecycleUtils.emptyLaunch(launch))
+        {
+            return false;
+        }
+        boolean jobActive = StartingLaunches.startJobActive(launch);
+        if (!jobActive && !StartingLaunches.delegateReturned(launch))
+        {
+            return false; // started from EDT's UI: no start job of ours to read or cancel
+        }
+        if (jobActive && !force)
+        {
+            result.code = R_STILL_STARTING;
+            result.note = stillStartingNote(StartingLaunches.phase(launch));
+            return true;
+        }
+        switch (StartingLaunches.cancel(launch, result.applicationId, timeoutSeconds * 1000L))
+        {
+            case REMOVED:
+                result.code = R_TERMINATED;
+                result.note = jobActive ? START_CANCELLED_NOTE : ABANDONED_REMOVED_NOTE;
+                break;
+            case CLIENT_NOT_STOPPED:
+                result.code = R_TIMEOUT;
+                result.note = "The cancelled start had already started a 1C client, which did not confirm " //$NON-NLS-1$
+                    + "termination; retry terminate_launch."; //$NON-NLS-1$
+                break;
+            default:
+                result.code = R_TIMEOUT;
+                result.note = "The start was cancelled but EDT has not stopped it yet (an EDT dialog may be " //$NON-NLS-1$
+                    + "open - check edt_dialog action=list); retry terminate_launch."; //$NON-NLS-1$
+                break;
+        }
+        return true;
+    }
+
     private static void terminateRuntimeLaunch(ILaunch launch, int timeoutSeconds, boolean force,
             TerminationResult result) throws DebugException
     {
+        if (endEmptyLaunch(launch, timeoutSeconds, force, result))
+        {
+            return;
+        }
         launch.terminate();
         if (LaunchLifecycleUtils.waitForTerminated(launch, timeoutSeconds * 1000L))
         {
@@ -647,14 +726,18 @@ public class TerminateLaunchTool implements IMcpTool
             else
             {
                 result.code = R_TIMEOUT;
-                result.note = "Force-terminate sent but launch still not marked terminated."; //$NON-NLS-1$
+                result.note = LaunchLifecycleUtils.emptyLaunch(launch) ? EMPTY_LAUNCH_NOTE
+                    : LaunchLifecycleUtils.clientExited(launch) ? CLIENT_EXITED_NOTE
+                    : "Force-terminate sent but launch still not marked terminated."; //$NON-NLS-1$
             }
         }
         else
         {
             result.code = R_TIMEOUT;
-            result.note = "Still terminating in background. " //$NON-NLS-1$
-                + "Re-run with `force=true` to kill the OS process."; //$NON-NLS-1$
+            result.note = LaunchLifecycleUtils.emptyLaunch(launch) ? EMPTY_LAUNCH_NOTE
+                : LaunchLifecycleUtils.clientExited(launch) ? CLIENT_EXITED_NOTE
+                : "Still terminating in background. " //$NON-NLS-1$
+                    + "Re-run with `force=true` to kill the OS process."; //$NON-NLS-1$
         }
     }
 
@@ -879,6 +962,7 @@ public class TerminateLaunchTool implements IMcpTool
                 r -> R_DETACHED.equals(r.code), true);
             appendSection(sb, "## Already Terminated", results, //$NON-NLS-1$
                 r -> R_ALREADY_TERMINATED.equals(r.code), false);
+            appendIssueSection(sb, "## Still Starting (not terminated)", results, R_STILL_STARTING); //$NON-NLS-1$
             appendIssueSection(sb, "## Timed Out", results, R_TIMEOUT); //$NON-NLS-1$
             appendIssueSection(sb, "## Errors", results, R_ERROR); //$NON-NLS-1$
         }
@@ -925,6 +1009,7 @@ public class TerminateLaunchTool implements IMcpTool
                     c.detached++;
                     break;
                 case R_TIMEOUT:
+                case R_STILL_STARTING:
                     c.timedOut++;
                     break;
                 case R_ERROR:
@@ -963,6 +1048,9 @@ public class TerminateLaunchTool implements IMcpTool
                 break;
             case R_TIMEOUT:
                 sb.append("# Launch Termination Timed Out\n\n"); //$NON-NLS-1$
+                break;
+            case R_STILL_STARTING:
+                sb.append("# Launch Still Starting - Not Terminated\n\n"); //$NON-NLS-1$
                 break;
             case R_ERROR:
                 sb.append("# Launch Termination Failed\n\n"); //$NON-NLS-1$
@@ -1017,10 +1105,10 @@ public class TerminateLaunchTool implements IMcpTool
             sb.append("|---|---|---|---|---|\n"); //$NON-NLS-1$
             for (TerminationResult r : matching)
             {
-                sb.append("| ").append(escape(r.configName)) //$NON-NLS-1$
-                    .append(" | ").append(escape(r.projectName)) //$NON-NLS-1$
-                    .append(" | ").append(escape(r.debugServerUrl)) //$NON-NLS-1$
-                    .append(" | ").append(escape(r.infobaseAlias)) //$NON-NLS-1$
+                sb.append("| ").append(MarkdownUtils.escapeForTable(r.configName)) //$NON-NLS-1$
+                    .append(" | ").append(MarkdownUtils.escapeForTable(r.projectName)) //$NON-NLS-1$
+                    .append(" | ").append(MarkdownUtils.escapeForTable(r.debugServerUrl)) //$NON-NLS-1$
+                    .append(" | ").append(MarkdownUtils.escapeForTable(r.infobaseAlias)) //$NON-NLS-1$
                     .append(" | ").append(r.durationMs).append(" ms |\n"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
@@ -1030,10 +1118,10 @@ public class TerminateLaunchTool implements IMcpTool
             sb.append("|---|---|---|---|---|---|\n"); //$NON-NLS-1$
             for (TerminationResult r : matching)
             {
-                sb.append("| ").append(escape(r.configName)) //$NON-NLS-1$
-                    .append(" | ").append(escape(r.projectName)) //$NON-NLS-1$
-                    .append(" | ").append(escape(r.applicationId)) //$NON-NLS-1$
-                    .append(" | ").append(escape(r.mode)) //$NON-NLS-1$
+                sb.append("| ").append(MarkdownUtils.escapeForTable(r.configName)) //$NON-NLS-1$
+                    .append(" | ").append(MarkdownUtils.escapeForTable(r.projectName)) //$NON-NLS-1$
+                    .append(" | ").append(MarkdownUtils.escapeForTable(r.applicationId)) //$NON-NLS-1$
+                    .append(" | ").append(MarkdownUtils.escapeForTable(r.mode)) //$NON-NLS-1$
                     .append(" | ").append(r.code) //$NON-NLS-1$
                     .append(" | ").append(r.durationMs).append(" ms |\n"); //$NON-NLS-1$ //$NON-NLS-2$
             }
@@ -1060,11 +1148,11 @@ public class TerminateLaunchTool implements IMcpTool
         sb.append("|---|---|---|---|---|\n"); //$NON-NLS-1$
         for (TerminationResult r : matching)
         {
-            sb.append("| ").append(escape(r.configName)) //$NON-NLS-1$
-                .append(" | ").append(escape(r.projectName)) //$NON-NLS-1$
-                .append(" | ").append(escape(r.applicationId)) //$NON-NLS-1$
+            sb.append("| ").append(MarkdownUtils.escapeForTable(r.configName)) //$NON-NLS-1$
+                .append(" | ").append(MarkdownUtils.escapeForTable(r.projectName)) //$NON-NLS-1$
+                .append(" | ").append(MarkdownUtils.escapeForTable(r.applicationId)) //$NON-NLS-1$
                 .append(" | ").append(r.attach ? "Yes" : "No") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                .append(" | ").append(escape(r.note)).append(" |\n"); //$NON-NLS-1$ //$NON-NLS-2$
+                .append(" | ").append(MarkdownUtils.escapeForTable(r.note)).append(" |\n"); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -1097,22 +1185,12 @@ public class TerminateLaunchTool implements IMcpTool
         return sb.length() > 0 ? sb.toString() : "<empty>"; //$NON-NLS-1$
     }
 
-    private static String escape(String value)
-    {
-        if (value == null || value.isEmpty())
-        {
-            return ""; //$NON-NLS-1$
-        }
-        // Markdown table cell: escape pipes and collapse newlines.
-        return value.replace("|", "\\|").replace("\n", " "); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-    }
-
     /**
      * Captured snapshot of a launch's identity at termination time, plus the
      * outcome of the termination attempt. Built eagerly so the rendering code
      * can read the values after the underlying {@link ILaunch} is gone.
      */
-    private static final class TerminationResult
+    static final class TerminationResult
     {
         final String configName;
         final String projectName;

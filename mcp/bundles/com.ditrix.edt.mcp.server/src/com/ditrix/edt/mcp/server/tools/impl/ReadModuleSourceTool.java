@@ -6,16 +6,19 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import java.util.Locale;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
-import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.PlatformUI;
 
 import com.ditrix.edt.mcp.server.Activator;
+import com.ditrix.edt.mcp.server.HostKind;
 import com.ditrix.edt.mcp.server.preferences.ToolParameterSettings;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
@@ -27,6 +30,8 @@ import com.ditrix.edt.mcp.server.utils.FrontMatter;
 import com.ditrix.edt.mcp.server.utils.BslModuleUtils;
 import com.ditrix.edt.mcp.server.utils.InterceptionUtils;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
+import com.ditrix.edt.mcp.server.utils.ReadToolExecution;
+import com.ditrix.edt.mcp.server.utils.Refusals;
 
 /**
  * Tool to read BSL module source code (whole file or line range).
@@ -44,6 +49,9 @@ public class ReadModuleSourceTool implements IMcpTool
 
     /** Fallback when the {@code maxLines} tool parameter is not configured */
     private static final int DEFAULT_MAX_LINES = 500;
+
+    /** Maximum time spent waiting for the optional UI-thread interception footer. */
+    private static final long INTERCEPTION_FOOTER_TIMEOUT_SECONDS = 3;
 
     @Override
     public String getName()
@@ -85,7 +93,7 @@ public class ReadModuleSourceTool implements IMcpTool
         String modulePath = JsonUtils.extractStringArgument(params, McpKeys.MODULE_PATH);
         if (modulePath != null && !modulePath.isEmpty())
         {
-            String safeName = modulePath.replace("/", "-").replace("\\", "-").toLowerCase(); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            String safeName = modulePath.replace("/", "-").replace("\\", "-").toLowerCase(Locale.ROOT); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             return "source-" + safeName + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
         }
         return "module-source.md"; //$NON-NLS-1$
@@ -120,17 +128,20 @@ public class ReadModuleSourceTool implements IMcpTool
         }
         IProject project = ctx.project();
 
-        // Get file
-        IFile file = BslModuleUtils.resolveModuleFile(project, modulePath);
-        if (!file.exists())
-        {
-            return ToolResult.error("File not found: src/" + modulePath + //$NON-NLS-1$
-                   ". Use format like 'CommonModules/ModuleName/Module.bsl' or " + //$NON-NLS-1$
-                   "'Documents/DocName/ObjectModule.bsl'").toJson(); //$NON-NLS-1$
-        }
-
         try
         {
+            // Get file
+            IFile file = BslModuleUtils.resolveModuleFile(project, modulePath);
+            if (!file.exists())
+            {
+                return ToolResult.error("File not found: src/" + modulePath + //$NON-NLS-1$
+                       ". Use format like 'CommonModules/ModuleName/Module.bsl' or " + //$NON-NLS-1$
+                       "'Documents/DocName/ObjectModule.bsl'").toJson(); //$NON-NLS-1$
+            }
+
+            // Canonicalize the display path; the footer uses this same resolved file.
+            String canonicalModulePath = BslModuleUtils.sourceRelativePath(file);
+
             // Read file content with UTF-8 BOM detection
             List<String> allLines = BslModuleUtils.readFileLines(file);
 
@@ -146,7 +157,7 @@ public class ReadModuleSourceTool implements IMcpTool
             // Handle empty file
             if (totalLines == 0)
             {
-                return formatOutput(projectName, modulePath, allLines, 0, 0, 0, false, contentHash);
+                return formatOutput(projectName, canonicalModulePath, allLines, 0, 0, 0, false, contentHash);
             }
 
             // Determine range
@@ -172,18 +183,19 @@ public class ReadModuleSourceTool implements IMcpTool
                 truncated = true;
             }
 
-            String output = formatOutput(projectName, modulePath, allLines, from, to, totalLines, truncated, contentHash);
+            String output = formatOutput(projectName, canonicalModulePath, allLines, from, to, totalLines, truncated, contentHash);
 
-            // Extension interception (module-level, best-effort): if this module is
-            // adopted/intercepted across the base<->extension boundary, append the
-            // links below the code. The footer touches the EMF/Xtext model, so it MUST
-            // run on the UI thread like the sibling code tools (read_method_source /
-            // get_module_structure) - the rest of this read is plain file I/O off-thread.
-            String interception = interceptionFooterOnUi(project, modulePath);
+            // Keep the optional model footer on the windowed path; file reads also work without it.
+            String interception = interceptionFooterOnUi(file);
             return interception != null ? output + interception : output;
         }
         catch (Exception e)
         {
+            String refusal = Refusals.messageOf(e);
+            if (refusal != null)
+            {
+                return ToolResult.error(refusal).toJson();
+            }
             return ToolResult.error("Error reading file: " + e.getMessage()).toJson(); //$NON-NLS-1$
         }
     }
@@ -247,39 +259,100 @@ public class ReadModuleSourceTool implements IMcpTool
         return fm.wrapContent(sb.toString());
     }
 
-    /**
-     * Computes the module-level extension-interception footer on the UI thread.
-     * Loading the BSL module and navigating the platform interception service touch
-     * the EMF/Xtext model, which must happen on the UI thread (the sibling code tools
-     * read_method_source / get_module_structure already do their model access there).
-     * The rest of this tool is plain file I/O and stays off-thread. Best-effort: any
-     * failure (model not indexed, no display) yields {@code null} and the footer is
-     * simply omitted, leaving the code read unaffected.
-     *
-     * @param project the project handle
-     * @param modulePath the module path from src/
-     * @return the markdown footer, or {@code null} when there is none / on failure
-     */
-    private static String interceptionFooterOnUi(IProject project, String modulePath)
+    /** Optional windowed enrichment for the file already selected by the caller. */
+    private static String interceptionFooterOnUi(IFile file)
     {
+        if (HostKind.current() == HostKind.HEADLESS)
+        {
+            return null;
+        }
         AtomicReference<String> ref = new AtomicReference<>();
-        Runnable task = () -> ref.set(InterceptionUtils.moduleFooter(BslModuleUtils.loadModule(project, modulePath)));
+        AtomicReference<RuntimeException> failure = new AtomicReference<>();
+        CountDownLatch finished = new CountDownLatch(1);
+        AtomicBoolean expired = new AtomicBoolean();
+        Runnable task = () -> runFooterTaskUnlessExpired(expired, finished, () -> {
+            try
+            {
+                ref.set(ReadToolExecution.read(file.getProject(), NAME,
+                    () -> InterceptionUtils.moduleFooter(BslModuleUtils.loadModule(file))));
+            }
+            catch (RuntimeException e)
+            {
+                failure.set(e);
+            }
+        });
         try
         {
-            Display display = PlatformUI.getWorkbench().getDisplay();
-            if (display.getThread() == Thread.currentThread())
+            if (!ReadToolExecution.dispatchAsync(task))
             {
-                task.run();
-            }
-            else
-            {
-                display.syncExec(task);
+                String result = awaitComputedValue(ref, finished,
+                    INTERCEPTION_FOOTER_TIMEOUT_SECONDS, TimeUnit.SECONDS, expired);
+                if (expired.get() || Thread.currentThread().isInterrupted())
+                {
+                    String reason = Thread.currentThread().isInterrupted()
+                        ? "waiting was interrupted" //$NON-NLS-1$
+                        : "the UI thread did not respond within " //$NON-NLS-1$
+                            + INTERCEPTION_FOOTER_TIMEOUT_SECONDS + " seconds"; //$NON-NLS-1$
+                    Activator.logWarning("read_module_source: interception footer unavailable: " //$NON-NLS-1$
+                        + reason + "; returning the source without it"); //$NON-NLS-1$
+                    return null;
+                }
+                RuntimeException taskFailure = failure.get();
+                if (taskFailure != null)
+                {
+                    Activator.logWarning("read_module_source: interception footer unavailable: " //$NON-NLS-1$
+                        + taskFailure.getMessage());
+                }
+                return result;
             }
         }
         catch (RuntimeException e)
         {
             Activator.logWarning("read_module_source: interception footer unavailable: " + e.getMessage()); //$NON-NLS-1$
         }
+        RuntimeException taskFailure = failure.get();
+        if (taskFailure != null)
+        {
+            Activator.logWarning("read_module_source: interception footer unavailable: " //$NON-NLS-1$
+                + taskFailure.getMessage());
+        }
         return ref.get();
+    }
+
+    /** Drops queued UI work whose caller has already stopped waiting. */
+    static void runFooterTaskUnlessExpired(AtomicBoolean expired, CountDownLatch finished,
+        Runnable work)
+    {
+        try
+        {
+            if (!expired.get())
+            {
+                work.run();
+            }
+        }
+        finally
+        {
+            finished.countDown();
+        }
+    }
+
+    static <T> T awaitComputedValue(AtomicReference<T> value, CountDownLatch finished,
+            long timeout, TimeUnit unit, AtomicBoolean deadlineElapsed)
+    {
+        try
+        {
+            if (finished.await(timeout, unit))
+            {
+                return value.get();
+            }
+            deadlineElapsed.set(true);
+            return null;
+        }
+        catch (InterruptedException e)
+        {
+            deadlineElapsed.set(true);
+            Thread.currentThread().interrupt();
+            return null;
+        }
     }
 }

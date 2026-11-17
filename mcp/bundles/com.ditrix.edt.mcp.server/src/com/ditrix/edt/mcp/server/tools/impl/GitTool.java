@@ -9,7 +9,6 @@ package com.ditrix.edt.mcp.server.tools.impl;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.CoreException;
-import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.OperationCanceledException;
@@ -32,29 +31,40 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 import org.eclipse.jgit.errors.ConfigInvalidException;
 import org.eclipse.jgit.lib.Config;
+import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.storage.file.FileBasedConfig;
 
 import com.ditrix.edt.mcp.server.Activator;
+import com.ditrix.edt.mcp.server.protocol.GsonProvider;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.McpKeys;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.protocol.jsonrpc.ToolAnnotations;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.BackgroundJobPolling;
+import com.ditrix.edt.mcp.server.utils.BackgroundJobs;
 import com.ditrix.edt.mcp.server.utils.ConsentPreview;
 import com.ditrix.edt.mcp.server.utils.McpJobs;
-import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.DestructiveConsentGate;
+import com.ditrix.edt.mcp.server.utils.git.BranchBindingLock;
+import com.ditrix.edt.mcp.server.utils.git.GitCheckoutSupport;
+import com.ditrix.edt.mcp.server.utils.git.GitCloneTarget;
 import com.ditrix.edt.mcp.server.utils.git.GitFailureLog;
 import com.ditrix.edt.mcp.server.utils.git.GitCommonDirectory;
 import com.ditrix.edt.mcp.server.utils.git.GitRepositoryResolver;
+import com.ditrix.edt.mcp.server.utils.git.WorkTreeProjects;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 /**
  * Runs a git command in a project's repository via the real {@code git} CLI - the non-UI equivalent of
@@ -111,6 +121,12 @@ public class GitTool implements IMcpTool
     /** Upper bound on the returned combined stdout+stderr, so a huge log/diff cannot flood the wire. */
     static final int MAX_OUTPUT_CHARS = 100_000;
 
+    /** What {@link #escapeControlBytes} writes in front of the two hex digits. */
+    private static final String ESCAPE_PREFIX = "\\x"; //$NON-NLS-1$
+
+    /** Spare capacity for the first escapes, so the common case does not reallocate immediately. */
+    private static final int ESCAPE_HEADROOM_CHARS = 16;
+
     /**
      * Upper bound on the command STRING. Everything reflected back - the rejection text, the echoed
      * {@code command}, the consent preview - is derived from it, so an unbounded one would let a
@@ -123,13 +139,109 @@ public class GitTool implements IMcpTool
      * rejected with an actionable error (extend deliberately). Deliberately EXCLUDED: {@code config}
      * (sets {@code core.sshCommand} / aliases = arbitrary exec), {@code clean} / {@code gc} /
      * {@code reset} (irrecoverable data loss), {@code filter-branch} / {@code submodule} /
-     * {@code worktree} / {@code daemon} / {@code credential} / {@code init} / {@code clone}.
+     * {@code worktree} / {@code daemon} / {@code credential}.
+     * <p>
+     * {@code init} is IN, on its own terms (#934): it is the one subcommand that runs where there is
+     * NO repository yet, so it takes the project's own folder instead of a resolved repository
+     * ({@link #executeInit}), refuses a project that already belongs to one, and accepts only the
+     * narrow grammar of {@link #checkInitGrammar}.
+     * <p>
+     * {@code clone} is IN on its own terms too (#934): it takes no project at all - the target is its
+     * directory operand, judged by {@link GitCloneTarget} - accepts only the grammar of
+     * {@link #checkCloneGrammar}, and runs as a background job ({@link #executeClone}).
      */
     static final Set<String> ALLOWED_SUBCOMMANDS = Set.of(
         "status", "diff", "log", "show", "blame", "ls-files", "rev-parse", "describe", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$
         "add", "restore", "commit", "stash", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "fetch", "pull", "push", "merge", "cherry-pick", "revert", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-        "branch", "checkout", "switch", "tag", "remote"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        "branch", "checkout", "switch", "tag", "remote", "init", "clone"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
+
+    /** The subcommand that creates a repository in the project folder (#934). */
+    static final String INIT = "init"; //$NON-NLS-1$
+
+    /** The subcommand that copies a remote repository into a new directory (#934). */
+    static final String CLONE = "clone"; //$NON-NLS-1$
+
+    /** The most a clone may run before its process is killed: a large repository over a slow link. */
+    static final long CLONE_TIMEOUT_SECONDS = 30L * 60;
+
+    /**
+     * How long the {@code clone} call itself waits for the job before it answers with the job id: a
+     * clone that fails at once - no credentials, an unknown host - comes back in the same call.
+     */
+    static final int CLONE_CALL_WAIT_SECONDS = 20;
+
+    /** Job budget on top of the clone's own limit: room to kill the process and take the partial clone back. */
+    private static final long CLONE_CLEANUP_MARGIN_MILLIS = 60_000;
+
+    /**
+     * The URL schemes a clone accepts: https, ssh (in git's three spellings) and git - plus git's
+     * scp-like {@code [user@]host:path} ({@link #SCP_URL}). Narrower than {@link #SAFE_URL_SCHEMES}:
+     * {@code file://} and a local path would copy a repository from anywhere on disk, and plain
+     * {@code http}/{@code ftp(s)} are left out of a NEW remote by the plan of #934.
+     */
+    private static final Set<String> CLONE_SCHEMES =
+        Set.of("https", "ssh", "git+ssh", "ssh+git", "git"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+
+    /**
+     * git's scp-like remote, {@code [user@]host:path}: a {@code :} before any {@code /} or {@code \},
+     * a host of two characters or more (a one-letter "host" is a Windows drive, which git reads as a
+     * local path) or a bracketed IPv6 address, and neither the user nor the host starting with
+     * {@code -} (ssh would read it as an option).
+     */
+    private static final Pattern SCP_URL = Pattern.compile(
+        "^(?:[A-Za-z0-9._~][A-Za-z0-9._~+\\-]*+@)?+(?:\\[[0-9A-Fa-f:.]++\\]|[A-Za-z0-9][A-Za-z0-9._\\-]++):([^\\\\].*+)$"); //$NON-NLS-1$
+
+    /** git's documented filter-spec forms a clone accepts; {@code sparse:} and {@code combine:} are not among them. */
+    private static final Pattern CLONE_FILTER = Pattern.compile(
+        "blob:none|blob:limit=[0-9]++[kKmMgG]?+|tree:[0-9]++|object:type=(?:blob|tree|commit|tag)"); //$NON-NLS-1$
+
+    /** The result key naming the directory a clone went into. */
+    private static final String KEY_DIRECTORY = "directory"; //$NON-NLS-1$
+
+    /** The result key of the background job a clone runs in. */
+    private static final String KEY_JOB_ID = "jobId"; //$NON-NLS-1$
+
+    /** The result key of that job's state: {@code running}, {@code done}, {@code failed}, {@code cancelled}. */
+    private static final String KEY_STATUS = "status"; //$NON-NLS-1$
+
+    /** The result key of what EDT's git integration cannot use in a fresh clone. */
+    private static final String KEY_WARNINGS = "warnings"; //$NON-NLS-1$
+
+    /** The result key saying whether a failed clone was taken back. */
+    private static final String KEY_CLEANED_UP = "cleanedUp"; //$NON-NLS-1$
+
+    /** The background-job registry a clone runs in. */
+    private final BackgroundJobs jobs;
+
+    /** Test seam: makes each clone's cancellation state. */
+    java.util.function.Supplier<CloneControl> controls = CloneControl::new;
+
+    /** A tool on the bundle-wide job registry. */
+    public GitTool()
+    {
+        this(BackgroundJobs.shared());
+    }
+
+    /** @param jobs the job registry a clone runs in (a test passes its own) */
+    GitTool(BackgroundJobs jobs)
+    {
+        this.jobs = jobs;
+    }
+
+    /** {@code git init}'s long option for the initial branch, spelled in full. */
+    private static final String INITIAL_BRANCH_OPTION = "--initial-branch"; //$NON-NLS-1$
+
+    /** The result key that carries what to do after a successful {@code init}. */
+    private static final String KEY_NEXT_STEP = "nextStep"; //$NON-NLS-1$
+
+    /**
+     * What a successful {@code init} leaves to the user. Connecting the project to EGit is EGit's
+     * {@code ConnectProviderOperation}, an internal ({@code x-friends}) API, so this tool does not do it.
+     */
+    static final String INIT_NEXT_STEP = "The repository is created but EDT does not use it yet: connect the " //$NON-NLS-1$
+        + "project with Team -> Share Project -> Git in EDT (it finds this repository in the project " //$NON-NLS-1$
+        + "folder), then commit."; //$NON-NLS-1$
 
     /**
      * Long options that could make git execute an arbitrary program or operate on a different
@@ -262,7 +374,14 @@ public class GitTool implements IMcpTool
      */
     private static final Set<String> LOGGABLE_ARGUMENT_SUBCOMMANDS = Set.of(
         "restore", "checkout", "switch", "add", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "branch", "remote", "revert", "cherry-pick"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "branch", "remote", "revert", "cherry-pick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        // init's accepted grammar is -q and a branch NAME (checkInitGrammar); its preview adds the
+        // folder the repository is created in - a path, the record of where it happened.
+        INIT,
+        // clone's accepted grammar is a URL that may carry no credential (parseCommand refuses one),
+        // a target directory, branch/remote names, a depth and a filter spec (checkCloneGrammar) - no
+        // caller-authored message; the record of what was copied where.
+        CLONE);
 
     /** How long the MCP call waits for the post-command workspace refresh before returning. */
     private static final long REFRESH_WAIT_SECONDS = 30;
@@ -560,6 +679,25 @@ public class GitTool implements IMcpTool
             "clean", "apply", "cherry-pick", "revert"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 
     /**
+     * Subcommands that can change the branch a project's repository has checked out ({@code branch} through
+     * {@code -m}/{@code -M} on the checked-out branch; {@code pull} through {@code --rebase} or a configured
+     * {@code pull.rebase}, which detaches HEAD while the rebase runs and leaves it detached when it stops on a
+     * conflict): they run under {@link BranchBindingLock}, the lock {@code set_branch_infobase}'s binding changes
+     * take (#656), so none lands between a detach's re-check and EDT's write. {@code stash} joins them in its
+     * {@code stash branch <name>} form, which checks a new branch out ({@link #changesBranch}). The rest of
+     * {@link #ALLOWED_SUBCOMMANDS} moves no branch: {@code merge}, {@code cherry-pick} and {@code revert} commit
+     * on the checked-out branch, conflict or not; {@code fetch} never moves HEAD; {@code rebase} itself is not on
+     * it.
+     */
+    private static final Set<String> BRANCH_CHANGING = Set.of("checkout", "switch", "branch", "pull"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+
+    /** The subcommand whose {@code branch} form checks a new branch out ({@code git stash branch <name>}). */
+    private static final String STASH = "stash"; //$NON-NLS-1$
+
+    /** {@code git stash}'s subcommand that checks a new branch out. */
+    private static final String STASH_BRANCH = "branch"; //$NON-NLS-1$
+
+    /**
      * A transport-helper remote ({@code <helper>::<address>}, e.g. {@code ext::sh -c ...} / {@code fd::})
      * - rejected: the {@code ext} helper runs an arbitrary command, and {@code remote add}/{@code set-url}
      * would PERSIST it (beyond what {@code GIT_ALLOW_PROTOCOL} blocks at use time). The two-colon form
@@ -598,7 +736,9 @@ public class GitTool implements IMcpTool
     {
         return "Run a git command in a project's repository through the real git CLI, sent as a shell-style " //$NON-NLS-1$
             + "string. Only a whitelisted set of subcommands runs, and the write-capable ones (commit, push, " //$NON-NLS-1$
-            + "checkout, stash) change the repository. DISABLED by default: enable it in Preferences -> MCP " //$NON-NLS-1$
+            + "checkout, stash) change the repository. 'clone <url> <directory>' takes no projectName and runs " //$NON-NLS-1$
+            + "in background: an unfinished call returns a jobId - poll get_job_status, do not call again. " //$NON-NLS-1$
+            + "DISABLED by default: enable it in Preferences -> MCP " //$NON-NLS-1$
             + "Server -> Tools; enable_toolset does not turn it on. Parameters, the whitelist and examples: " //$NON-NLS-1$
             + "get_tool_guide('git')."; //$NON-NLS-1$
     }
@@ -608,7 +748,8 @@ public class GitTool implements IMcpTool
     {
         return JsonSchemaBuilder.object()
             .stringProperty(McpKeys.PROJECT_NAME,
-                "EDT project whose git repository to run in (required).", true) //$NON-NLS-1$
+                "EDT project whose git repository to run in; required for every subcommand except 'clone', " //$NON-NLS-1$
+                + "which takes none.") //$NON-NLS-1$
             .stringProperty(KEY_COMMAND,
                 "The git command to run, shell-style (required). A leading 'git' is optional. Examples: " //$NON-NLS-1$
                 + "'status', 'diff HEAD~1', 'commit -m \"fix\"', 'push origin main'. Quotes group " //$NON-NLS-1$
@@ -622,15 +763,28 @@ public class GitTool implements IMcpTool
     public String getOutputSchema()
     {
         return JsonSchemaBuilder.object()
-            .booleanProperty("success", "Whether git exited with code 0", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("success", "Whether git exited with code 0; true for a 'clone' still running " //$NON-NLS-1$ //$NON-NLS-2$
+                + "in the background (status 'running')", true) //$NON-NLS-1$
             .stringProperty("error", "Actionable message when success is false (rejected command, git " //$NON-NLS-1$ //$NON-NLS-2$
                 + "non-zero exit, timeout, or a run failure)") //$NON-NLS-1$
             .integerProperty(KEY_EXIT_CODE, "The git process exit code (0 = success); absent on a rejected " //$NON-NLS-1$
                 + "command or a run/timeout failure") //$NON-NLS-1$
             .stringProperty(KEY_COMMAND, "Display form of the command that was run ('git ...', arguments " //$NON-NLS-1$
                 + "joined by spaces - not an exact re-quoting)") //$NON-NLS-1$
-            .stringProperty(KEY_OUTPUT, "Combined stdout+stderr from git (bounded); also present on timeout") //$NON-NLS-1$
+            .stringProperty(KEY_OUTPUT, "Combined stdout+stderr from git (bounded); also present on " //$NON-NLS-1$
+                + "timeout. C0 control bytes (0x00-0x1F) and DEL (0x7F) arrive escaped as \\xNN; tab, LF " //$NON-NLS-1$
+                + "and CR are kept as-is, and C1 (0x80-0x9F) is not touched; text that literally spells " //$NON-NLS-1$
+                + "\\x01 is indistinguishable from the byte") //$NON-NLS-1$
             .booleanProperty(KEY_TRUNCATED, "Present and true when 'output' was truncated to the size cap") //$NON-NLS-1$
+            .stringProperty(KEY_NEXT_STEP, "Present after a successful 'init' or 'clone': what is left to do " //$NON-NLS-1$
+                + "in EDT (connect the repository / import the cloned projects)") //$NON-NLS-1$
+            .stringProperty(KEY_JOB_ID, "'clone' only: the background job it runs in (poll get_job_status)") //$NON-NLS-1$
+            .stringProperty(KEY_STATUS, "'clone' only: the job's state - running, done, failed or cancelled") //$NON-NLS-1$
+            .stringProperty(KEY_DIRECTORY, "'clone' only: the real path of the directory cloned into") //$NON-NLS-1$
+            .stringArrayProperty(KEY_WARNINGS, "'clone' only: what the git integration bundled with EDT cannot " //$NON-NLS-1$
+                + "use in the new repository (a SHA-256 or partial clone), or a staging directory left behind") //$NON-NLS-1$
+            .booleanProperty(KEY_CLEANED_UP, "'clone' only, on failure: whether what the clone wrote was " //$NON-NLS-1$
+                + "removed again") //$NON-NLS-1$
             .build();
     }
 
@@ -652,7 +806,8 @@ public class GitTool implements IMcpTool
     @Override
     public String execute(Map<String, String> params)
     {
-        String err = JsonUtils.requireArguments(params, McpKeys.PROJECT_NAME, KEY_COMMAND);
+        // projectName is checked after the parse: 'clone' is the one subcommand that takes none.
+        String err = JsonUtils.requireArguments(params, KEY_COMMAND);
         if (err != null)
         {
             return err;
@@ -670,6 +825,20 @@ public class GitTool implements IMcpTool
         catch (CommandRejectedException e)
         {
             return ToolResult.error(e.getMessage()).toJson();
+        }
+        if (CLONE.equals(argv.get(1)))
+        {
+            return executeClone(projectName, argv);
+        }
+        err = JsonUtils.requireArguments(params, McpKeys.PROJECT_NAME);
+        if (err != null)
+        {
+            return err;
+        }
+        if (INIT.equals(argv.get(1)))
+        {
+            // The one subcommand with no repository to resolve: it runs in the project FOLDER.
+            return executeInit(projectName, argv);
         }
 
         GitRepositoryResolver.Resolution resolution = null;
@@ -700,18 +869,20 @@ public class GitTool implements IMcpTool
             // The refresh budget starts HERE, not before the consent prompt: an operator taking a
             // minute to approve must not eat the wait the workspace refresh needs afterwards.
             long startedAt = System.nanoTime();
-            String output = runGit(argv, workTree);
             // A command that rewrites the working tree changed files behind Eclipse's back: refresh the
             // project so the workspace - and the EDT model built on it - sees them. Refreshed on ANY
-            // outcome, not just success: a merge/cherry-pick/revert that hits conflicts, fails late
-            // (e.g. while signing) or times out has usually ALREADY updated the index and worktree, and
+            // outcome of the process, not just success: a merge/cherry-pick/revert that hits conflicts, fails
+            // late (e.g. while signing) or times out has usually ALREADY updated the index and worktree, and
             // leaving EDT stale after that is worse than a redundant refresh. Best-effort: a refresh
-            // failure is logged, never turned into a failed git result.
-            if (changesWorkTree(argv))
-            {
-                refreshWorkTree(workTree, startedAt);
-            }
-            return output;
+            // failure is logged, never turned into a failed git result. A branch-changing command keeps
+            // the binding lock through it (runGit).
+            boolean worktreeChanging = changesWorkTree(argv);
+            return runGitWith(argv, workTree, change -> {
+                if (worktreeChanging)
+                {
+                    refreshWorkTree(workTree, startedAt, change);
+                }
+            });
         }
         catch (Exception e) // NOSONAR unattended-safety: no exception may escape the tool (CLAUDE.md #8)
         {
@@ -757,7 +928,12 @@ public class GitTool implements IMcpTool
      * first three and never looks at the fourth; {@link #urlLimit} does not stop, but it only bounds
      * where one URL ends), so {@code remote -v} / {@code push} would print such a stored remote
      * verbatim; a raw control character is refused alongside them because the redaction masks
-     * credentials and never removes a byte. The remotes are read from the {@link Repository} this
+     * credentials and never removes a byte. {@link #escapeControlBytes} spells MOST such bytes
+     * {@code \xNN} on the way out - but NOT tab, LF or CR, which it deliberately keeps, and a stored
+     * remote carrying one of those three is refused here all the same. Either way that escaping is a
+     * safeguard on how the output RENDERS and does not lift this refusal: what is judged here is the
+     * stored entry, and a control character can never occur in a legitimate remote address. The
+     * remotes are read from the {@link Repository} this
      * call already holds - no extra git process is started for it.
      * <p>
      * {@link #requireConsentFor} deliberately stays OUT of this seam: it may block on a human, which
@@ -781,6 +957,1249 @@ public class GitTool implements IMcpTool
             return ToolResult.error(storedRefusal).toJson();
         }
         return null;
+    }
+
+    /**
+     * {@code git init} for a project (#934): creates a repository in the project's own folder.
+     * <p>
+     * It cannot take the path every other subcommand takes, because that path starts by resolving
+     * the repository and there is none yet. In its place {@link GitRepositoryResolver#resolveInitTarget}
+     * resolves the project folder and REFUSES when the project already belongs to a repository - an
+     * EGit mapping or a {@code .git} up the tree - since {@code init} there would nest one repository
+     * in another. Then the same order as {@link #execute}: consent last, the bounded process, and the
+     * workspace refresh, which here makes Eclipse see the new {@code .git} folder.
+     * <p>
+     * EGit is not connected: its {@code ConnectProviderOperation} is internal API ({@code x-friends}),
+     * so a successful answer names that step instead ({@link #INIT_NEXT_STEP}).
+     *
+     * @param projectName the EDT project whose folder becomes the work tree
+     * @param argv the validated argument vector ({@code git init ...})
+     * @return the result JSON
+     */
+    private String executeInit(String projectName, List<String> argv)
+    {
+        try
+        {
+            GitRepositoryResolver.InitTarget target = GitRepositoryResolver.resolveInitTarget(projectName);
+            if (!target.ok())
+            {
+                return target.errorJson();
+            }
+            File folder = target.folder();
+            String consentError = requireConsent(initConsentPreview(argv, folder));
+            if (consentError != null)
+            {
+                return consentError;
+            }
+            long startedAt = System.nanoTime();
+            // No branch change: init moves no branch, so it refreshes like every non-branch command (null).
+            return runInit(argv, folder, () -> refreshWorkTree(folder, startedAt, null));
+        }
+        catch (Exception e) // NOSONAR unattended-safety: no exception may escape the tool (CLAUDE.md #8)
+        {
+            Activator.logError("git: init failed for project '" + projectName + "'", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return ToolResult.error("Failed to run git init for '" + projectName + "': " + e.getMessage()).toJson(); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Runs a validated {@code git init} in {@code folder}, then {@code afterProcess}; a successful
+     * answer carries {@link #INIT_NEXT_STEP}. The seam the process tests drive: everything
+     * {@link #executeInit} adds before it needs an EDT project or a human.
+     *
+     * @param argv the validated argument vector ({@code git init ...})
+     * @param folder the project folder to create the repository in
+     * @param afterProcess the workspace refresh, or {@code null}
+     * @return the result JSON
+     */
+    String runInit(List<String> argv, File folder, Runnable afterProcess)
+    {
+        // Straight to the process: init changes no branch ({@link #changesBranch} is false for it), so
+        // there is no binding lock to take and no branch change to register.
+        String output = runGitProcess(argv, folder, result -> result.put(KEY_NEXT_STEP, INIT_NEXT_STEP));
+        if (afterProcess != null)
+        {
+            afterProcess.run();
+        }
+        return output;
+    }
+
+    /**
+     * The preview a human sees before {@code git init} runs. Unlike the other subcommands' preview
+     * it names the FOLDER: what is being decided is where a repository appears, and the command
+     * alone ({@code init -b main}) does not say that.
+     *
+     * @param argv the validated argument vector ({@code git init ...})
+     * @param folder the project folder the repository is created in
+     * @return the preview to put in front of the gate
+     */
+    static ConsentPreview initConsentPreview(List<String> argv, File folder)
+    {
+        return new ConsentPreview("git " + INIT, //$NON-NLS-1$
+            "'git init' creates a new git repository (a '.git' folder) in the project folder '" + folder //$NON-NLS-1$
+                + "'. Files already there stay untouched and untracked.", //$NON-NLS-1$
+            1, argv.size() > 2 ? List.of(folder.getPath(), renderArguments(argv.subList(1, argv.size())))
+                : List.of(folder.getPath()));
+    }
+
+    /**
+     * Refuses anything in a {@code git init} command but the two options it may carry here.
+     * <p>
+     * An ALLOW-list, unlike the deny-list every other subcommand gets: {@code init} takes no
+     * operand this tool would want (the repository goes in the project folder, nowhere else), and
+     * most of its options put the repository elsewhere or make it one the EDT side cannot use, so
+     * listing the good ones is both shorter and safe by default:
+     * <ul>
+     * <li>{@code -q} / {@code --quiet};</li>
+     * <li>{@code -b <name>} / {@code --initial-branch=<name>}, also {@code -b<name>},
+     * {@code --initial-branch <name>} and a cluster such as {@code -qb <name>} - the letters are read
+     * the way git reads them, so everything after {@code b} is the name.</li>
+     * </ul>
+     * Refused: a directory operand, {@code --bare} and {@code --separate-git-dir} (the repository
+     * would not be the project folder's), {@code --shared} (permissions), {@code --object-format}
+     * (a SHA-256 repository: the bundled JGit 6.8 opens one but cannot read a single object - measured
+     * as {@code MissingObjectException} on the first commit), {@code --template} (already blocked for
+     * every subcommand), and any other or abbreviated option. A branch name must not start with
+     * {@code -} (it would read as a forgotten value) and must make a valid ref under
+     * {@code refs/heads/}.
+     *
+     * @param args the tokens after {@code init}
+     * @throws CommandRejectedException naming the token and what is accepted instead
+     */
+    static void checkInitGrammar(List<String> args) throws CommandRejectedException
+    {
+        for (int i = 0; i < args.size(); i++)
+        {
+            String token = args.get(i);
+            if ("-q".equals(token) || "--quiet".equals(token)) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                continue;
+            }
+            if (INITIAL_BRANCH_OPTION.equals(token))
+            {
+                i++;
+                checkInitialBranch(i < args.size() ? args.get(i) : null);
+                continue;
+            }
+            if (token.startsWith(INITIAL_BRANCH_OPTION + '='))
+            {
+                checkInitialBranch(token.substring(INITIAL_BRANCH_OPTION.length() + 1));
+                continue;
+            }
+            if (token.startsWith("--")) //$NON-NLS-1$
+            {
+                throw initOptionRefused(safeToken(token));
+            }
+            if (token.length() < 2 || token.charAt(0) != '-')
+            {
+                throw new CommandRejectedException("'git init' takes no directory or other operand here: " //$NON-NLS-1$
+                    + "the repository is always created in the project's own folder (projectName). Drop " //$NON-NLS-1$
+                    + "the operand; to create it elsewhere, use a project located there."); //$NON-NLS-1$
+            }
+            i = checkInitCluster(token, args, i);
+        }
+    }
+
+    /**
+     * One short-option cluster of {@code git init}: any number of {@code q}, then optionally
+     * {@code b}, whose value is the rest of the cluster or, when that is empty, the next token.
+     *
+     * @return the index of the last token consumed
+     */
+    private static int checkInitCluster(String token, List<String> args, int index)
+        throws CommandRejectedException
+    {
+        for (int c = 1; c < token.length(); c++)
+        {
+            char letter = token.charAt(c);
+            if (letter == 'q')
+            {
+                continue;
+            }
+            if (letter == 'b')
+            {
+                String attached = token.substring(c + 1);
+                if (!attached.isEmpty())
+                {
+                    checkInitialBranch(attached);
+                    return index;
+                }
+                int next = index + 1;
+                checkInitialBranch(next < args.size() ? args.get(next) : null);
+                return next;
+            }
+            throw initOptionRefused("-" + letter); //$NON-NLS-1$
+        }
+        return index;
+    }
+
+    /** Refuses an initial branch name that is missing, looks like an option, or is not a valid branch. */
+    private static void checkInitialBranch(String name) throws CommandRejectedException
+    {
+        if (name == null || name.isEmpty() || name.startsWith("-")) //$NON-NLS-1$
+        {
+            throw new CommandRejectedException("'git init -b' / '--initial-branch' needs a branch name " //$NON-NLS-1$
+                + "right after it, e.g. 'init -b main'; the name must not start with '-'."); //$NON-NLS-1$
+        }
+        // 'HEAD' passes the ref-name rules and git 2.35 creates refs/heads/HEAD from it (measured), a
+        // branch 'git branch' itself refuses to name - so it is refused here.
+        if (Constants.HEAD.equals(name) || !Repository.isValidRefName(Constants.R_HEADS + name))
+        {
+            throw new CommandRejectedException("The initial branch name given to 'git init' is not a " //$NON-NLS-1$
+                + "valid git branch name (no spaces, control characters, '..', '~', '^', ':', '?', '*', " //$NON-NLS-1$
+                + "'[' or '\\', and it must not end with '/' or '.lock'). Pass a plain name such as 'main'."); //$NON-NLS-1$
+        }
+    }
+
+    private static CommandRejectedException initOptionRefused(String option)
+    {
+        return new CommandRejectedException("The option '" + option + "' is not accepted for 'git init'. " //$NON-NLS-1$ //$NON-NLS-2$
+            + "Only -q/--quiet and -b <name>/--initial-branch=<name> are, spelled in full: the " //$NON-NLS-1$
+            + "repository is always the project folder's own (no --bare, --separate-git-dir), " //$NON-NLS-1$
+            + "--shared changes file permissions, and --object-format=sha256 makes a repository " //$NON-NLS-1$
+            + "the git integration in EDT cannot read."); //$NON-NLS-1$
+    }
+
+    // ==================== clone (#934) ====================
+
+    /**
+     * {@code git clone <url> <directory>} (#934): copies a remote repository into a NEW
+     * directory, in a background job.
+     * <p>
+     * It takes no project - the target is the directory operand - so a {@code projectName} is refused
+     * rather than ignored: it would suggest the clone lands in that project. The order is the one of the
+     * other subcommands: every read-only refusal first ({@link GitCloneTarget#check}), consent LAST, and
+     * the target judged once more after the prompt, since a human may take a while and the directory
+     * can change meanwhile.
+     *
+     * @param projectName the {@code projectName} argument, which a clone must not carry
+     * @param argv the validated argument vector ({@code git clone ...})
+     * @return the result JSON: the clone's own result when it ends within
+     *         {@link #CLONE_CALL_WAIT_SECONDS}, else the job to poll
+     */
+    private String executeClone(String projectName, List<String> argv)
+    {
+        if (projectName != null && !projectName.isBlank())
+        {
+            return ToolResult.error("'git clone' takes no projectName: the repository goes into the " //$NON-NLS-1$
+                + "directory named in the command ('clone <url> <directory>'), not into a project. Drop " //$NON-NLS-1$
+                + "projectName and retry.").toJson(); //$NON-NLS-1$
+        }
+        try
+        {
+            CloneCommand clone = checkCloneGrammar(argv.subList(2, argv.size()));
+            Path directory = Paths.get(clone.directory());
+            GitCloneTarget.Checked target =
+                GitCloneTarget.check(directory, GitCloneTarget.workspaceProjectFolders());
+            if (!target.ok())
+            {
+                return ToolResult.error(target.refusal()).toJson();
+            }
+            String consentError = requireConsent(cloneConsentPreview(argv, clone, target));
+            if (consentError != null)
+            {
+                return consentError;
+            }
+            GitCloneTarget.Checked again =
+                GitCloneTarget.check(directory, GitCloneTarget.workspaceProjectFolders());
+            if (!again.ok())
+            {
+                return ToolResult.error(again.refusal()).toJson();
+            }
+            return startClone(argv, clone, again, TimeUnit.SECONDS.toMillis(CLONE_TIMEOUT_SECONDS),
+                CLONE_CALL_WAIT_SECONDS);
+        }
+        catch (Exception e) // NOSONAR unattended-safety: no exception may escape the tool (CLAUDE.md #8)
+        {
+            Activator.logError("git: clone failed", e); //$NON-NLS-1$
+            return ToolResult.error("Failed to run git clone: " + e.getMessage()).toJson(); //$NON-NLS-1$
+        }
+    }
+
+    /** How long a cancel waits for the clone's own rollback before answering - below the registry's 30 s handler guard. */
+    static final long CLONE_CANCEL_WAIT_MILLIS = 25_000;
+
+    /** How long the rollback waits, after the kill, for git and every child it saw to exit before deleting anything. */
+    static final long CLONE_EXIT_WAIT_MILLIS = 15_000;
+
+    /** What cancel_job's preview says a cancel of a clone does. */
+    static final String CLONE_CANCEL_PREVIEW = "Cancelling a running git clone kills its git process and every " //$NON-NLS-1$
+        + "child process it saw, and removes the partial clone from the staging directory it was written to; " //$NON-NLS-1$
+        + "the target directory is not touched. A clone that has already finished is left in place."; //$NON-NLS-1$
+
+    /**
+     * Starts a checked clone as a background job and waits up to {@code waitSeconds} for it: the seam
+     * the process tests drive, past the consent prompt.
+     * <p>
+     * The target is CLAIMED for the clone ({@link GitCloneTarget#claim}), so a second clone of this server
+     * into the same directory is refused. The job never queues (it is admitted only while a worker is
+     * free) and COMMITS before it creates anything ({@code tryCommit}): from then on a cancel goes through
+     * the clone's own handler ({@link CloneControl#cancel}), which kills git and returns the rollback
+     * report as the job's cancellation result. A job cancelled before it committed did nothing.
+     *
+     * @param argv the validated argument vector
+     * @param clone its parsed operands
+     * @param target the checked target
+     * @param timeoutMillis the clone's limit
+     * @param waitSeconds how long this call waits for the job
+     * @return the result JSON
+     */
+    String startClone(List<String> argv, CloneCommand clone, GitCloneTarget.Checked target, long timeoutMillis,
+        int waitSeconds)
+    {
+        Path directory = target.real();
+        GitCloneTarget.Claim claim = GitCloneTarget.claim(directory);
+        if (claim == null)
+        {
+            return ToolResult.error("Another clone of this server is running into '" + directory //$NON-NLS-1$
+                + "' (or a directory inside it or around it), or is still being cleaned up. Wait for that " //$NON-NLS-1$
+                + "job to end (get_job_status) or name another directory.").toJson(); //$NON-NLS-1$
+        }
+        boolean handedOver = false;
+        try
+        {
+            List<String> display = new ArrayList<>(argv);
+            display.set(2 + clone.directoryIndex(), directory.toString());
+            String safeCommand = redactCredentialUrls(String.join(" ", display)); //$NON-NLS-1$
+            CloneControl control = controls.get();
+            control.claim.set(claim);
+            AtomicReference<String> outcome = new AtomicReference<>();
+            BackgroundJobs.JobSnapshot started;
+            try
+            {
+                started = jobs.start(NAME, timeoutMillis + CLONE_CLEANUP_MARGIN_MILLIS, jobs.getWorkerThreads(),
+                    "Cloning " + redactCredentialUrls(clone.url()) + " into " + directory + ".", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    BackgroundJobs.CancellationCapability.of(CLONE_CANCEL_PREVIEW, control::cancel),
+                    progress -> {
+                        try
+                        {
+                            if (!progress.tryCommit())
+                            {
+                                return null; // cancelled before anything was created
+                            }
+                            long limit = Math.max(1L,
+                                Math.min(timeoutMillis, progress.remainingMillis() - CLONE_CLEANUP_MARGIN_MILLIS));
+                            CloneRun result = cloneThroughStaging(argv, clone, target, control, limit);
+                            outcome.set(result.json());
+                            if (control.stopRequested())
+                            {
+                                // A cancel that gave up waiting settled the job without this report:
+                                // hand it in now, so the poller still learns what was (not) removed.
+                                progress.cancellationResult(result.json());
+                            }
+                            if (!result.success())
+                            {
+                                throw new BackgroundJobs.MarkedFailure(result.failure(), null);
+                            }
+                            progress.add("Cloned into " + directory + "."); //$NON-NLS-1$ //$NON-NLS-2$
+                            return result.json();
+                        }
+                        finally
+                        {
+                            claim.close();
+                        }
+                    });
+            }
+            catch (java.util.concurrent.RejectedExecutionException e)
+            {
+                return ToolResult.error("The clone could not start: the background-job registry is full or " //$NON-NLS-1$
+                    + "stopping. Nothing was cloned; poll the running jobs with get_job_status and retry.").toJson(); //$NON-NLS-1$
+            }
+            if (started == null)
+            {
+                return ToolResult.error("The clone could not start: every background worker is busy with " //$NON-NLS-1$
+                    + "another job. Nothing was cloned; retry when one of them has ended (get_job_status).").toJson(); //$NON-NLS-1$
+            }
+            handedOver = true;
+            String jobId = started.getId();
+            claim.bindTo(() -> {
+                BackgroundJobs.JobSnapshot snapshot = jobs.get(jobId);
+                return snapshot != null && (snapshot.getStatus() == BackgroundJobs.Status.RUNNING || snapshot.isClaimed());
+            });
+            BackgroundJobs.JobSnapshot latest = BackgroundJobPolling.await(jobs, jobId, waitSeconds);
+            return renderClone(latest, jobId, outcome.get(), safeCommand, directory);
+        }
+        finally
+        {
+            if (!handedOver)
+            {
+                claim.close();
+            }
+        }
+    }
+
+    /**
+     * Clones into a staging directory this run creates ({@link GitCloneTarget#createStaging}) and, when
+     * git succeeded and no cancel won first, moves the clone into the target
+     * ({@link GitCloneTarget#install}). Anything else - a git failure, the limit, a cancel - takes the
+     * staging directory back, and only after git and every child it saw are confirmed gone; the target
+     * is never touched. The seam the process tests drive directly.
+     *
+     * @param argv the validated argument vector (its directory operand is replaced by the staging path)
+     * @param clone its parsed operands
+     * @param target the checked target
+     * @param control the run's cancellation state
+     * @param timeoutMillis the process limit
+     * @return the outcome
+     */
+    CloneRun cloneThroughStaging(List<String> argv, CloneCommand clone, GitCloneTarget.Checked target,
+        CloneControl control, long timeoutMillis)
+    {
+        Path directory = target.real();
+        List<String> display = new ArrayList<>(argv);
+        display.set(2 + clone.directoryIndex(), directory.toString());
+        String safeCommand = redactCredentialUrls(String.join(" ", display)); //$NON-NLS-1$
+        GitCloneTarget.Staging staging;
+        try
+        {
+            staging = GitCloneTarget.createStaging(target);
+        }
+        catch (IOException | RuntimeException e)
+        {
+            Activator.logError(GitFailureLog.typesOnly("git clone: creating the staging directory failed", e), null); //$NON-NLS-1$
+            control.conclude();
+            boolean replaced = e instanceof GitCloneTarget.StagingReplacedException;
+            String error = replaced
+                ? "The clone could not start: " + e.getMessage() + ". git was not started; the target '" + directory //$NON-NLS-1$ //$NON-NLS-2$
+                    + "' was not touched." //$NON-NLS-1$
+                : "The clone could not start: its staging directory beside '" + directory //$NON-NLS-1$
+                    + "' could not be created (" + e.getClass().getSimpleName() + "). Nothing was written; " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "check that this user may create a directory there, then retry."; //$NON-NLS-1$
+            String json = ToolResult.error(error).put(KEY_COMMAND, safeCommand).put(KEY_DIRECTORY, directory.toString())
+                .put(KEY_CLEANED_UP, !replaced).toJson();
+            control.finished(json);
+            return new CloneRun(false, json, error);
+        }
+        GitCloneTarget.Claim held = control.claim.get();
+        if (held != null)
+        {
+            // No other clone of this server may target a path inside this staging directory meanwhile.
+            held.coverStaging(staging.path());
+        }
+        List<String> run = new ArrayList<>(argv);
+        run.set(2 + clone.directoryIndex(), staging.repository().toString());
+        AtomicBoolean exitedZero = new AtomicBoolean();
+        control.beforeGit.run();
+        // git is handed the staging path only while it is provably this run's container: a link or junction
+        // swapped in for it would make git write wherever that points.
+        boolean replacedBeforeGit = !staging.unchanged();
+        String json;
+        if (replacedBeforeGit)
+        {
+            control.conclude();
+            String error = "The staging directory '" + staging.path() + "' was replaced by something else (a link, " //$NON-NLS-1$ //$NON-NLS-2$
+                + "a junction or another directory) before git started, so git was not started and nothing in it " //$NON-NLS-1$
+                + "was touched; check that path by hand. The target '" + directory + "' was not touched."; //$NON-NLS-1$ //$NON-NLS-2$
+            String refused = ToolResult.error(error).put(KEY_COMMAND, safeCommand).put(KEY_DIRECTORY, directory.toString())
+                .put(KEY_CLEANED_UP, false).toJson();
+            control.finished(refused);
+            return new CloneRun(false, refused, error);
+        }
+        json = control.stopRequested() ? ToolResult.error("git was not started.").toJson() //$NON-NLS-1$
+            : runGitProcess(run, staging.path().getParent().toFile(), timeoutMillis, result -> exitedZero.set(true),
+                control.watch());
+        control.afterGit.run();
+        // A registry shutdown interrupts this thread; the rollback must still wait and pause, and the flag
+        // goes back afterwards.
+        boolean interrupted = Thread.interrupted();
+        try
+        {
+            boolean treeGone = control.watch().awaitExit(CLONE_EXIT_WAIT_MILLIS);
+            String notInstalled = null;
+            if (exitedZero.get() && treeGone && control.conclude())
+            {
+                control.beforeInstall.accept(staging);
+                GitCloneTarget.Installed installed = GitCloneTarget.install(staging, target);
+                notInstalled = installed.refusal();
+                if (installed.ok())
+                {
+                    JsonObject result = JsonParser.parseString(json).getAsJsonObject();
+                    result.addProperty(KEY_COMMAND, safeCommand);
+                    result.addProperty(KEY_DIRECTORY, directory.toString());
+                    result.addProperty(KEY_NEXT_STEP, cloneNextStep(directory));
+                    List<String> warnings = new ArrayList<>(GitCloneTarget.formatWarnings(directory));
+                    if (installed.stagingLeftover() != null)
+                    {
+                        // The clone is in place; only its emptied staging directory could not be removed.
+                        warnings.add("The clone is in place, but its emptied staging directory '" //$NON-NLS-1$
+                            + installed.stagingLeftover() + "' could not be removed: delete it by hand."); //$NON-NLS-1$
+                    }
+                    if (!warnings.isEmpty())
+                    {
+                        result.add(KEY_WARNINGS, GsonProvider.get().toJsonTree(warnings));
+                    }
+                    String success = GsonProvider.toJson(result);
+                    control.finished(success);
+                    return new CloneRun(true, success, null);
+                }
+            }
+            boolean cancelled = !control.conclude() && control.stopRequested();
+            return rollBack(json, notInstalled, staging, directory, safeCommand, treeGone, cancelled, control);
+        }
+        finally
+        {
+            if (interrupted)
+            {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /** Takes a clone's staging directory back and builds the failure answer. */
+    private static CloneRun rollBack(String processJson, String notInstalled, GitCloneTarget.Staging staging,
+        Path directory, String safeCommand, boolean treeGone, boolean cancelled, CloneControl control)
+    {
+        boolean clean = treeGone && staging.remove();
+        String cleanup;
+        if (clean)
+        {
+            cleanup = " The partial clone was removed (it was written to the staging directory '" + staging.path() //$NON-NLS-1$
+                + "'); the target '" + directory + "' was not touched."; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        else if (!treeGone)
+        {
+            cleanup = " git (or a child process it started) had not exited " + CLONE_EXIT_WAIT_MILLIS / 1000 //$NON-NLS-1$
+                + " s after it was killed, so nothing was removed: delete the staging directory '" + staging.path() //$NON-NLS-1$
+                + "' by hand once it has. The target '" + directory + "' was not touched."; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        else
+        {
+            cleanup = " The partial clone could not be removed: delete the staging directory '" + staging.path() //$NON-NLS-1$
+                + "' by hand. The target '" + directory + "' was not touched."; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        JsonObject result = JsonParser.parseString(processJson).getAsJsonObject();
+        String error;
+        if (notInstalled != null)
+        {
+            error = "git cloned successfully, but " + notInstalled; //$NON-NLS-1$
+        }
+        else
+        {
+            error = result.has("error") ? result.get("error").getAsString() : "git clone failed."; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        if (cancelled)
+        {
+            error = "The clone was cancelled (cancel_job) and its git process was killed. " + error; //$NON-NLS-1$
+        }
+        error += cleanup;
+        result.addProperty("success", false); //$NON-NLS-1$
+        result.addProperty("error", error); //$NON-NLS-1$
+        result.addProperty(KEY_COMMAND, safeCommand);
+        result.addProperty(KEY_DIRECTORY, directory.toString());
+        result.addProperty(KEY_CLEANED_UP, clean);
+        String output = result.has(KEY_OUTPUT) ? result.get(KEY_OUTPUT).getAsString() : ""; //$NON-NLS-1$
+        String failure = output.isBlank() ? error : error + "\n\ngit output:\n\n" + fenced(output); //$NON-NLS-1$
+        String json = GsonProvider.toJson(result);
+        control.finished(json);
+        return new CloneRun(false, json, failure);
+    }
+
+    /**
+     * The state a clone's cancellation and its worker decide over, so exactly one of them wins (#934,
+     * review round 1): either the worker CONCLUDES first - it is about to install a clone git finished,
+     * or has failed on its own - and a later cancel leaves it alone, or the cancel STOPS it first, and
+     * the worker then takes the staging directory back however git ended, an exit 0 included.
+     * <p>
+     * The test seams of this class are plain fields: production never writes them, and a test sets them
+     * before it calls the run seam on its own thread, or before the clone job starts (the job's scheduling
+     * publishes them to the worker that reads them).
+     */
+    static final class CloneControl
+    {
+        private enum State
+        {
+            RUNNING, STOPPING, CONCLUDED
+        }
+
+        private final AtomicReference<State> state = new AtomicReference<>(State.RUNNING);
+        private final ProcessWatch watch;
+
+        /** How long a cancel waits for the rollback; a test shortens it. */
+        volatile long cancelWaitMillis = CLONE_CANCEL_WAIT_MILLIS;
+
+        /** The target's claim, extended to the staging directory once it exists (null in a direct test run). */
+        private final AtomicReference<GitCloneTarget.Claim> claim = new AtomicReference<>();
+
+        /** Test seam: runs once the staging directory exists, before it is proved and handed to git. */
+        Runnable beforeGit = () -> { };
+
+        /** Test seam: runs after git succeeded, right before the install, with the staging directory. */
+        java.util.function.Consumer<GitCloneTarget.Staging> beforeInstall = staging -> { };
+
+        /** Test seam: runs right after git's process has ended, before the worker concludes. */
+        Runnable afterGit = () -> { };
+
+        CloneControl()
+        {
+            this(new ProcessWatch());
+        }
+
+        /** @param watch the process watch (a test passes one whose processes do not exit) */
+        CloneControl(ProcessWatch watch)
+        {
+            this.watch = watch;
+        }
+        private final java.util.concurrent.CompletableFuture<String> report = new java.util.concurrent.CompletableFuture<>();
+
+        /** @return {@code true} when the worker concluded before any cancel (the cancel then leaves it alone) */
+        boolean conclude()
+        {
+            return state.compareAndSet(State.RUNNING, State.CONCLUDED) || state.get() == State.CONCLUDED;
+        }
+
+        /** @return {@code true} once a cancel has won */
+        boolean stopRequested()
+        {
+            return state.get() == State.STOPPING;
+        }
+
+        ProcessWatch watch()
+        {
+            return watch;
+        }
+
+        /** Publishes the run's final answer to a cancel waiting for it. */
+        void finished(String json)
+        {
+            report.complete(json);
+        }
+
+        /**
+         * Stops a running clone: wins the state for the cancel and kills git and every child it saw.
+         *
+         * @return {@code false} when the worker had already concluded
+         */
+        boolean requestStop()
+        {
+            if (!state.compareAndSet(State.RUNNING, State.STOPPING))
+            {
+                return false;
+            }
+            watch.killAll();
+            return true;
+        }
+
+        /**
+         * cancel_job's handler: stops a running clone - kills git and every child it saw - and waits
+         * for the worker's rollback, whose report becomes the job's cancellation result.
+         */
+        BackgroundJobs.CommittedCancellation cancel()
+        {
+            if (!requestStop())
+            {
+                return BackgroundJobs.CommittedCancellation.notStopped("The clone had already finished (or failed on " //$NON-NLS-1$
+                    + "its own) when the cancellation arrived, so nothing was stopped or removed; the job's own " //$NON-NLS-1$
+                    + "result says where it stands."); //$NON-NLS-1$
+            }
+            try
+            {
+                String json = report.get(cancelWaitMillis, TimeUnit.MILLISECONDS);
+                JsonObject result = JsonParser.parseString(json).getAsJsonObject();
+                boolean clean = result.has(KEY_CLEANED_UP) && result.get(KEY_CLEANED_UP).getAsBoolean();
+                String message = result.has("error") ? result.get("error").getAsString() : "The clone was stopped."; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                return clean ? BackgroundJobs.CommittedCancellation.stopped(message, json)
+                    : BackgroundJobs.CommittedCancellation.stopInitiated(message, json);
+            }
+            catch (java.util.concurrent.TimeoutException | java.util.concurrent.ExecutionException e)
+            {
+                return BackgroundJobs.CommittedCancellation.stopInitiated("git was killed, but the clone's rollback " //$NON-NLS-1$
+                    + "had not finished within " + cancelWaitMillis / 1000 + " s; poll get_job_status: the rollback " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "report becomes the job's result when it ends.", null); //$NON-NLS-1$
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                return BackgroundJobs.CommittedCancellation.stopInitiated("git was killed; the wait for the clone's " //$NON-NLS-1$
+                    + "rollback was interrupted.", null); //$NON-NLS-1$
+            }
+        }
+    }
+
+    /**
+     * The git process of a run and every child of it that was seen, so a clone's cancel can kill them and
+     * its rollback can wait until they are all gone before deleting what they were writing.
+     */
+    static class ProcessWatch
+    {
+        private final List<ProcessHandle> handles = new ArrayList<>();
+        private boolean killRequested;
+
+        /** Records the started process; kills it at once when a kill was already requested. */
+        void started(Process process)
+        {
+            boolean kill;
+            synchronized (this)
+            {
+                try
+                {
+                    handles.add(process.toHandle());
+                }
+                catch (RuntimeException e) // NOSONAR no handle: the process API is used instead
+                {
+                    Activator.logError("git: obtaining the clone's process handle failed", e); //$NON-NLS-1$
+                }
+                kill = killRequested;
+            }
+            if (kill)
+            {
+                destroyProcessQuietly(process);
+            }
+        }
+
+        /** Records children seen while git ran. */
+        synchronized void saw(List<ProcessHandle> descendants)
+        {
+            for (ProcessHandle handle : descendants)
+            {
+                if (!handles.contains(handle))
+                {
+                    handles.add(handle);
+                }
+            }
+        }
+
+        /** Kills everything recorded, and every live descendant of it. */
+        void killAll()
+        {
+            List<ProcessHandle> snapshot;
+            synchronized (this)
+            {
+                killRequested = true;
+                snapshot = new ArrayList<>(handles);
+            }
+            for (ProcessHandle handle : snapshot)
+            {
+                try
+                {
+                    handle.descendants().forEach(GitTool::destroyQuietly);
+                }
+                catch (RuntimeException e) // NOSONAR best-effort enumeration
+                {
+                    Activator.logError("git: enumerating the clone's child processes failed", e); //$NON-NLS-1$
+                }
+                destroyQuietly(handle);
+            }
+        }
+
+        /**
+         * Waits until every recorded process has exited.
+         *
+         * @param millis the budget
+         * @return {@code true} when none is alive any more
+         */
+        boolean awaitExit(long millis)
+        {
+            List<ProcessHandle> snapshot;
+            synchronized (this)
+            {
+                snapshot = new ArrayList<>(handles);
+            }
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+            for (ProcessHandle handle : snapshot)
+            {
+                awaitExitQuietly(handle, deadline);
+            }
+            return snapshot.stream().noneMatch(ProcessHandle::isAlive);
+        }
+    }
+
+    /** {@code text} in a Markdown code fence longer than any backtick run inside it. */
+    private static String fenced(String text)
+    {
+        int longest = 0;
+        int run = 0;
+        for (int i = 0; i < text.length(); i++)
+        {
+            run = text.charAt(i) == '`' ? run + 1 : 0;
+            longest = Math.max(longest, run);
+        }
+        String fence = "`".repeat(Math.max(3, longest + 1)); //$NON-NLS-1$
+        return fence + "\n" + text + (text.endsWith("\n") ? "" : "\n") + fence; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    /** What a clone's run ended with. */
+    static final class CloneRun
+    {
+        private final boolean success;
+        private final String json;
+        private final String failure;
+
+        CloneRun(boolean success, String json, String failure)
+        {
+            this.success = success;
+            this.json = json;
+            this.failure = failure;
+        }
+
+        /** @return {@code true} when the clone is in place */
+        boolean success()
+        {
+            return success;
+        }
+
+        /** @return the result JSON */
+        String json()
+        {
+            return json;
+        }
+
+        /** @return the failure as the job reports it (with git's output), or {@code null} */
+        String failure()
+        {
+            return failure;
+        }
+    }
+
+    /**
+     * The answer of a clone call: the clone's own result when its job ended within the wait, else the
+     * job to poll.
+     */
+    private static String renderClone(BackgroundJobs.JobSnapshot latest, String jobId, String outcome,
+        String safeCommand, Path directory)
+    {
+        if (latest == null)
+        {
+            return ToolResult.error("The clone job '" + jobId + "' expired before this call could read it. " //$NON-NLS-1$ //$NON-NLS-2$
+                + "Check '" + directory + "' before cloning again.").toJson(); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        BackgroundJobs.Status status = latest.getStatus();
+        if (status == BackgroundJobs.Status.RUNNING)
+        {
+            return ToolResult.success().put(KEY_JOB_ID, jobId).put(KEY_STATUS, status.value())
+                .put(KEY_COMMAND, safeCommand).put(KEY_DIRECTORY, directory.toString())
+                .put(KEY_NEXT_STEP, "The clone runs in the background (up to " + CLONE_TIMEOUT_SECONDS / 60 //$NON-NLS-1$
+                    + " minutes). Poll get_job_status with this jobId until it ends; do not call clone again " //$NON-NLS-1$
+                    + "- the directory is held until then. cancel_job stops it, kills git and removes the " //$NON-NLS-1$
+                    + "partial clone.") //$NON-NLS-1$
+                .toJson();
+        }
+        // A cancel stopped by the clone's own handler carries its rollback report as the job's result.
+        String report = status == BackgroundJobs.Status.CANCELLED && latest.getResult() instanceof String
+            ? (String)latest.getResult() : outcome;
+        if (report != null && status != BackgroundJobs.Status.RUNNING)
+        {
+            JsonObject result = JsonParser.parseString(report).getAsJsonObject();
+            result.addProperty(KEY_JOB_ID, jobId);
+            result.addProperty(KEY_STATUS, status.value());
+            return GsonProvider.toJson(result);
+        }
+        String reason = latest.getErrorMessage() != null ? latest.getErrorMessage()
+            : "The clone job ended as '" + status.value() + "'."; //$NON-NLS-1$ //$NON-NLS-2$
+        return ToolResult.error(reason).put(KEY_JOB_ID, jobId).put(KEY_STATUS, status.value())
+            .put(KEY_COMMAND, safeCommand).put(KEY_DIRECTORY, directory.toString()).toJson();
+    }
+
+    /** What a successful clone leaves to the caller: the repository is on disk only. */
+    static String cloneNextStep(Path directory)
+    {
+        return "The repository is cloned to '" + directory + "' - on disk only: EDT does not see it, and this " //$NON-NLS-1$ //$NON-NLS-2$
+            + "tool imports nothing. If it holds EDT projects (folders with a '.project' file), import them in " //$NON-NLS-1$
+            + "EDT with File -> Import -> Git -> Projects from Git -> Existing local repository (or General -> " //$NON-NLS-1$
+            + "Existing Projects into Workspace); for a Designer XML dump use import_configuration_from_xml. " //$NON-NLS-1$
+            + "Then run git commands for an imported project with its projectName."; //$NON-NLS-1$
+    }
+
+    /**
+     * The preview a human sees before {@code git clone} runs: the URL (it carries no credential -
+     * {@link #parseCommand} refuses one) and the target's full REAL path, which is what is being
+     * decided and what git is given.
+     *
+     * @param argv the validated argument vector
+     * @param clone its parsed operands
+     * @param target the checked target
+     * @return the preview
+     */
+    static ConsentPreview cloneConsentPreview(List<String> argv, CloneCommand clone, GitCloneTarget.Checked target)
+    {
+        return new ConsentPreview("git " + CLONE, //$NON-NLS-1$
+            "'git clone' downloads the repository '" + redactCredentialUrls(clone.url()) + "' into " //$NON-NLS-1$ //$NON-NLS-2$
+                + "the new directory '" //$NON-NLS-1$
+                + target.real() + "'.", //$NON-NLS-1$
+            1, List.of(target.real().toString(), renderArguments(argv.subList(1, argv.size()))));
+    }
+
+    /** A {@code git clone} command, parsed: its two operands. */
+    static final class CloneCommand
+    {
+        private final String url;
+        private final String directory;
+        private final int directoryIndex;
+
+        CloneCommand(String url, String directory, int directoryIndex)
+        {
+            this.url = url;
+            this.directory = directory;
+            this.directoryIndex = directoryIndex;
+        }
+
+        /** @return the remote URL */
+        String url()
+        {
+            return url;
+        }
+
+        /** @return the target directory, as spelled */
+        String directory()
+        {
+            return directory;
+        }
+
+        /** @return the directory's index among the tokens after {@code clone} */
+        int directoryIndex()
+        {
+            return directoryIndex;
+        }
+    }
+
+    /** The {@code git clone} long options that take no value. */
+    private static final Set<String> CLONE_FLAGS = Set.of("--quiet", "--single-branch", "--no-checkout"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+    /** The {@code git clone} long options that take one. */
+    private static final Set<String> CLONE_VALUE_OPTIONS = Set.of("--branch", "--depth", "--filter", "--origin"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+
+    /**
+     * Refuses anything in a {@code git clone} command outside its allow-list, and returns the two
+     * operands. An ALLOW-list, like {@code init}'s: most of {@code clone}'s options would make the clone
+     * something else - a repository that borrows another's objects ({@code --reference*},
+     * {@code --shared}, {@code --local}), one whose git directory lives elsewhere
+     * ({@code --separate-git-dir}), no work tree at all ({@code --bare}, {@code --mirror}), more
+     * repositories from URLs nobody checked ({@code --recurse-submodules}), configuration written into
+     * the new repository ({@code -c} / {@code --config}, which can set {@code core.sshCommand}) or a
+     * program run on the remote side ({@code -u} / {@code --upload-pack}, {@code --template}).
+     * <p>
+     * Accepted, spelled in full: {@code -q}/{@code --quiet}, {@code -n}/{@code --no-checkout},
+     * {@code --single-branch}, {@code -b}/{@code --branch <name>}, {@code --depth <n>},
+     * {@code --filter <spec>}, {@code -o}/{@code --origin <name>} - a value attached with {@code =} or as
+     * the next token, the short ones also clustered ({@code -qb main}, {@code -bmain}) the way git reads
+     * them - and {@code --}. Then exactly two operands: the URL ({@link #checkCloneUrl}) and an ABSOLUTE
+     * directory without {@code .} or {@code ..} segments, so the path judged is the path git uses.
+     *
+     * @param args the tokens after {@code clone}
+     * @return the parsed operands
+     * @throws CommandRejectedException naming the token and what is accepted instead
+     */
+    static CloneCommand checkCloneGrammar(List<String> args) throws CommandRejectedException
+    {
+        List<Integer> operands = new ArrayList<>();
+        boolean endOfOptions = false;
+        for (int i = 0; i < args.size(); i++)
+        {
+            String token = args.get(i);
+            if (endOfOptions || !token.startsWith("-") || "-".equals(token)) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                operands.add(Integer.valueOf(i));
+                continue;
+            }
+            if ("--".equals(token)) //$NON-NLS-1$
+            {
+                endOfOptions = true;
+                continue;
+            }
+            if (token.startsWith("--")) //$NON-NLS-1$
+            {
+                int eq = token.indexOf('=');
+                String name = eq > 0 ? token.substring(0, eq) : token;
+                if (CLONE_FLAGS.contains(name))
+                {
+                    if (eq > 0)
+                    {
+                        throw new CommandRejectedException("The option '" + name //$NON-NLS-1$
+                            + "' of 'git clone' takes no value. Drop the '=...' part."); //$NON-NLS-1$
+                    }
+                    continue;
+                }
+                if (!CLONE_VALUE_OPTIONS.contains(name))
+                {
+                    throw cloneOptionRefused(safeToken(name));
+                }
+                String value;
+                if (eq > 0)
+                {
+                    value = token.substring(eq + 1);
+                }
+                else
+                {
+                    i++;
+                    value = i < args.size() ? args.get(i) : null;
+                }
+                checkCloneValue(name, value);
+                continue;
+            }
+            i = checkCloneCluster(token, args, i);
+        }
+        if (operands.size() != 2)
+        {
+            throw new CommandRejectedException("'git clone' takes exactly two operands here, the URL and an " //$NON-NLS-1$
+                + "absolute target directory: 'clone <url> <directory>', e.g. 'clone " //$NON-NLS-1$
+                + "https://example.com/team/repo.git C:\\work\\repo'. Got " + operands.size() + "."); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        String url = args.get(operands.get(0).intValue());
+        checkCloneUrl(url);
+        int directoryIndex = operands.get(1).intValue();
+        String directory = args.get(directoryIndex);
+        checkCloneDirectory(directory);
+        return new CloneCommand(url, directory, directoryIndex);
+    }
+
+    /**
+     * One short-option cluster of {@code git clone}: any of {@code q} and {@code n}, then optionally
+     * {@code b} or {@code o}, whose value is the rest of the cluster or, when that is empty, the next
+     * token.
+     *
+     * @return the index of the last token consumed
+     */
+    private static int checkCloneCluster(String token, List<String> args, int index)
+        throws CommandRejectedException
+    {
+        for (int c = 1; c < token.length(); c++)
+        {
+            char letter = token.charAt(c);
+            if (letter == 'q' || letter == 'n')
+            {
+                continue;
+            }
+            if (letter == 'b' || letter == 'o')
+            {
+                String option = letter == 'b' ? "--branch" : "--origin"; //$NON-NLS-1$ //$NON-NLS-2$
+                String attached = token.substring(c + 1);
+                if (!attached.isEmpty())
+                {
+                    checkCloneValue(option, attached);
+                    return index;
+                }
+                int next = index + 1;
+                checkCloneValue(option, next < args.size() ? args.get(next) : null);
+                return next;
+            }
+            throw cloneOptionRefused("-" + letter); //$NON-NLS-1$
+        }
+        return index;
+    }
+
+    /** Refuses a missing or malformed value of a value-taking clone option. */
+    private static void checkCloneValue(String option, String value) throws CommandRejectedException
+    {
+        if (value == null || value.isEmpty() || value.startsWith("-")) //$NON-NLS-1$
+        {
+            throw new CommandRejectedException("'git clone " + option + "' needs a value right after it " //$NON-NLS-1$ //$NON-NLS-2$
+                + "(e.g. '" + option + "=" + exampleValue(option) + "'); it must not start with '-'."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        switch (option)
+        {
+            case "--branch": //$NON-NLS-1$
+                if (Constants.HEAD.equals(value) || !Repository.isValidRefName(Constants.R_HEADS + value))
+                {
+                    throw new CommandRejectedException("The branch given to 'git clone --branch' is not a " //$NON-NLS-1$
+                        + "valid branch or tag name. Pass a plain name such as 'main' or 'v1.0'."); //$NON-NLS-1$
+                }
+                return;
+            case "--origin": //$NON-NLS-1$
+                if (!Repository.isValidRefName(Constants.R_REMOTES + value + "/HEAD")) //$NON-NLS-1$
+                {
+                    throw new CommandRejectedException("The remote name given to 'git clone --origin' is not " //$NON-NLS-1$
+                        + "a valid remote name. Pass a plain name such as 'upstream'."); //$NON-NLS-1$
+                }
+                return;
+            case "--depth": //$NON-NLS-1$
+                if (!value.matches("[1-9][0-9]{0,8}")) //$NON-NLS-1$
+                {
+                    throw new CommandRejectedException("'git clone --depth' needs a positive whole number of " //$NON-NLS-1$
+                        + "commits, e.g. '--depth=1'."); //$NON-NLS-1$
+                }
+                return;
+            default: // --filter
+                if (!CLONE_FILTER.matcher(value).matches())
+                {
+                    throw new CommandRejectedException("'git clone --filter' accepts one of git's filter specs: " //$NON-NLS-1$
+                        + "'blob:none', 'blob:limit=<n>[k|m|g]', 'tree:<depth>' or " //$NON-NLS-1$
+                        + "'object:type=<blob|tree|commit|tag>'. 'sparse:' and 'combine:' are not accepted."); //$NON-NLS-1$
+                }
+                return;
+        }
+    }
+
+    private static String exampleValue(String option)
+    {
+        switch (option)
+        {
+            case "--depth": //$NON-NLS-1$
+                return "1"; //$NON-NLS-1$
+            case "--filter": //$NON-NLS-1$
+                return "blob:none"; //$NON-NLS-1$
+            case "--origin": //$NON-NLS-1$
+                return "upstream"; //$NON-NLS-1$
+            default:
+                return "main"; //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Refuses a clone URL outside the accepted forms: {@code https://}, {@code ssh://} (and git's
+     * {@code git+ssh://} / {@code ssh+git://}), {@code git://}, and the scp-like {@code [user@]host:path}.
+     * The checks every remote-touching subcommand gets have already run in {@link #parseCommand} (no
+     * credential, query or fragment, no transport helper); on top of them: no whitespace or control
+     * character anywhere, no {@code file://} or local path, a host that does not start with {@code -}
+     * (ssh would read it as an option), and an scp-like path without {@code @} (that is
+     * {@code user:password@host:path} read by git as host {@code user}).
+     */
+    private static void checkCloneUrl(String url) throws CommandRejectedException
+    {
+        for (int i = 0; i < url.length(); i++)
+        {
+            char c = url.charAt(i);
+            if (c <= ' ' || c == 0x7F)
+            {
+                throw new CommandRejectedException("The clone URL must not contain whitespace or control " //$NON-NLS-1$
+                    + "characters. Pass it on one line, with any space in the path written as %20."); //$NON-NLS-1$
+            }
+        }
+        java.util.regex.Matcher scheme = URL_SCHEME.matcher(url);
+        if (scheme.find())
+        {
+            if (!CLONE_SCHEMES.contains(scheme.group(1)))
+            {
+                throw cloneUrlRefused("its scheme '" + scheme.group(1) + "://' is not accepted"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            String rest = url.substring(scheme.end());
+            int slash = rest.indexOf('/');
+            String authority = slash < 0 ? rest : rest.substring(0, slash);
+            String host = authority.substring(authority.lastIndexOf('@') + 1);
+            if (host.isEmpty() || host.startsWith("-") || host.startsWith(":")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                throw cloneUrlRefused("it names no host, or a host starting with '-'"); //$NON-NLS-1$
+            }
+            return;
+        }
+        java.util.regex.Matcher scp = SCP_URL.matcher(url);
+        if (scp.matches())
+        {
+            if (scp.group(1).indexOf('@') >= 0)
+            {
+                throw new CommandRejectedException("The clone URL carries an '@' after the ':' of git's " //$NON-NLS-1$
+                    + "'host:path' form, which is how 'user:password@host:path' reads - git would take 'user' " //$NON-NLS-1$
+                    + "for the host and keep the password in the remote. Use 'git@host:path' with an ssh key, " //$NON-NLS-1$
+                    + "or an https URL with a credential helper."); //$NON-NLS-1$
+            }
+            return;
+        }
+        throw cloneUrlRefused("it is a local path (or a file:// URL), which would copy a repository from " //$NON-NLS-1$
+            + "anywhere on disk"); //$NON-NLS-1$
+    }
+
+    private static CommandRejectedException cloneUrlRefused(String why)
+    {
+        return new CommandRejectedException("The clone URL is refused: " + why + ". Accepted: https://, " //$NON-NLS-1$ //$NON-NLS-2$
+            + "ssh:// (also git+ssh://), git:// and git's 'git@host:path' form, e.g. " //$NON-NLS-1$
+            + "'https://example.com/team/repo.git' or 'git@example.com:team/repo.git'. A local repository, " //$NON-NLS-1$
+            + "'file://' and plain 'http://' are not."); //$NON-NLS-1$
+    }
+
+    /** Refuses a target directory that is not absolute or carries {@code .} / {@code ..} segments. */
+    private static void checkCloneDirectory(String directory) throws CommandRejectedException
+    {
+        Path path;
+        try
+        {
+            path = Paths.get(directory);
+        }
+        catch (InvalidPathException e)
+        {
+            throw new CommandRejectedException("The clone target '" + safeToken(directory) //$NON-NLS-1$
+                + "' is not a valid path on this machine (" + e.getReason() + ")."); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (!path.isAbsolute())
+        {
+            throw new CommandRejectedException("The clone target must be an ABSOLUTE directory path (e.g. " //$NON-NLS-1$
+                + "'C:\\work\\repo' or '/home/me/work/repo'), so it is clear where the repository lands; got '" //$NON-NLS-1$
+                + safeToken(directory) + "'."); //$NON-NLS-1$
+        }
+        for (Path segment : path)
+        {
+            String name = segment.toString();
+            if (".".equals(name) || "..".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                throw new CommandRejectedException("The clone target must not contain '.' or '..' segments: " //$NON-NLS-1$
+                    + "spell the directory out, so the path checked is the path git uses."); //$NON-NLS-1$
+            }
+        }
+    }
+
+    private static CommandRejectedException cloneOptionRefused(String option)
+    {
+        return new CommandRejectedException("The option '" + option + "' is not accepted for 'git clone'. " //$NON-NLS-1$ //$NON-NLS-2$
+            + "Accepted, spelled in full: -q/--quiet, -n/--no-checkout, --single-branch, -b/--branch <name>, " //$NON-NLS-1$
+            + "--depth <n>, --filter <spec>, -o/--origin <name>. Refused among others: -c/--config (writes " //$NON-NLS-1$
+            + "configuration such as core.sshCommand into the new repository), -u/--upload-pack and " //$NON-NLS-1$
+            + "--template (run programs), --bare, --mirror and --separate-git-dir (no work tree in the " //$NON-NLS-1$
+            + "directory), --reference, --shared and --local (borrow another repository's objects), " //$NON-NLS-1$
+            + "--recurse-submodules (more repositories from URLs nobody checked)."); //$NON-NLS-1$
+    }
+
+    /**
+     * The process a validated command runs as: the command with the non-interactive config, run in
+     * {@code workTree}, stderr merged, the hardened environment - and, for {@code init}, the
+     * repository-format pins of {@link #applyInitDefaults}. Package-visible so a test can see what
+     * the process would get without running it.
+     *
+     * @param argv the validated argument vector ({@code git} first)
+     * @param workTree the directory git runs in
+     * @return the configured, not yet started process builder
+     */
+    static ProcessBuilder processFor(List<String> argv, File workTree)
+    {
+        ProcessBuilder builder = new ProcessBuilder(withNonInteractiveConfig(argv));
+        builder.directory(workTree);
+        builder.redirectErrorStream(true);
+        hardenEnv(builder.environment(), workTree, argv.get(0));
+        if (argv.size() > 1 && (INIT.equals(argv.get(1)) || CLONE.equals(argv.get(1))))
+        {
+            // A clone creates a repository too: of an EMPTY remote it takes the machine's default
+            // format, and a core.sharedRepository of the machine makes it a shared one.
+            applyInitDefaults(builder.command(), builder.environment());
+        }
+        return builder;
+    }
+
+    /**
+     * The {@code -c} pins {@code init} runs with (#934), each a setting of the MACHINE that would make
+     * {@code init} create what its grammar refuses on the command line:
+     * <ul>
+     * <li>{@code core.sharedRepository=false} - a {@code core.sharedRepository} in the user's or the
+     * system configuration makes a plain {@code init} a shared one (measured on git 2.35:
+     * {@code group} writes {@code sharedrepository = 1} and {@code receive.denyNonFastforwards}), the
+     * same as the refused {@code --shared};</li>
+     * <li>{@code init.defaultObjectFormat=sha1} and {@code init.defaultRefFormat=files} - the
+     * configuration spellings of {@code --object-format} / {@code --ref-format}; git versions that
+     * do not know them ignore them.</li>
+     * </ul>
+     * Command-line configuration overrides every configuration file. The other defaults stay the
+     * user's, as in their terminal: {@code init.defaultBranch}, {@code init.templateDir} (the hooks
+     * a template installs run with the user's authority anyway, like every repository hook here).
+     */
+    private static final List<String> INIT_CONFIG_PINS = List.of(
+        "-c", "core.sharedRepository=false", //$NON-NLS-1$ //$NON-NLS-2$
+        "-c", "init.defaultObjectFormat=sha1", //$NON-NLS-1$ //$NON-NLS-2$
+        "-c", "init.defaultRefFormat=files"); //$NON-NLS-1$ //$NON-NLS-2$
+
+    /**
+     * Pins the format of the repository {@code init} creates, whatever the machine's environment and
+     * configuration say: the {@link #INIT_CONFIG_PINS} after the executable, and the environment
+     * variables that choose the format ({@code GIT_DEFAULT_HASH}, {@code GIT_DEFAULT_REF_FORMAT}) set
+     * to the defaults. The hash matters most: a SHA-256 repository is one the bundled JGit 6.8 opens but
+     * cannot read a single object of (measured), and {@code GIT_DEFAULT_HASH=sha256} in EDT's
+     * environment produced exactly that from a plain {@code init} (measured on git 2.35). The variables
+     * are SET rather than removed: in git's own precedence a variable wins over its configuration key
+     * ({@code init.defaultObjectFormat} / {@code init.defaultRefFormat}), so setting both leaves the
+     * same answer whichever of the two a given git version consults.
+     *
+     * @param command the command to run ({@code git} first), modified in place
+     * @param env the process environment, modified in place
+     */
+    static void applyInitDefaults(List<String> command, Map<String, String> env)
+    {
+        command.addAll(1, INIT_CONFIG_PINS);
+        env.put("GIT_DEFAULT_HASH", "sha1"); //$NON-NLS-1$ //$NON-NLS-2$
+        env.put("GIT_DEFAULT_REF_FORMAT", "files"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     // ==================== parser (security-critical) ====================
@@ -824,7 +2243,8 @@ public class GitTool implements IMcpTool
         // token can actually BECOME a remote. Elsewhere such a string is ordinary text - a commit
         // message may legitimately carry 'vscode://file/...' or an 'ext::' prefix, and rejecting it
         // would be a false alarm about a value git never resolves.
-        boolean scanUrls = REMOTE_SUBCOMMANDS.contains(tokens.get(0));
+        // A clone's URL operand becomes the new repository's remote: the same guards apply to it.
+        boolean scanUrls = REMOTE_SUBCOMMANDS.contains(tokens.get(0)) || CLONE.equals(tokens.get(0));
         boolean scanMessageFile = MESSAGE_FILE_SUBCOMMANDS.contains(tokens.get(0));
         // The SHORT spellings of the file-reading options, each meaningful only for one subcommand:
         // 'blame -S <revs-file>' and 'ls-files -X <exclude-file>'. Both letters mean something else
@@ -953,6 +2373,14 @@ public class GitTool implements IMcpTool
             throw new CommandRejectedException("git subcommand '" //$NON-NLS-1$
                 + redactCredentialUrls(subcommand) + "' is not supported. " //$NON-NLS-1$
                 + "Supported: " + String.join(", ", new TreeSet<>(ALLOWED_SUBCOMMANDS)) + "."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        if (INIT.equals(subcommand))
+        {
+            checkInitGrammar(tokens.subList(1, tokens.size()));
+        }
+        if (CLONE.equals(subcommand))
+        {
+            checkCloneGrammar(tokens.subList(1, tokens.size()));
         }
         List<String> argv = new ArrayList<>(tokens.size() + 1);
         argv.add("git"); //$NON-NLS-1$
@@ -2901,7 +4329,7 @@ public class GitTool implements IMcpTool
         }
         for (String flag : BLOCKED_FLAGS)
         {
-            if (flag.substring(2).startsWith(opt)) // opt is a (possibly full) prefix of this blocked long flag
+            if (flag.startsWith(opt, 2)) // opt is a (possibly full) prefix of this blocked long flag
             {
                 return true;
             }
@@ -2991,19 +4419,76 @@ public class GitTool implements IMcpTool
     }
 
     /**
+     * Whether this command can change the branch the repository has checked out, so it runs under
+     * {@link BranchBindingLock} (#656): a {@link #BRANCH_CHANGING} subcommand, or {@code stash} with
+     * {@code branch} among its arguments. {@code git stash branch <name> [<stash>]} checks a new branch out
+     * (measured on git 2.35.1: "Switched to a new branch"); there {@code branch} must come right after
+     * {@code stash} (an option before it makes git refuse the command), but any {@code branch} argument is
+     * taken, so a version that parses the subcommand later is covered too - a pathspec or message spelled
+     * {@code branch} is then merely serialized with the binding changes, which is harmless.
+     *
+     * @param argv the parsed command ({@code git} first)
+     * @return {@code true} for a command that can move the checked-out branch
+     */
+    static boolean changesBranch(List<String> argv)
+    {
+        if (argv.size() < 2)
+        {
+            return false;
+        }
+        String subcommand = argv.get(1);
+        if (BRANCH_CHANGING.contains(subcommand))
+        {
+            return true;
+        }
+        return STASH.equals(subcommand) && argv.subList(2, argv.size()).contains(STASH_BRANCH);
+    }
+    /**
+     * Whether this command switches the work tree to another branch - it can move the checked-out branch
+     * ({@link #changesBranch}) AND rewrites the work tree ({@link #changesWorkTree}): {@code checkout}, {@code switch},
+     * {@code pull}, {@code stash branch}. Such a command is a branch change of this server, with the reload lifecycle
+     * of {@code switch_git_branch} (#922).
+     *
+     * @param argv the parsed command ({@code git} first)
+     * @return {@code true} for a command that switches the work tree
+     */
+    static boolean switchesWorkTree(List<String> argv)
+    {
+        return changesBranch(argv) && changesWorkTree(argv);
+    }
+
+    /**
      * Refreshes every workspace project inside {@code workTree} so Eclipse - and the EDT model built
      * on it - picks up the files git changed on disk. Runs on ANY outcome, not just a successful one:
      * a merge or cherry-pick that hit conflicts, failed late or timed out has usually already updated
      * the worktree. Best-effort: a failure is logged and never turned into a failed git result.
      *
+     * <p>
+     * After a branch-changing command the refresh runs while the caller still holds {@link BranchBindingLock}
+     * (#656): it is where EDT's workspace catches up with the new branch, so no detach is re-checked and written
+     * in the middle of it. A refresh that outlives its bounded wait is recorded as still running for the
+     * refreshed projects until it ends ({@link #awaitRefresh}), and a detach for them refuses meanwhile.
+     *
      * @param workTree the repository work tree whose projects must be refreshed
      * @param startedAt the call's start timestamp, so the wait shares the command's own budget
+     * @param change the branch change of this server the command made ({@link #changesBranch}), or {@code null}
      */
-    private static void refreshWorkTree(File workTree, long startedAt)
+    private static void refreshWorkTree(File workTree, long startedAt, GitCheckoutSupport.BranchChange change)
     {
         try
         {
-            refreshWorkTreeUnguarded(workTree, startedAt);
+            if (change != null)
+            {
+                // A branch change of this server (#922): the shared refresh refreshes the projects checked out with
+                // the work tree and concludes the reload registration made before the command ran.
+                change.refresh(Math.min(REFRESH_WAIT_SECONDS * 1000L, remainingBudgetMillis(startedAt)));
+                // The projects of nested repositories are refreshed as before, outside the registration: their
+                // files belong to another repository, and a failed refresh of one must not pin the switch's own.
+                refreshProjects(outsideTheChange(WorkTreeProjects.inside(workTree), change.projects()), startedAt,
+                    true);
+                return;
+            }
+            refreshProjects(WorkTreeProjects.inside(workTree), startedAt, false);
         }
         catch (RuntimeException e) // NOSONAR the git command already succeeded; a refresh never fails it
         {
@@ -3014,9 +4499,36 @@ public class GitTool implements IMcpTool
         }
     }
 
-    private static void refreshWorkTreeUnguarded(File workTree, long startedAt)
+    /** What is left of the call's {@link #TIMEOUT_SECONDS} budget, started at {@code startedAt}. */
+    private static long remainingBudgetMillis(long startedAt)
     {
-        List<IProject> projects = projectsInside(workTree);
+        return TIMEOUT_SECONDS * 1000L - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+    }
+
+    /**
+     * The projects of {@code inside} that the branch change did not register - those of nested repositories, whose
+     * files the outer command does not check out (#922). Package-visible for tests.
+     *
+     * @param inside every workspace project inside the work tree
+     * @param registered the projects the change registered ({@link WorkTreeProjects#checkedOutWith})
+     * @return the rest, in order
+     */
+    static List<IProject> outsideTheChange(List<IProject> inside, List<IProject> registered)
+    {
+        List<String> names = WorkTreeProjects.names(registered);
+        List<IProject> rest = new ArrayList<>();
+        for (IProject project : inside)
+        {
+            if (project != null && !names.contains(project.getName()))
+            {
+                rest.add(project);
+            }
+        }
+        return rest;
+    }
+
+    private static void refreshProjects(List<IProject> projects, long startedAt, boolean branchChanging)
+    {
         if (projects.isEmpty())
         {
             return;
@@ -3045,13 +4557,8 @@ public class GitTool implements IMcpTool
             // response past the timeout the git process already respects. The Job keeps running
             // after the wait expires, so the workspace still catches up - the caller simply is not
             // made to wait for it.
-            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
-            long budgetMillis = TIMEOUT_SECONDS * 1000L - elapsedMillis;
-            long waitMillis = Math.min(REFRESH_WAIT_SECONDS * 1000L, budgetMillis);
-            if (waitMillis > 0)
-            {
-                refresh.join(waitMillis, null);
-            }
+            long waitMillis = Math.min(REFRESH_WAIT_SECONDS * 1000L, remainingBudgetMillis(startedAt));
+            awaitRefresh(refresh, waitMillis, branchChanging, WorkTreeProjects.names(projects));
         }
         catch (InterruptedException e)
         {
@@ -3064,71 +4571,28 @@ public class GitTool implements IMcpTool
     }
 
     /**
-     * The OPEN workspace projects whose location lies inside {@code workTree}.
-     * <p>
-     * Several Eclipse projects can share one git worktree, and a command runs from its ROOT: a
-     * checkout or pull changes the siblings too, so refreshing only the addressed project would leave
-     * their models stale for the next MCP call.
+     * Waits for the post-command refresh. After a branch-changing command the wait goes through
+     * {@link BranchBindingLock#awaitOrTrack}: a refresh that outlives it ({@code waitMillis <= 0} waits not at
+     * all) is recorded as still running for {@code projects} until it ends, before the caller releases the lock.
+     * After any other command it is a plain bounded join.
      *
-     * @param workTree the repository work tree
-     * @return the projects to refresh (never {@code null})
+     * @param refresh the scheduled refresh Job
+     * @param waitMillis what is left of the call's budget for the wait
+     * @param branchChanging whether the command could change the checked-out branch
+     * @param projects the names of the projects the Job refreshes
+     * @throws InterruptedException when the waiting thread was interrupted (the refresh is recorded first)
      */
-    private static List<IProject> projectsInside(File workTree)
+    static void awaitRefresh(Job refresh, long waitMillis, boolean branchChanging, List<String> projects)
+        throws InterruptedException
     {
-        List<IProject> inside = new ArrayList<>();
-        Path root;
-        try
+        if (branchChanging)
         {
-            root = workTree.toPath().toRealPath();
+            BranchBindingLock.awaitOrTrack(refresh, waitMillis, () -> projects);
         }
-        catch (IOException e)
+        else if (waitMillis > 0)
         {
-            root = workTree.toPath().toAbsolutePath().normalize();
+            refresh.join(waitMillis, null);
         }
-        for (IProject project : ProjectContext.allProjects())
-        {
-            IPath location = project.getLocation();
-            if (!project.isOpen() || location == null)
-            {
-                continue;
-            }
-            Path projectPath = bestEffortRealPath(location.toFile().toPath());
-            if (projectPath.startsWith(root))
-            {
-                inside.add(project);
-            }
-        }
-        return inside;
-    }
-
-    /**
-     * Canonicalizes as much of a path as still EXISTS, then appends the rest lexically.
-     * <p>
-     * A checkout can DELETE a project's directory - exactly the project whose model must be
-     * refreshed - so plain canonicalization is not available. Resolving the nearest existing ancestor
-     * first keeps a symlinked ancestor from smuggling an OUTSIDE location past the containment test,
-     * which a purely lexical path would allow.
-     *
-     * @param path the path to resolve
-     * @return the best canonical form available
-     */
-    private static Path bestEffortRealPath(Path path)
-    {
-        Path absolute = path.toAbsolutePath().normalize();
-        for (Path existing = absolute; existing != null; existing = existing.getParent())
-        {
-            try
-            {
-                Path real = existing.toRealPath();
-                Path missing = existing.relativize(absolute);
-                return missing.toString().isEmpty() ? real : real.resolve(missing);
-            }
-            catch (IOException e) // NOSONAR walk further up: this ancestor is gone too
-            {
-                continue;
-            }
-        }
-        return absolute;
     }
 
     private static void refreshProject(IProject project, IProgressMonitor monitor)
@@ -3155,17 +4619,116 @@ public class GitTool implements IMcpTool
      * capping the output and killing the process on a {@link #TIMEOUT_SECONDS} timeout. Never prompts
      * (auth failures fail fast). The output stream is drained on a separate thread so a large output can
      * never deadlock the wait.
+     * <p>
+     * Every exit path below - success, non-zero, timeout, interrupt - takes its text from
+     * {@link #capture}, so what leaves here is credential-redacted and has its control bytes escaped
+     * as {@code \xNN}. What that does and does not promise is stated at
+     * {@link #escapeControlBytes}.
+     * <p>
+     * A command that can change the checked-out branch ({@link #changesBranch}) runs under
+     * {@link BranchBindingLock}, taken here - after the consent prompt, never across it - and held for the bounded
+     * process and its bounded post-process step; one that waits {@link BranchBindingLock#WAIT_SECONDS} for it is
+     * not run.
      */
     String runGit(List<String> argv, File workTree)
     {
-        ProcessBuilder builder = new ProcessBuilder(withNonInteractiveConfig(argv));
-        builder.directory(workTree);
-        builder.redirectErrorStream(true);
-        // Started BEFORE hardenEnv: that call may run the core.sshCommand probe, whose own timeout
-        // would otherwise be added to the command's - a stalled config would push a fetch past the
-        // 120 s the guide promises.
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TIMEOUT_SECONDS);
-        hardenEnv(builder.environment(), workTree);
+        return runGit(argv, workTree, null);
+    }
+
+    /**
+     * {@link #runGit(List, File)}, then {@code afterProcess} (the workspace refresh, or {@code null}) once the
+     * process has run, whatever its outcome - inside the lock when the command can change the checked-out branch,
+     * so EDT's workspace catches up with the new branch before a detach can take the lock (#656). A command that
+     * was not run, because the lock stayed busy, runs no step either.
+     */
+    String runGit(List<String> argv, File workTree, Runnable afterProcess)
+    {
+        return runGitWith(argv, workTree, change -> {
+            if (afterProcess != null)
+            {
+                afterProcess.run();
+            }
+        });
+    }
+
+    /**
+     * {@link #runGit(List, File, Runnable)} with a step that receives the command's branch change: a command that can
+     * change the checked-out branch is a branch change of this server (#922), registered as reloading before the
+     * process runs ({@link GitCheckoutSupport.BranchChange}) - the same lifecycle {@code switch_git_branch} uses. The
+     * step gets that change to refresh through ({@link GitCheckoutSupport.BranchChange#refresh}); one that did not
+     * refresh leaves it held until the expiry. Every other command's step gets {@code null}.
+     */
+    String runGitWith(List<String> argv, File workTree,
+        java.util.function.Consumer<GitCheckoutSupport.BranchChange> afterProcess)
+    {
+        if (!changesBranch(argv))
+        {
+            String output = runGitProcess(argv, workTree);
+            afterProcess.accept(null);
+            return output;
+        }
+        if (!BranchBindingLock.tryLock())
+        {
+            String safeCommand = redactCredentialUrls(String.join(" ", argv)); //$NON-NLS-1$
+            return ToolResult.error("'" + safeCommand + "' was not run: " + BranchBindingLock.busyReason() //$NON-NLS-1$ //$NON-NLS-2$
+                + ". Nothing was changed; retry.") //$NON-NLS-1$
+                .put(KEY_COMMAND, safeCommand).toJson();
+        }
+        try
+        {
+            if (!switchesWorkTree(argv))
+            {
+                // Moves a ref without rewriting the work tree (git branch -f / -m): nothing for EDT to reload.
+                String output = runGitProcess(argv, workTree);
+                afterProcess.accept(null);
+                return output;
+            }
+            // Only the projects this repository checks out: a nested clone or submodule is another repository,
+            // whose files the command does not rewrite (#922).
+            GitCheckoutSupport.BranchChange change =
+                GitCheckoutSupport.BranchChange.begin(WorkTreeProjects.checkedOutWith(workTree));
+            return change.run(() -> {
+                String output = runGitProcess(argv, workTree);
+                afterProcess.accept(change);
+                change.concludeWithoutRefresh();
+                return output;
+            });
+        }
+        finally
+        {
+            BranchBindingLock.unlock();
+        }
+    }
+
+    /** {@link #runGit}'s process, under {@link BranchBindingLock} when the subcommand needs it. */
+    private String runGitProcess(List<String> argv, File workTree)
+    {
+        return runGitProcess(argv, workTree, null);
+    }
+
+    /**
+     * {@link #runGitProcess(List, File)}, with {@code onSuccess} given the result of a process that exited 0
+     * before it is serialised - how a subcommand adds a field of its own ({@link #runInit}).
+     */
+    private String runGitProcess(List<String> argv, File workTree, Consumer<ToolResult> onSuccess)
+    {
+        return runGitProcess(argv, workTree, TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS), onSuccess, null);
+    }
+
+    /**
+     * {@link #runGitProcess(List, File, Consumer)} with its own limit - {@code clone} runs far longer than
+     * the {@link #TIMEOUT_SECONDS} of a call ({@link #CLONE_TIMEOUT_SECONDS}, inside a background job) - and,
+     * for a clone, a {@link ProcessWatch} that records the process and the children seen (or {@code null}).
+     */
+    private String runGitProcess(List<String> argv, File workTree, long timeoutMillis, Consumer<ToolResult> onSuccess,
+        ProcessWatch watch)
+    {
+        // Started BEFORE hardenEnv (inside processFor): that call may run the core.sshCommand probe,
+        // whose own timeout would otherwise be added to the command's - a stalled config would push a
+        // fetch past the 120 s the guide promises.
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        long timeoutSeconds = TimeUnit.MILLISECONDS.toSeconds(timeoutMillis);
+        ProcessBuilder builder = processFor(argv, workTree);
 
         String shellForm = String.join(" ", argv); //$NON-NLS-1$
         // Echoed back in every result and error: redacted like the output, so a credential that
@@ -3177,14 +4740,17 @@ public class GitTool implements IMcpTool
         // process.descendants() no longer reports them, so a late capture would find nothing.
         List<ProcessHandle> descendants = new ArrayList<>();
         boolean drainFinished = false;
-        StringBuilder out = new StringBuilder();
-        boolean[] truncated = {false};
+        OutputBuffer out = new OutputBuffer();
         try
         {
             process = builder.start();
+            if (watch != null)
+            {
+                watch.started(process);
+            }
             process.getOutputStream().close(); // no stdin
             final Process started = process;
-            drain = new Thread(() -> drainBounded(started, out, truncated), "git-output-drain"); //$NON-NLS-1$
+            drain = new Thread(() -> drainBounded(started, out), "git-output-drain"); //$NON-NLS-1$
             drain.setDaemon(true);
             drain.start();
 
@@ -3194,8 +4760,8 @@ public class GitTool implements IMcpTool
                 closeQuietly(process.getInputStream()); // unblock a drain a survivor still feeds
                 drain.join(DRAIN_JOIN_MILLIS);
                 drainFinished = !drain.isAlive();
-                Capture captured = capture(out, truncated, drainFinished);
-                ToolResult timeout = ToolResult.error("'" + safeCommand + "' timed out after " + TIMEOUT_SECONDS //$NON-NLS-1$ //$NON-NLS-2$
+                Capture captured = capture(out, drainFinished);
+                ToolResult timeout = ToolResult.error("'" + safeCommand + "' timed out after " + timeoutSeconds //$NON-NLS-1$ //$NON-NLS-2$
                     + " seconds and was killed. Check network connectivity / the remote, or run a smaller " //$NON-NLS-1$
                     + "command.") //$NON-NLS-1$
                     .put(KEY_COMMAND, safeCommand).put(KEY_OUTPUT, captured.text);
@@ -3208,7 +4774,7 @@ public class GitTool implements IMcpTool
             drain.join(DRAIN_JOIN_MILLIS);
             drainFinished = !drain.isAlive();
             int exitCode = process.exitValue();
-            Capture captured = capture(out, truncated, drainFinished);
+            Capture captured = capture(out, drainFinished);
             ToolResult result = exitCode == 0
                 ? ToolResult.success()
                 : ToolResult.error("git exited with code " + exitCode + " for '" + safeCommand //$NON-NLS-1$ //$NON-NLS-2$
@@ -3218,20 +4784,24 @@ public class GitTool implements IMcpTool
             {
                 result.put(KEY_TRUNCATED, true);
             }
+            if (exitCode == 0 && onSuccess != null)
+            {
+                onSuccess.accept(result);
+            }
             return result.toJson();
         }
         catch (IOException e)
         {
             Activator.logError("git: failed to run '" + safeCommand + "'", e); //$NON-NLS-1$ //$NON-NLS-2$
             return ToolResult.error("Failed to run '" + safeCommand + "': " + e.getMessage()) //$NON-NLS-1$ //$NON-NLS-2$
-                .put(KEY_COMMAND, safeCommand).put(KEY_OUTPUT, snapshot(out, truncated)).toJson();
+                .put(KEY_COMMAND, safeCommand).put(KEY_OUTPUT, snapshot(out)).toJson();
         }
         catch (InterruptedException e)
         {
             Thread.currentThread().interrupt(); // restore the interrupt flag
             // Carries the output like every other exit path: an interrupt can land AFTER git already
             // produced everything, and dropping it would hide what actually happened.
-            Capture captured = capture(out, truncated, false);
+            Capture captured = capture(out, false);
             ToolResult interrupted = ToolResult.error("'" + safeCommand + "' was interrupted.") //$NON-NLS-1$ //$NON-NLS-2$
                 .put(KEY_COMMAND, safeCommand).put(KEY_OUTPUT, captured.text);
             if (captured.truncated)
@@ -3255,6 +4825,10 @@ public class GitTool implements IMcpTool
                 // Always the captured handles too: a child that DETACHED before this point is no
                 // longer a descendant of the parent, so killTree alone would leave it running.
                 killAll(descendants, deadline);
+                if (watch != null)
+                {
+                    watch.saw(descendants);
+                }
                 if (drain != null && drain.isAlive())
                 {
                     // Something still holds the write end, so the drain would block forever. Closing
@@ -3332,15 +4906,16 @@ public class GitTool implements IMcpTool
      * executed here.
      *
      * @param workTree the repository work tree to read the configuration in
+     * @param gitExecutable the main call's executable token, preserving the host's lookup
      * @return the configured command, or {@code null} when unset, empty or unreadable
      */
-    private static String configuredSshCommand(File workTree)
+    private static String configuredSshCommand(File workTree, String gitExecutable)
     {
         Process process = null;
         try
         {
             ProcessBuilder probe =
-                new ProcessBuilder("git", "config", "--get", "core.sshCommand"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                new ProcessBuilder(gitExecutable, "config", "--get", "core.sshCommand"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             probe.directory(workTree);
             probe.redirectErrorStream(true);
             scrubInheritedGitEnv(probe.environment());
@@ -3356,7 +4931,8 @@ public class GitTool implements IMcpTool
                     new BufferedReader(new InputStreamReader(reading.getInputStream(), StandardCharsets.UTF_8)))
                 {
                     firstLine.set(reader.readLine());
-                    while (reader.readLine() != null)
+                    String ignored;
+                    while ((ignored = reader.readLine()) != null)
                     {
                         // keep draining so git can finish writing
                     }
@@ -3447,8 +5023,19 @@ public class GitTool implements IMcpTool
         {
             return null;
         }
+        return requireConsent(consentPreview(destructiveForm, argv));
+    }
+
+    /**
+     * Asks the destructive-consent gate with {@code preview}.
+     *
+     * @param preview what the human sees
+     * @return an error JSON when consent was refused, or {@code null} when the command may run
+     */
+    private static String requireConsent(ConsentPreview preview)
+    {
         DestructiveConsentGate.ConsentDecision decision =
-            DestructiveConsentGate.getInstance().requireConsent(NAME, consentPreview(destructiveForm, argv));
+            DestructiveConsentGate.getInstance().requireConsent(NAME, preview);
         if (decision == DestructiveConsentGate.ConsentDecision.ALLOW)
         {
             return null;
@@ -3815,7 +5402,8 @@ public class GitTool implements IMcpTool
      * input guard in {@link #parseCommand}, because no free-text predicate can fail closed on git's
      * output without also refusing ordinary text. A control character that is not whitespace ends none of these
      * scans and IS masked here; it is refused upstream for a different reason - it cannot occur in a
-     * legitimate authority and must not travel verbatim into the response.
+     * legitimate authority. It does not reach the caller raw in any case: {@link #escapeControlBytes}
+     * spells every such byte {@code \xNN} AFTER this walk has run.
      *
      * Scanned by hand rather than with {@link #CREDENTIAL_URL}: a regex is restarted at every
      * position, so output that merely LOOKS like a scheme ("aaa...a:@") costs O(n^2) - measured at
@@ -4110,9 +5698,9 @@ public class GitTool implements IMcpTool
     }
 
     /** @return a thread-safe snapshot of the drained output so far. */
-    private static String snapshot(StringBuilder out, boolean[] truncated)
+    private static String snapshot(OutputBuffer out)
     {
-        return capture(out, truncated, false).text;
+        return capture(out, false).text;
     }
 
     /**
@@ -4121,31 +5709,66 @@ public class GitTool implements IMcpTool
      * Reading the flag separately after the snapshot has no happens-before edge to the drain thread
      * that sets it, so a late flip could report {@code truncated} for text the snapshot did not treat
      * as truncated.
+     * <p>
+     * This is also the ONE place where git's output is made safe to hand on, in this order: the
+     * dangling-URL cut, the credential redaction, then {@link #escapeControlBytes}, then the budget.
+     * <p>
+     * <b>The escaping runs AFTER the redaction because that order is LOAD-BEARING</b>, not because it
+     * is tidier. Escaping replaces a control byte with a backslash and three more characters, and
+     * {@link #urlLimit} decides where one URL ends by finding the next {@code ://}, walking BACK over
+     * its scheme characters and asking whether what stands in front of them separates two URLs. The
+     * byte being replaced - VT, say - does separate them ({@link #isUrlSeparator}); the backslash put
+     * in its place does not, and {@code x} plus the two hex digits are all scheme characters, so the
+     * walk back runs into that backslash and the boundary is LOST. Escape first and
+     * {@code https://public/path<VT>https://secret@host/repo} comes back with {@code secret} intact:
+     * the second URL is swallowed into the first one's span, the first one's own scan stops at its
+     * {@code /} having found no {@code @}, and the second URL is never examined at all. Pinned by
+     * {@code GitToolTest.testEscapingRunsAfterRedactionSoASecondUrlsCredentialIsStillMasked}.
+     * <p>
+     * The budget is re-checked AFTER escaping because {@link #MAX_OUTPUT_CHARS} is enforced by the
+     * drain on what git PRINTED, and one byte becomes four characters. The cap exists to bound the
+     * caller's context, so it bounds what is SENT: text that crosses it only once escaped is cut
+     * back by {@link #cutToEscapeBoundary} and reported as truncated.
      *
      * @param out the shared output buffer
-     * @param truncated the drain thread's truncation flag
      * @param complete whether the drain finished, i.e. the buffer cannot be mid-write
      * @return both values, consistent with each other
      */
-    private static Capture capture(StringBuilder out, boolean[] truncated, boolean complete)
+    static Capture capture(OutputBuffer out, boolean complete)
     {
-        synchronized (out)
+        synchronized (out.monitor)
         {
             // The flag is read under the SAME lock the drain thread appends (and sets it) with: a
             // plain read could still see 'false' for a drain that is alive past join(), and the
             // half-written URL that flag guards would then be returned unredacted.
-            String text = out.toString();
-            boolean cut = truncated[0];
+            String text = out.text.toString();
+            boolean cut = out.truncated;
             // The dangling tail is dropped for an INCOMPLETE drain too, not only for cap-truncated
             // output: a background child can be mid-write when we capture, and a half-written
             // 'https://<secret' carries no '@' for the redaction to recognise.
-            return new Capture(redactCredentialUrls(cut || !complete ? dropTruncatedUrlTail(text) : text),
-                cut);
+            String safe = escapeControlBytes(
+                redactCredentialUrls(cut || !complete ? dropTruncatedUrlTail(text) : text));
+            if (safe.length() > MAX_OUTPUT_CHARS)
+            {
+                // The escaping turned bytes into four characters each and pushed the text past the
+                // cap the drain enforced on git's own output; the cap bounds what is SENT.
+                safe = cutToEscapeBoundary(safe, MAX_OUTPUT_CHARS);
+                cut = true;
+            }
+            return new Capture(safe, cut);
         }
     }
 
+    /** Owns the output text, truncation flag and their shared monitor. */
+    static final class OutputBuffer
+    {
+        private final Object monitor = new Object();
+        final StringBuilder text = new StringBuilder();
+        boolean truncated;
+    }
+
     /** An output snapshot together with the truncation flag it was taken with. */
-    private static final class Capture
+    static final class Capture
     {
         final String text;
         final boolean truncated;
@@ -4155,6 +5778,128 @@ public class GitTool implements IMcpTool
             this.text = text;
             this.truncated = truncated;
         }
+    }
+
+    /**
+     * Escapes the control bytes git prints verbatim, as {@code \xNN} with two lowercase hex digits.
+     * <p>
+     * Git hands a commit message, an annotated-tag body, a diff hunk or a log line back BYTE FOR
+     * BYTE - measured on git 2.35.1 - so an {@code ESC[31m} somebody committed is an ANSI command to
+     * any client that renders this output in a terminal, and a {@code 0x01} is invisible to whatever
+     * reads it. Every C0 character (0x00-0x1F) and DEL (0x7F) is escaped here EXCEPT tab, LF and CR:
+     * those three ARE the structure of {@code status --short}, {@code diff} and {@code log}, and
+     * escaping them would destroy the output instead of protecting it. Everything from 0x20 up
+     * passes through untouched EXCEPT DEL: non-ASCII letters, emoji and surrogate pairs all survive
+     * as they stand, and so do the C1 controls (0x80-0x9F), which this deliberately does not touch.
+     * <p>
+     * <b>The boundary</b>, stated the way {@code MarkdownUtils.inlineCode} states its own: the
+     * backslash is NOT escaped. Output that literally spells the four characters {@code \x01} is
+     * therefore indistinguishable from output that carried the byte, and no reader can tell them
+     * apart. That ambiguity is accepted deliberately - escaping the backslash would rewrite every
+     * Windows path and every literal {@code \n} in every commit message, which is far more invasive
+     * than the ambiguity it would remove. This is a safeguard on how the output RENDERS, not a
+     * reversible encoding: nothing here can be decoded back to the exact bytes git printed.
+     *
+     * @param text git's captured output, never {@code null}
+     * @return the text with its control bytes escaped, or the SAME instance when none needed it
+     */
+    static String escapeControlBytes(String text)
+    {
+        int first = -1;
+        for (int i = 0; i < text.length(); i++)
+        {
+            if (mustEscape(text.charAt(i)))
+            {
+                first = i;
+                break;
+            }
+        }
+        if (first < 0)
+        {
+            return text; // the ordinary case: no copy at all
+        }
+        StringBuilder escaped = new StringBuilder(text.length() + ESCAPE_HEADROOM_CHARS);
+        escaped.append(text, 0, first);
+        for (int i = first; i < text.length(); i++)
+        {
+            char c = text.charAt(i);
+            if (mustEscape(c))
+            {
+                escaped.append(ESCAPE_PREFIX)
+                    .append(Character.forDigit((c >> 4) & 0x0F, 16))
+                    .append(Character.forDigit(c & 0x0F, 16));
+            }
+            else
+            {
+                escaped.append(c);
+            }
+        }
+        return escaped.toString();
+    }
+
+    /**
+     * @param c a character of git's output
+     * @return whether it is a control byte that must not travel to the caller as it stands
+     */
+    private static boolean mustEscape(char c)
+    {
+        // Tab, LF and CR are git's own structure and are deliberately exempt - see
+        // escapeControlBytes.
+        return (c < 0x20 || c == 0x7F) && c != '\t' && c != '\n' && c != '\r';
+    }
+
+    /**
+     * Cuts escaped output back to {@code budget} characters without ever splitting a {@code \xNN}
+     * escape.
+     * <p>
+     * The walk back skips anything that could be HALF an escape - a trailing backslash, a trailing
+     * {@code \x}, a trailing {@code \x} plus one hex digit - so a reader never has to guess whether
+     * the tail is data or a cut-off escape. A run of trailing backslashes is walked off entirely: at
+     * a cut boundary a backslash cannot be told from the start of an escape this class produced, and
+     * the invariant is worth more than those few characters of an output that was being truncated
+     * anyway. A trailing high surrogate goes the same way, for the reason
+     * {@link #dropTruncatedUrlTail} gives: a lone one serializes as a replacement character.
+     *
+     * @param text the already-escaped output
+     * @param budget the maximum number of characters that may be returned
+     * @return {@code text} cut to at most {@code budget} characters at a safe boundary, or the SAME
+     *         instance when it already fits
+     */
+    static String cutToEscapeBoundary(String text, int budget)
+    {
+        if (text.length() <= budget)
+        {
+            return text;
+        }
+        int cut = budget;
+        while (cut > 0
+            && (endsInHalfAnEscape(text, cut) || Character.isHighSurrogate(text.charAt(cut - 1))))
+        {
+            cut--;
+        }
+        return text.substring(0, cut);
+    }
+
+    /**
+     * @param text the already-escaped output
+     * @param end the exclusive end of the candidate cut, at least 1
+     * @return whether {@code text[0, end)} ends in a prefix of a {@code \xNN} escape
+     */
+    private static boolean endsInHalfAnEscape(String text, int end)
+    {
+        char last = text.charAt(end - 1);
+        if (last == '\\')
+        {
+            return true;
+        }
+        if (end >= 2 && last == 'x' && text.charAt(end - 2) == '\\')
+        {
+            return true;
+        }
+        // A hex digit of EITHER case ends the candidate: this class writes lowercase, so answering
+        // conservatively here can only ever cost one character of a text that was being cut anyway.
+        return end >= 3 && Character.digit(last, 16) >= 0 && text.charAt(end - 2) == 'x'
+            && text.charAt(end - 3) == '\\';
     }
 
     /**
@@ -4450,7 +6195,7 @@ public class GitTool implements IMcpTool
      * machine's own {@code ~/.gitconfig} are deliberately KEPT: authentication and repository config are
      * the machine's, exactly like the developer's terminal.
      */
-    private static void hardenEnv(Map<String, String> env, File workTree)
+    private static void hardenEnv(Map<String, String> env, File workTree, String gitExecutable)
     {
         env.put("GIT_TERMINAL_PROMPT", "0"); // a missing credential fails fast, never a hanging prompt //$NON-NLS-1$ //$NON-NLS-2$
         env.put("GIT_PAGER", "cat"); // never invoke a pager (would block) //$NON-NLS-1$ //$NON-NLS-2$
@@ -4474,7 +6219,7 @@ public class GitTool implements IMcpTool
         // core.sshCommand, so setting it unconditionally would discard the custom identity / port /
         // wrapper that makes the remote work in the user's own terminal. When they configured one we
         // leave it alone and rely on the askpass settings above plus the call timeout.
-        if (env.get("GIT_SSH_COMMAND") == null && configuredSshCommand(workTree) == null) //$NON-NLS-1$
+        if (env.get("GIT_SSH_COMMAND") == null && configuredSshCommand(workTree, gitExecutable) == null) //$NON-NLS-1$
         {
             env.put("GIT_SSH_COMMAND", "ssh -oBatchMode=yes"); //$NON-NLS-1$ //$NON-NLS-2$
             // An inherited GIT_SSH_VARIANT (e.g. 'plink') would make git format the arguments for
@@ -4517,7 +6262,7 @@ public class GitTool implements IMcpTool
     }
 
     /** Drains the process' combined output into {@code out}, stopping appends at {@link #MAX_OUTPUT_CHARS}. */
-    private static void drainBounded(Process process, StringBuilder out, boolean[] truncated)
+    private static void drainBounded(Process process, OutputBuffer out)
     {
         try (BufferedReader reader =
             new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)))
@@ -4526,18 +6271,18 @@ public class GitTool implements IMcpTool
             int read;
             while ((read = reader.read(buffer)) != -1)
             {
-                synchronized (out)
+                synchronized (out.monitor)
                 {
-                    int room = MAX_OUTPUT_CHARS - out.length();
+                    int room = MAX_OUTPUT_CHARS - out.text.length();
                     if (room <= 0)
                     {
-                        truncated[0] = true;
+                        out.truncated = true;
                         continue; // keep draining (so the process does not block on a full pipe), but stop storing
                     }
-                    out.append(buffer, 0, Math.min(read, room));
+                    out.text.append(buffer, 0, Math.min(read, room));
                     if (read > room)
                     {
-                        truncated[0] = true;
+                        out.truncated = true;
                     }
                 }
             }
@@ -4560,9 +6305,4 @@ public class GitTool implements IMcpTool
         }
     }
 
-    /** @return the sorted allowed-subcommand list (for the guide / tests). */
-    static List<String> allowedSubcommands()
-    {
-        return new ArrayList<>(new TreeSet<>(ALLOWED_SUBCOMMANDS));
-    }
 }

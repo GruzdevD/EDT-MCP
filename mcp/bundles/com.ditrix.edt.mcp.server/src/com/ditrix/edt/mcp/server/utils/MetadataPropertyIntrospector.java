@@ -9,6 +9,8 @@ package com.ditrix.edt.mcp.server.utils;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.TreeMap;
+import java.util.function.Predicate;
 
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.EMap;
@@ -23,7 +25,6 @@ import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.InternalEObject;
 
-import com._1c.g5.v8.bm.core.BmUriUtil;
 import com._1c.g5.v8.dt.mcore.BinaryQualifiers;
 import com._1c.g5.v8.dt.mcore.ColorValue;
 import com._1c.g5.v8.dt.mcore.CommandGroupCategory;
@@ -41,12 +42,15 @@ import com._1c.g5.v8.dt.mcore.StringValue;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
+import com._1c.g5.v8.dt.metadata.mdclass.AdjustableBoolean;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonPicture;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.StyleItem;
 import com._1c.g5.v8.dt.metadata.mdclass.XDTOPackage;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 /**
  * Introspects the ASSIGNABLE properties of a metadata {@link EObject}: which structural features a
@@ -57,15 +61,26 @@ import com.google.gson.JsonArray;
  * <p>A feature is considered assignable when it is changeable and not derived / transient / volatile,
  * and is not a containment reference (those are normally child collections - attributes / tabular
  * sections / forms / commands - created via {@code create_metadata}, not set as a scalar value).
- * Small containment value shapes with an explicit wire grammar are admitted separately.</p>
+ * Small containment value shapes with an explicit wire grammar are admitted separately, as are the
+ * non-containment lists of inferred fields and standard form commands
+ * ({@link ValueKind#FIELD_LIST} and {@link ValueKind#EXCLUDED_COMMANDS}).</p>
  */
 public final class MetadataPropertyIntrospector
 {
     /**
      * The {@code AdjustableBoolean} flag the wire boolean of an {@link ValueKind#ADJUSTABLE_BOOLEAN}
-     * property addresses. Its sibling {@code for} list (per-role overrides) is left untouched.
+     * property addresses. Its sibling {@code for} list (per-role values) is addressed by the object form.
      */
     public static final String COMMON_FEATURE = "common"; //$NON-NLS-1$
+
+    /**
+     * The "allowed values" cell of a command's {@code group}: both forms {@code modify_metadata} takes.
+     * The standard names themselves depend on the platform version; an unknown one is refused with the
+     * full list. The forms are inline code: a bare {@code <Name>} is an HTML tag to a Markdown renderer,
+     * which would show the cell as just {@code CommandGroup.}.
+     */
+    static final String COMMAND_GROUP_ALLOWED =
+        "`CommandGroup.<Name>` or a standard group name (e.g. `ActionsPanelTools`)"; //$NON-NLS-1$
 
     /** The kind of value an assignable property takes - drives validation and rendering. */
     public enum ValueKind
@@ -127,8 +142,9 @@ public final class MetadataPropertyIntrospector
         /**
          * A contained {@link com._1c.g5.v8.dt.metadata.mdclass.AdjustableBoolean AdjustableBoolean}:
          * a flag the designer stores as a nested object ({@code common}) that MAY additionally carry
-         * per-role / per-functional-option overrides ({@code for}). On the wire it is a plain boolean
-         * addressing {@code common}; the {@code for} overrides are preserved untouched.
+         * per-role values ({@code for}). On the wire it is a plain boolean addressing {@code common}
+         * (role values preserved), or {@code {common?, roles?}} (issue #719, see
+         * {@link AdjustableBooleanSupport}).
          *
          * <p>Like {@link #STYLE_VALUE} this is a single-valued containment reference, so the generic
          * containment filter would drop it - it is classified explicitly. Classifying it by its TARGET
@@ -136,7 +152,46 @@ public final class MetadataPropertyIntrospector
          * {@code view} / {@code edit} (issue #382), a form item's {@code userVisible}, a form command's
          * {@code use}.</p>
          */
-        ADJUSTABLE_BOOLEAN
+        ADJUSTABLE_BOOLEAN,
+        /**
+         * A single contained mcore {@code Color} - a form item's {@code textColor},
+         * {@code titleBackColor}, ... - set via {@code {color:...}} (see {@link AppearanceValueBuilder}).
+         */
+        COLOR,
+        /**
+         * A single contained mcore {@code Font} - a form item's {@code font}, {@code titleFont}, ... -
+         * set via {@code {font:...}} (see {@link AppearanceValueBuilder}).
+         */
+        FONT,
+        /**
+         * A form attribute's "Use always" checkboxes, published as {@code useAlways} over the model's
+         * {@code notDefaultUseAlwaysAttributes} list (issue #661, see {@link UseAlwaysSupport}).
+         */
+        USE_ALWAYS,
+        /**
+         * A list of the object's OWN fields - {@code inputByString} and {@code dataLockFields} of the
+         * eight BasicDbObject kinds (issue #740) - set by replacing the whole list from a JSON array of
+         * field addresses ({@code Catalog.Goods.StandardAttribute.Description},
+         * {@code Catalog.Goods.Attribute.Weight}, {@code CommonAttribute.Org}): the grammar EDT itself
+         * writes into the {@code .mdo}, read back unchanged.
+         *
+         * <p>The entries reference TRANSIENT fields EDT derives and rebuilds on every recompute, so the
+         * write stores BM proxies addressed by field id, as EDT's own initializer does, and the
+         * {@link PropertyInfo#allowedValues} are the addresses EDT offers for that list - per object,
+         * read from the model's source types (see {@link FieldListSupport}).</p>
+         */
+        FIELD_LIST,
+        /** A form source's standard command names; the whole exclusion set is replaced. */
+        EXCLUDED_COMMANDS,
+        /** A metadata member fill value or whole choice-parameter/link list (ValueSpec grammar). */
+        MEMBER_VALUES,
+        /** An input field's wrapped ValueSpecs or form data-path links. */
+        FORM_CHOICE_VALUES
+    }
+
+    /** One collection element's display name and complete comparison identity. */
+    public record CollectionItem(String text, String identity)
+    {
     }
 
     /** The introspected schema of one assignable property. */
@@ -148,6 +203,9 @@ public final class MetadataPropertyIntrospector
         public final ValueKind valueKind;
         /** The current value rendered as text (may be {@code null} / empty). */
         public final String currentValue;
+
+        /** Collection elements for bounded table rendering; null for scalar or unreadable values. */
+        public final List<CollectionItem> collectionItems;
         /**
          * The same value in the form that answers "is this the SAME value?", which for some kinds
          * is not the form that answers "what should a reader see?".
@@ -160,13 +218,18 @@ public final class MetadataPropertyIntrospector
          * therefore called two different targets equal. This field carries the target qualified by
          * its metadata type, so a comparison sees the difference the display legitimately hides.
          * <p>
-         * A 1C type is the second such kind, and it hides more than a name. A
-         * {@link ValueKind#TYPE_DESCRIPTION} renders as its type names alone - {@code String},
-         * {@code Number} - while the value ALSO carries the qualifiers that say how long that
-         * string is and how many digits that number has. A {@code String} bounded at 10
-         * characters and an unbounded {@code String} are one word on the page and two different
-         * columns in the database, so this field spells the qualifiers out; see
+         * A type description also includes a comparison identity independent of its compact
+         * display. Defaulted qualifier groups compare like absent groups; see
          * {@link MetadataPropertyIntrospector#renderTypeDescription}.
+         * <p>
+         * A LOCALIZED STRING is the third, and it hides the STRUCTURE rather than a detail of the
+         * value. It renders as {@code key=value} pairs joined by {@code ", "} - separators that
+         * free text may itself contain - so {@code {en: "Hi, de=Hallo"}} and
+         * {@code {en: "Hi", de: "Hallo"}} are one string on the page and two different synonyms in
+         * the model; and the {@code EMap}'s own order is insertion order, which two sides carrying
+         * the same translations need not share. This field carries the pairs as a key-sorted JSON
+         * object instead, which is injective and order-independent; see
+         * {@link MetadataPropertyIntrospector#renderLocalizedString}.
          * <p>
          * For every other kind it is the same string as {@link #currentValue}: those renderings
          * already distinguish the values they show. It is never {@code null} while
@@ -230,9 +293,18 @@ public final class MetadataPropertyIntrospector
             List<String> allowedValues, EStructuralFeature feature, boolean onExtInfo,
             boolean readFailed)
         {
+            this(name, valueKind, currentValue, valueIdentity, allowedValues, feature, onExtInfo,
+                readFailed, null);
+        }
+
+        PropertyInfo(String name, ValueKind valueKind, String currentValue, String valueIdentity,
+            List<String> allowedValues, EStructuralFeature feature, boolean onExtInfo,
+            boolean readFailed, List<CollectionItem> collectionItems)
+        {
             this.name = name;
             this.valueKind = valueKind;
             this.currentValue = currentValue;
+            this.collectionItems = collectionItems == null ? null : List.copyOf(collectionItems);
             // A kind with nothing to qualify identifies itself by what it renders. The fallback
             // lives here rather than at each call site so the two fields cannot drift apart.
             this.valueIdentity = valueIdentity == null ? currentValue : valueIdentity;
@@ -257,6 +329,24 @@ public final class MetadataPropertyIntrospector
      */
     public static List<PropertyInfo> introspect(EObject obj)
     {
+        return introspectOnly(obj, name -> true);
+    }
+
+    /**
+     * Returns the assignable properties of {@code obj} whose wire name {@code admit} accepts, in the
+     * model's feature order - {@link #introspect(EObject)} restricted BEFORE any current value is read.
+     *
+     * <p>The restriction is not a filter over the finished list: a property the predicate rejects is
+     * never read or rendered at all. That is the point for a configuration root (issue #741), whose
+     * object collections hold every top object of the configuration - thousands on an ERP-size one - while
+     * the view asks for a handful of scalar properties.</p>
+     *
+     * @param obj the object to introspect
+     * @param admit accepts the wire names (as {@link PropertyInfo#name} reports them) to return
+     * @return the admitted assignable property schemas (never {@code null}; empty if {@code obj} is null)
+     */
+    public static List<PropertyInfo> introspectOnly(EObject obj, Predicate<String> admit)
+    {
         List<PropertyInfo> result = new ArrayList<>();
         if (obj == null)
         {
@@ -273,11 +363,24 @@ public final class MetadataPropertyIntrospector
             {
                 continue;
             }
+            if (!admit.test(propertyName(feature, kind)))
+            {
+                continue;
+            }
             Rendered current = renderCurrent(obj, feature, kind);
-            result.add(new PropertyInfo(feature.getName(), kind, current.text, current.identity,
-                allowedValuesFor(feature, kind), feature, false, current.failed));
+            result.add(new PropertyInfo(propertyName(feature, kind), kind, current.text, current.identity,
+                allowedValuesFor(obj, feature, kind), feature, false, current.failed, current.items));
         }
         return result;
+    }
+
+    /**
+     * The wire name of an assignable feature: its own name, except the use-always list, which is
+     * published as {@code useAlways} because its values are checkbox states, not list members.
+     */
+    private static String propertyName(EStructuralFeature feature, ValueKind kind)
+    {
+        return kind == ValueKind.USE_ALWAYS ? UseAlwaysSupport.PROPERTY : feature.getName();
     }
 
     /**
@@ -349,6 +452,10 @@ public final class MetadataPropertyIntrospector
      * {@code modify_metadata}'s prepare step, on the UI thread) never reads {@code currentValue},
      * so it must not pay that cost N times.
      *
+     * <p>For the same reason the allowed values are the FEATURE's only: a {@link ValueKind#FIELD_LIST}
+     * comes back with none, because which fields EDT offers is a property of the object, and the
+     * preparation reads them from it itself ({@link FieldListSupport#resolve}).</p>
+     *
      * @param obj the object
      * @param name the feature name (case-insensitive)
      * @return the property info WITHOUT a rendered current value, or {@code null} if no such
@@ -362,16 +469,16 @@ public final class MetadataPropertyIntrospector
         }
         for (EStructuralFeature feature : obj.eClass().getEAllStructuralFeatures()) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
         {
-            if (!feature.getName().equalsIgnoreCase(name) || !isAssignable(feature))
+            if (!isAssignable(feature))
             {
                 continue;
             }
             ValueKind kind = classify(feature);
-            if (kind == null)
+            if (kind == null || !propertyName(feature, kind).equalsIgnoreCase(name))
             {
                 continue;
             }
-            return new PropertyInfo(feature.getName(), kind, null, allowedValuesFor(feature, kind),
+            return new PropertyInfo(propertyName(feature, kind), kind, null, allowedValuesFor(feature, kind),
                 feature);
         }
         return null;
@@ -404,7 +511,7 @@ public final class MetadataPropertyIntrospector
             return null;
         }
         return new PropertyInfo(onExt.name, onExt.valueKind, onExt.currentValue, onExt.valueIdentity,
-            onExt.allowedValues, onExt.feature, true, onExt.readFailed);
+            onExt.allowedValues, onExt.feature, true, onExt.readFailed, onExt.collectionItems);
     }
 
     /**
@@ -423,9 +530,10 @@ public final class MetadataPropertyIntrospector
         }
         for (EStructuralFeature feature : obj.eClass().getEAllStructuralFeatures())
         {
-            if (isAssignable(feature) && classify(feature) != null)
+            ValueKind kind = isAssignable(feature) ? classify(feature) : null;
+            if (kind != null)
             {
-                names.add(feature.getName());
+                names.add(propertyName(feature, kind));
             }
         }
         return names;
@@ -517,7 +625,7 @@ public final class MetadataPropertyIntrospector
             {
                 Rendered current = extInfo != null ? renderCurrent(extInfo, feature, kind) : Rendered.ABSENT;
                 result.add(new PropertyInfo(feature.getName(), kind, current.text, current.identity,
-                    allowedValuesFor(feature, kind), feature, true, current.failed));
+                    allowedValuesFor(extInfo, feature, kind), feature, true, current.failed, current.items));
             }
         }
         return result;
@@ -556,6 +664,10 @@ public final class MetadataPropertyIntrospector
         if (isAdjustableBoolean(feature))
         {
             return ValueKind.ADJUSTABLE_BOOLEAN;
+        }
+        if (UseAlwaysSupport.isUseAlwaysFeature(feature))
+        {
+            return ValueKind.USE_ALWAYS;
         }
         if (feature instanceof EAttribute)
         {
@@ -609,9 +721,19 @@ public final class MetadataPropertyIntrospector
      * scope (see {@code ModifyMetadataTool}'s reference-not-found handling) - but what a feature
      * admits, it must also READ: an admitted target that is present is rendered and identified by
      * {@link #referenceTarget}, never reported as an empty property.</p>
+     *
+     * <p>A BasicDbObject's {@code inputByString} / {@code dataLockFields} is the one admitted
+     * non-containment list whose target is not an {@code MdObject}: it is declared against mcore
+     * {@code Field}, the object's own transient derived fields, and is classified as
+     * {@link ValueKind#FIELD_LIST} by target type through {@link FieldListSupport}'s measured
+     * eligibility table (issue #740). It never reaches the MANY_REFERENCE branch below, so the census
+     * {@link #renderReferenceList} documents stays true.</p>
      */
     private static ValueKind classifyReference(EReference ref)
     {
+        if (MetadataMemberValues.isFeature(ref)) return ValueKind.MEMBER_VALUES;
+        if (FormChoiceParameters.isFeature(ref)) return ValueKind.FORM_CHOICE_VALUES;
+
         // The synonym (and other localized strings) is a containment map-entry reference reached
         // via getSynonym(); the remaining containment exceptions are explicit small value types.
         // Every other containment reference is a child/owned-object relation, not an assignable value.
@@ -631,12 +753,33 @@ public final class MetadataPropertyIntrospector
         {
             return ValueKind.QNAME;
         }
+        // A form item's colours and fonts are declared exactly against the abstract mcore Color /
+        // Font (issue #660); the concrete value is a ColorDef / ColorRef / FontDef / FontRef.
+        if (isContainedValue(ref, McorePackage.Literals.COLOR, false))
+        {
+            return ValueKind.COLOR;
+        }
+        if (isContainedValue(ref, McorePackage.Literals.FONT, false))
+        {
+            return ValueKind.FONT;
+        }
         // Census of the EDT sources: `contains Value[]` occurs exactly once in MdClass.xcore
         // (WebService.xdtoPackages) and zero times in Form.xcore. Admit that measured shape while
         // keeping every other many containment classified as a child collection and excluded.
         if (isContainedValueList(ref))
         {
             return ValueKind.MCORE_VALUE_LIST;
+        }
+        if (ExcludedCommandsSupport.isFeature(ref))
+        {
+            return ValueKind.EXCLUDED_COMMANDS;
+        }
+        // A list of the object's OWN derived fields (inputByString / dataLockFields, issue #740): a
+        // non-containment many-valued reference to mcore Field, gated by a measured table. A Field is
+        // no MdObject, so this never overlaps the object-reference branch below.
+        if (FieldListSupport.isFieldListFeature(ref))
+        {
+            return ValueKind.FIELD_LIST;
         }
         // A non-containment reference whose target is a metadata object (MdObject subtype), OR the
         // mcore CommandGroup interface (BasicCommand.group - see the class doc above), is a plain
@@ -670,6 +813,17 @@ public final class MetadataPropertyIntrospector
             return null;
         }
         return MdClassPackage.Literals.MD_OBJECT == target ? "metadata object" : target.getName(); //$NON-NLS-1$
+    }
+
+    /**
+     * Whether a reference feature's declared target is the mcore {@code CommandGroup} interface - the
+     * base both a configuration {@code CommandGroup} (an {@code MdObject}, FQN-addressed) and a
+     * platform {@code StandardCommandGroup} (name-addressed) implement.
+     */
+    public static boolean isCommandGroupReference(EStructuralFeature feature)
+    {
+        return feature instanceof EReference
+            && ((EReference)feature).getEReferenceType() == McorePackage.Literals.COMMAND_GROUP;
     }
 
     /** A localized-string map feature (e.g. the synonym) is a containment ref to a *MapEntry EClass. */
@@ -743,12 +897,15 @@ public final class MetadataPropertyIntrospector
     }
 
     /**
-     * Renders an {@code AdjustableBoolean}'s current value: the nested {@code common} flag, which is
-     * what the wire boolean addresses. The sibling {@code for} overrides are NOT rendered - they are
-     * neither readable nor writable through this property, and showing them would suggest otherwise.
+     * Renders an {@code AdjustableBoolean}'s current value in the shape {@code modify_metadata} takes:
+     * the bare {@code common} flag, or {@code {common, roles}} once a role has a value of its own.
      */
     private static String renderAdjustableBoolean(Object value)
     {
+        if (value instanceof AdjustableBoolean)
+        {
+            return AdjustableBooleanSupport.render((AdjustableBoolean)value);
+        }
         if (!(value instanceof EObject))
         {
             return null;
@@ -776,17 +933,58 @@ public final class MetadataPropertyIntrospector
         return null;
     }
 
+    /**
+     * The "allowed values" column for a property of {@code holder}: what EDT offers for a
+     * {@link ValueKind#FIELD_LIST} or {@link ValueKind#EXCLUDED_COMMANDS} depends on the OBJECT
+     * (its inferred fields or commands), every other kind's values on the feature alone.
+     */
+    private static List<String> allowedValuesFor(EObject holder, EStructuralFeature feature, ValueKind kind)
+    {
+        if (kind == ValueKind.EXCLUDED_COMMANDS)
+        {
+            return ExcludedCommandsSupport.allowedValues(holder);
+        }
+        return kind == ValueKind.FIELD_LIST ? FieldListSupport.allowedValues(holder, feature)
+            : allowedValuesFor(feature, kind);
+    }
+
     /** The schema "allowed values" column: enum literals for enum kinds, reference target otherwise. */
     private static List<String> allowedValuesFor(EStructuralFeature feature, ValueKind kind)
     {
+        if (kind == ValueKind.FORM_CHOICE_VALUES)
+        {
+            return "choiceParameters".equals(feature.getName())
+                ? List.of("[{name,value:ValueSpec}]; fixedArray: {kind:'fixedArray',values:[ValueSpec]}; [] clears")
+                : List.of("[{name,dataPath,changeMode:'Clear'|'DontChange'}]; [] clears");
+        }
+        if (kind == ValueKind.MEMBER_VALUES)
+        {
+            return switch (feature.getName())
+            {
+                case "fillValue" -> List.of("ValueSpec: {kind,value}; {kind:'ref',ref}; {kind:'undefined'}");
+                case "choiceParameters" -> List.of("[{name,value:ValueSpec}]; fixedArray: {kind:'fixedArray',values:[ValueSpec]}; [] clears");
+                default -> List.of("[{name,field,changeMode:'Clear'|'DontChange'}]; [] clears");
+            };
+        }
         if (kind == ValueKind.ENUM || kind == ValueKind.MANY_ENUM)
         {
             return enumLiterals(feature);
         }
         if (kind == ValueKind.REFERENCE || kind == ValueKind.MANY_REFERENCE)
         {
+            if (isCommandGroupReference(feature))
+            {
+                // Both forms modify_metadata takes, not the bare interface name (issue #733).
+                return Collections.singletonList(COMMAND_GROUP_ALLOWED);
+            }
             String target = referenceTargetTypeName(feature);
             return target != null ? Collections.singletonList(target) : null;
+        }
+        if (kind == ValueKind.COLOR || kind == ValueKind.FONT)
+        {
+            // The value shape, shown where the property is discovered (issue #660).
+            return Collections.singletonList(kind == ValueKind.COLOR ? AppearanceValueBuilder.COLOR_SHAPES
+                : AppearanceValueBuilder.FONT_SHAPES);
         }
         return Collections.emptyList();
     }
@@ -814,18 +1012,32 @@ public final class MetadataPropertyIntrospector
         /** No value, and nothing went wrong: the property is genuinely empty. */
         static final Rendered ABSENT = new Rendered(null, null, false);
         /** Reading or rendering threw, so nothing is known about the value. */
-        static final Rendered FAILED = new Rendered(null, null, true);
+        static final Rendered READ_FAILED = new Rendered(null, null, true);
 
         final String text;
         /** The same value as an identity; see {@link PropertyInfo#valueIdentity}. */
         final String identity;
         final boolean failed;
+        final List<CollectionItem> items;
 
         private Rendered(String text, String identity, boolean failed)
+        {
+            this(text, identity, failed, null);
+        }
+
+        private Rendered(String text, String identity, boolean failed, List<CollectionItem> items)
         {
             this.text = text;
             this.identity = identity;
             this.failed = failed;
+            this.items = items;
+        }
+
+        static Rendered array(JsonArray array)
+        {
+            List<CollectionItem> items = new ArrayList<>();
+            array.forEach(item -> items.add(new CollectionItem(item.getAsString(), item.getAsString())));
+            return new Rendered(array.toString(), array.toString(), false, items);
         }
 
         /** A rendering that identifies itself: what it shows is exactly what it is. */
@@ -859,13 +1071,13 @@ public final class MetadataPropertyIntrospector
          *
          * @param text what a reader sees; {@code null} prints as an empty cell
          * @param identity what the value IS; a blank one cannot be told from an unset reference
-         * @return the rendering, or {@link #FAILED} when nothing at all identifies the value
+         * @return the rendering, or {@link #READ_FAILED} when nothing at all identifies the value
          */
         static Rendered present(String text, String identity)
         {
             // Not "absent": a value we cannot identify is a value we know nothing about, and the
             // empty identity an ABSENT would carry is exactly the one an unset reference carries.
-            return identity == null || identity.isEmpty() ? FAILED
+            return identity == null || identity.isEmpty() ? READ_FAILED
                 : new Rendered(text, identity, false);
         }
     }
@@ -886,7 +1098,9 @@ public final class MetadataPropertyIntrospector
             switch (kind)
             {
                 case LOCALIZED_STRING:
-                    return Rendered.of(renderLocalizedString(value));
+                    // One of the kinds that answer with a Rendered of their own: what it SHOWS is
+                    // not injective, so it cannot also be what it IS. See the method.
+                    return renderLocalizedString(value);
                 case TYPE_DESCRIPTION:
                     return value instanceof TypeDescription
                         ? renderTypeDescription((TypeDescription)value) : Rendered.ABSENT;
@@ -895,11 +1109,20 @@ public final class MetadataPropertyIntrospector
                     return Rendered.of(value instanceof org.eclipse.emf.common.util.Enumerator enumerator
                         ? enumerator.getName() : String.valueOf(value));
                 case MANY_ENUM:
-                    return Rendered.of(renderEnumList(value));
+                    return renderEnumList(value);
                 case REFERENCE:
                     return referenceTarget(value);
                 case MANY_REFERENCE:
                     return renderReferenceList(value);
+                case MEMBER_VALUES:
+                    return Rendered.of(MetadataMemberValues.render(feature.getName(), value).toString());
+                case FORM_CHOICE_VALUES:
+                    return Rendered.of(FormChoiceParameters.render(value).toString());
+                case FIELD_LIST:
+                    return renderFieldList(value);
+                case EXCLUDED_COMMANDS:
+                    return Rendered.array(JsonParser.parseString(ExcludedCommandsSupport.render(value))
+                        .getAsJsonArray());
                 case MCORE_VALUE_LIST:
                     // The one kind here that answers with a Rendered of its own, because it is the
                     // one whose "no text" does not mean "no value": eGet already handed back a
@@ -913,30 +1136,84 @@ public final class MetadataPropertyIntrospector
                 case QNAME:
                     return Rendered.of(value instanceof QName ? renderQName((QName)value) : null);
                 case ADJUSTABLE_BOOLEAN:
-                    return Rendered.of(renderAdjustableBoolean(value));
+                    // Role values in stored order for the reader, sorted for a comparison.
+                    return value instanceof AdjustableBoolean
+                        ? Rendered.of(renderAdjustableBoolean(value), AdjustableBooleanSupport.identity((AdjustableBoolean)value))
+                        : Rendered.of(renderAdjustableBoolean(value));
+                case USE_ALWAYS:
+                {
+                    String[] useAlways = UseAlwaysSupport.render(obj);
+                    return useAlways == null ? Rendered.ABSENT : Rendered.of(useAlways[0], useAlways[1]);
+                }
+                case COLOR:
+                {
+                    // The slot holds a value (null was answered above): a broken reference that
+                    // renders to nothing is a FAILED read, not an unset property.
+                    String color = AppearanceValueBuilder.renderColor(value);
+                    return Rendered.present(color, color);
+                }
+                case FONT:
+                {
+                    String font = AppearanceValueBuilder.renderFont(value);
+                    return Rendered.present(font, font);
+                }
                 default:
                     return Rendered.of(String.valueOf(value));
             }
         }
         catch (Exception e)
         {
-            return Rendered.FAILED;
+            return Rendered.READ_FAILED;
         }
     }
 
+    /**
+     * A localized string, as the two things it has to be: the per-language text a reader sees, and
+     * a canonical identity a comparison can trust.
+     *
+     * <h2>Why the displayed text cannot be the identity</h2>
+     * The display joins FREE TEXT with separators that free text may itself contain, so it is not
+     * injective: {@code {en: "Hi, de=Hallo"}} and {@code {en: "Hi", de: "Hallo"}} render the
+     * identical string, and a comparison reading that string calls a one-language synonym and a
+     * two-language one the same value. This is the only kind here that joins free text - a single
+     * value carries one value, {@code MANY_ENUM}, {@code MCORE_VALUE_LIST} and {@code FIELD_LIST} are JSON arrays,
+     * references use {@code Type.Name} with {@code ", "} outside the 1C identifier alphabet, a
+     * type description separates names from qualifiers with {@code " | "} which is outside the
+     * type-name alphabet, and a {@code QName} is {@code {nsUri}name} where {@code "}"} occurs in
+     * neither a URI nor an NCName.
+     *
+     * <h2>What the identity is</h2>
+     * A JSON object with its keys sorted, via {@code JsonObject.toString()} - the same convention
+     * {@link #renderEnumList} and {@link #renderMcoreValueList} already use for their kinds. Gson
+     * escapes quotes, backslashes and control characters, so no separator has to be invented and
+     * no value can spell the structure around it; sorting makes the identity independent of the
+     * {@code EMap}'s order, which is the model's insertion order and differs between two sides
+     * that carry the same translations.
+     * <p>
+     * <b>The display is deliberately unchanged</b>, {@code EMap} order and all: two sides showing
+     * the SAME text can therefore now be reported as DIFFERENT. That is the precedent
+     * {@link PropertyInfo#valueIdentity} already set for references, where {@code Foo} on both
+     * sides can be {@code Catalog.Foo} and {@code Document.Foo}.
+     *
+     * @param value the feature value, expected to be an {@code EMap}
+     * @return the rendering, or {@link Rendered#ABSENT} when there is nothing to show
+     */
     @SuppressWarnings("unchecked")
-    private static String renderLocalizedString(Object value)
+    private static Rendered renderLocalizedString(Object value)
     {
         if (!(value instanceof EMap<?, ?>))
         {
-            return null;
+            return Rendered.ABSENT;
         }
         EMap<String, String> map = (EMap<String, String>)value;
         if (map.isEmpty())
         {
-            return null;
+            return Rendered.ABSENT;
         }
         StringBuilder sb = new StringBuilder();
+        // Sorted for the identity only, and collected in the SAME pass as the display, so the two
+        // can never disagree about which entries the value holds.
+        TreeMap<String, String> canonical = new TreeMap<>();
         for (java.util.Map.Entry<String, String> entry : map.entrySet())
         {
             if (sb.length() > 0)
@@ -944,8 +1221,14 @@ public final class MetadataPropertyIntrospector
                 sb.append(", "); //$NON-NLS-1$
             }
             sb.append(entry.getKey()).append('=').append(entry.getValue());
+            canonical.put(entry.getKey(), entry.getValue());
         }
-        return sb.toString();
+        JsonObject identity = new JsonObject();
+        for (java.util.Map.Entry<String, String> entry : canonical.entrySet())
+        {
+            identity.addProperty(entry.getKey(), entry.getValue());
+        }
+        return Rendered.of(sb.toString(), identity.toString());
     }
 
     /**
@@ -974,13 +1257,14 @@ public final class MetadataPropertyIntrospector
         EList<?> list = (EList<?>)value;
         if (list.isEmpty())
         {
-            return Rendered.ABSENT;
+            return new Rendered(null, null, false, List.of());
         }
         // Two strings out of one walk: the reader gets the bare names, a comparison gets the same
         // targets qualified by type. Built together so they can never disagree about which
         // elements the property holds, or in which order.
         StringBuilder shown = new StringBuilder();
         StringBuilder identity = new StringBuilder();
+        List<CollectionItem> items = new ArrayList<>();
         for (Object element : list)
         {
             if (element instanceof MdObject)
@@ -991,10 +1275,12 @@ public final class MetadataPropertyIntrospector
                     identity.append(", "); //$NON-NLS-1$
                 }
                 shown.append(((MdObject)element).getName());
-                identity.append(qualifiedName((EObject)element, ((MdObject)element).getName()));
+                String qualified = qualifiedName((EObject)element, ((MdObject)element).getName());
+                identity.append(qualified);
+                items.add(new CollectionItem(((MdObject)element).getName(), qualified));
             }
         }
-        return shown.length() > 0 ? Rendered.of(shown.toString(), identity.toString())
+        return shown.length() > 0 ? new Rendered(shown.toString(), identity.toString(), false, items)
             : Rendered.ABSENT;
     }
 
@@ -1019,7 +1305,7 @@ public final class MetadataPropertyIntrospector
      * identity is built from the type even when there is no name to hang on it.</p>
      *
      * @param value the reference value, never {@code null}
-     * @return the rendering; {@link Rendered#FAILED} only for a value with neither a name nor an
+     * @return the rendering; {@link Rendered#READ_FAILED} only for a value with neither a name nor an
      *     EClass name, which no object of a generated EMF model is
      */
     private static Rendered referenceTarget(Object value)
@@ -1058,8 +1344,9 @@ public final class MetadataPropertyIntrospector
      * its type.</li>
      * </ul>
      *
-     * <p>This says nothing about WRITING such a value: a standard group is not addressable by FQN
-     * and {@code modify_metadata} still refuses it. Reading and reporting one is what was missing.</p>
+     * <p>A standard group is not addressable by FQN, so {@code modify_metadata} takes it as the bare
+     * identifier the platform itself uses - the English {@code name} or the Russian {@code nameRu}
+     * (issue #508). Reading and reporting one is what was missing here.</p>
      *
      * @param value the reference target, never {@code null}
      * @return the target's name, or {@code null} when the platform gives it none
@@ -1069,6 +1356,14 @@ public final class MetadataPropertyIntrospector
         if (value instanceof MdObject)
         {
             return ((MdObject)value).getName();
+        }
+        if (value instanceof StandardCommandGroup && ((EObject)value).eIsProxy())
+        {
+            // The platform's unresolved proxy - what modify_metadata writes (issue #508). None of its
+            // attributes is loaded: the name is null and the category its default literal, which is
+            // another group's. The platform keys each group by name in the proxy URI's fragment
+            // (StdCommandGroupLoader appends "/" + name), so that is where its name is read.
+            return standardCommandGroupNameFromProxyUri(((InternalEObject)value).eProxyURI());
         }
         if (value instanceof NamedElement)
         {
@@ -1085,6 +1380,36 @@ public final class MetadataPropertyIntrospector
             }
         }
         return null;
+    }
+
+    /**
+     * How a command's {@code group} is printed wherever it is read back (issue #733): a configuration
+     * group as its {@code CommandGroup.<Name>} FQN, a platform standard group by the name
+     * {@code modify_metadata} takes ({@code ActionsPanelTools}), its category only when it has no name -
+     * the {@link #referenceTargetName} rule, qualified for an {@link MdObject}.
+     *
+     * <p>The formatter's generic "first enum attribute" rendering answers neither: it reads a
+     * configuration group's {@code objectBelonging} ({@code Native}) and a standard group's
+     * {@code category}, which every group of one panel shares.</p>
+     *
+     * <p>An unresolved proxy whose URI names no group is printed as that URI: its attributes are
+     * not loaded, so the generic rendering would print a default category as if it were real.</p>
+     *
+     * @param group the group, may be {@code null}
+     * @return the label, or {@code null} when the platform gives the group no name or category
+     */
+    public static String commandGroupLabel(EObject group)
+    {
+        if (group == null)
+        {
+            return null;
+        }
+        String name = referenceTargetName(group);
+        if (name == null && group.eIsProxy())
+        {
+            return String.valueOf(((InternalEObject)group).eProxyURI());
+        }
+        return group instanceof MdObject && name != null ? qualifiedName(group, name) : name;
     }
 
     /**
@@ -1124,28 +1449,61 @@ public final class MetadataPropertyIntrospector
     }
 
     /** Renders a many-valued enum to the same JSON array of literal names accepted on the wire. */
-    private static String renderEnumList(Object value)
+    private static Rendered renderEnumList(Object value)
     {
         if (!(value instanceof EList<?>))
         {
-            return null;
+            return Rendered.ABSENT;
         }
         JsonArray rendered = new JsonArray();
         for (Object element : (EList<?>)value)
         {
             if (!(element instanceof org.eclipse.emf.common.util.Enumerator))
             {
-                return null;
+                return Rendered.ABSENT;
             }
             rendered.add(((org.eclipse.emf.common.util.Enumerator)element).getName());
         }
-        return rendered.toString();
+        return Rendered.array(rendered);
+    }
+
+    /**
+     * Renders a field list as the JSON array of the addresses it stores, in stored order - the value
+     * {@code modify_metadata} takes, so reading Current and sending it back names the same fields.
+     *
+     * <p>An empty list is {@code []}, a value like any other: the wire clears with {@code []}, so the
+     * read must say so too (it is what {@link #renderMcoreValueList} answers for its empty list). An
+     * entry whose address cannot be determined - a proxy that is no BM field URI - makes the whole
+     * value a FAILED read, never a shorter list: a list that silently dropped an entry would compare
+     * equal to one that never held it. The text is the identity: injective (Gson escapes) and
+     * order-sensitive, because the order of the fields is part of the value.</p>
+     *
+     * @param value the feature value, expected to be an {@code EList}
+     * @return the rendering, or {@link Rendered#READ_FAILED} for a list that could not be read
+     */
+    private static Rendered renderFieldList(Object value)
+    {
+        if (!(value instanceof EList<?>))
+        {
+            return Rendered.READ_FAILED;
+        }
+        JsonArray rendered = new JsonArray();
+        for (Object element : (EList<?>)value)
+        {
+            String address = FieldListSupport.addressOf(element);
+            if (address == null)
+            {
+                return Rendered.READ_FAILED;
+            }
+            rendered.add(address);
+        }
+        return Rendered.array(rendered);
     }
 
     /**
      * Renders a contained mcore Value list to the same JSON array of strings accepted on the wire.
      *
-     * <h2>Why every giving-up branch here answers {@link Rendered#FAILED} and not {@code null}</h2>
+     * <h2>Why every giving-up branch here answers {@link Rendered#READ_FAILED} and not {@code null}</h2>
      * {@link #renderCurrent} has already asked {@code eGet}, and a property nobody set answered
      * {@code null} THERE, before this method was called. An empty list answers {@code []}, which is
      * a text. So by the time any branch below gives up, there IS a value: a non-empty list this
@@ -1161,18 +1519,18 @@ public final class MetadataPropertyIntrospector
      * turns an absent value into an empty cell AND an empty {@code valueIdentity}, and two sides
      * whose entries both failed to resolve then carry the same empty identity - so
      * {@code ComparisonNodeRenderer.compare} finds one distinct value and reports SAME for two
-     * lists that may name entirely different packages. {@link Rendered#FAILED} is what makes that
+     * lists that may name entirely different packages. {@link Rendered#READ_FAILED} is what makes that
      * row {@code UNDETERMINED} instead: not a claim that the sides differ, just the refusal to
      * claim they agree on something neither side was read for.
      *
      * @param value the feature's value, never {@code null}
-     * @return the JSON array, or {@link Rendered#FAILED} for a list that could not be read
+     * @return the JSON array, or {@link Rendered#READ_FAILED} for a list that could not be read
      */
     private static Rendered renderMcoreValueList(Object value)
     {
         if (!(value instanceof EList<?>))
         {
-            return Rendered.FAILED;
+            return Rendered.READ_FAILED;
         }
         JsonArray rendered = new JsonArray();
         for (Object element : (EList<?>)value)
@@ -1186,7 +1544,7 @@ public final class MetadataPropertyIntrospector
                     : resolvingGet(referenceValue, valueFeature);
                 if (!(target instanceof XDTOPackage))
                 {
-                    return Rendered.FAILED;
+                    return Rendered.READ_FAILED;
                 }
                 EObject targetObject = (EObject)target;
                 EStructuralFeature nameFeature =
@@ -1194,7 +1552,7 @@ public final class MetadataPropertyIntrospector
                 Object name = nameFeature == null ? null : resolvingGet(targetObject, nameFeature);
                 if (name == null || name.toString().isEmpty())
                 {
-                    return Rendered.FAILED;
+                    return Rendered.READ_FAILED;
                 }
                 rendered.add(McoreValueListBuilder.XDTO_PREFIX + name);
             }
@@ -1207,16 +1565,16 @@ public final class MetadataPropertyIntrospector
                     : resolvingGet(stringValue, valueFeature);
                 if (namespace == null || namespace.toString().isEmpty())
                 {
-                    return Rendered.FAILED;
+                    return Rendered.READ_FAILED;
                 }
                 rendered.add(namespace.toString());
             }
             else
             {
-                return Rendered.FAILED;
+                return Rendered.READ_FAILED;
             }
         }
-        return Rendered.of(rendered.toString());
+        return Rendered.array(rendered);
     }
 
     /** Reads a feature normally while keeping a failed proxy resolution local to its rendered value. */
@@ -1298,10 +1656,10 @@ public final class MetadataPropertyIntrospector
         }
         if (resolvedPicture instanceof CommonPicture)
         {
-            String name = resolvedPicture.eIsProxy() ? null : pictureName(resolvedPicture);
-            if (name != null)
+            String fqn = PictureValueBuilder.commonPictureFqn((CommonPicture)resolvedPicture);
+            if (fqn != null)
             {
-                return PictureValueBuilder.COMMON_PREFIX + name;
+                return fqn;
             }
             return unresolvedCommonPictureValue(proxyUri);
         }
@@ -1344,17 +1702,36 @@ public final class MetadataPropertyIntrospector
      */
     private static String unresolvedCommonPictureValue(URI proxyUri)
     {
-        if (proxyUri != null && BmUriUtil.isBmUri(proxyUri))
+        String fqn = PictureValueBuilder.commonPictureFqn(proxyUri);
+        if (fqn != null)
         {
-            String fqn = BmUriUtil.extractTopObjectFqn(proxyUri);
-            if (fqn != null && fqn.startsWith(PictureValueBuilder.COMMON_PREFIX)
-                && fqn.length() > PictureValueBuilder.COMMON_PREFIX.length())
-            {
-                return fqn;
-            }
+            return fqn;
         }
         return proxyUri == null ? "Unresolved CommonPicture reference" //$NON-NLS-1$
             : "Unresolved CommonPicture reference: " + proxyUri; //$NON-NLS-1$
+    }
+
+    /**
+     * The name of a platform standard command group, read off its proxy URI - but only a URI of the
+     * platform's own catalogue. The versioned {@code CommandGroupProvider} roots it at
+     * {@code v8:/CommandGroup/Std/<version>} and {@code StdCommandGroupLoader} appends
+     * {@code "/" + name}; a fragment of any other URI (a BM object path, another catalogue's key) is
+     * not a group name and is not offered as one.
+     */
+    private static String standardCommandGroupNameFromProxyUri(URI proxyUri)
+    {
+        if (proxyUri == null || !"v8".equals(proxyUri.scheme()) || proxyUri.segmentCount() < 2 //$NON-NLS-1$
+            || !"CommandGroup".equals(proxyUri.segment(0)) || !"Std".equals(proxyUri.segment(1))) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            return null;
+        }
+        String fragment = proxyUri.fragment();
+        if (fragment == null || !fragment.startsWith("/")) //$NON-NLS-1$
+        {
+            return null;
+        }
+        String name = fragment.substring(1);
+        return name.isEmpty() || name.indexOf('/') >= 0 ? null : name;
     }
 
     private static String platformPictureNameFromProxyUri(URI proxyUri)
@@ -1381,32 +1758,7 @@ public final class MetadataPropertyIntrospector
             : "{" + nsUri + "}" + name; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    /**
-     * Renders a {@code TypeDescription} for a reader, and beside it - in the same walk - the form
-     * that says WHICH {@code TypeDescription} it is.
-     *
-     * <p>The two are not the same string, and the gap is not cosmetic. A {@code TypeDescription}
-     * is a set of type names PLUS the qualifiers that bound them: {@code String} carries a length
-     * and a fixed flag, {@code Number} a precision, a scale and a sign, {@code Date} which of the
-     * date and the time it stores, and a binary type its own length and fixed flag. The cell shows
-     * the names only, because that is what a type column is for - and it means a {@code String}
-     * bounded at 10 characters and a {@code String} bounded at 100 print the same six letters.
-     * Comparing those cells answered SAME for two attributes EDT stores as different columns.
-     * Both spellings occur side by side in an ordinary configuration: an attribute typed
-     * {@code String} with an empty {@code <stringQualifiers/>} and another with
-     * {@code <length>10</length>} sit in one {@code .mdo} file.</p>
-     *
-     * <p>A qualifier group whose every field still holds the model default is left OUT of the
-     * identity, and that is deliberate rather than an optimisation. EDT writes the empty element
-     * {@code <stringQualifiers/>} for an unbounded string, so one side can hold a defaulted
-     * qualifier object where the other holds none at all while both mean the same unbounded type.
-     * Spelling the group out unconditionally would turn that into a reported difference - the
-     * opposite error to the one this method exists to stop, and the more annoying of the two,
-     * because it would fire on ordinary configurations rather than on a specific pair of values.</p>
-     *
-     * @param typeDesc the value to render, never {@code null}
-     * @return the rendering, or {@link Rendered#ABSENT} when the description names no type
-     */
+    /** Keeps the comparison identity stable while displaying qualified type alternatives. */
     private static Rendered renderTypeDescription(TypeDescription typeDesc)
     {
         EList<TypeItem> types = typeDesc.getTypes();
@@ -1428,7 +1780,59 @@ public final class MetadataPropertyIntrospector
         String qualifiers = renderQualifiers(typeDesc);
         // The separator is one no 1C type name can carry, so a type list and a qualifier list
         // cannot be read as each other however either of them is spelled.
-        return Rendered.of(text, qualifiers.isEmpty() ? text : text + " | " + qualifiers); //$NON-NLS-1$
+        return Rendered.of(formatTypeDescription(typeDesc),
+            qualifiers.isEmpty() ? text : text + " | " + qualifiers); //$NON-NLS-1$
+    }
+
+    /** Formats the English type alternatives with their stored primitive qualifiers. */
+    public static String formatTypeDescription(TypeDescription description)
+    {
+        if (description == null || description.getTypes() == null || description.getTypes().isEmpty())
+        {
+            return "-"; //$NON-NLS-1$
+        }
+        List<String> parts = new ArrayList<>();
+        for (TypeItem item : description.getTypes())
+        {
+            String name = McoreUtil.getTypeName(item);
+            if (name == null || name.isEmpty())
+            {
+                name = McoreUtil.getTypeNameRu(item);
+            }
+            if (name == null || name.isEmpty())
+            {
+                name = item.getClass().getSimpleName();
+            }
+            String suffix = ""; //$NON-NLS-1$
+            if ("String".equals(name)) //$NON-NLS-1$
+            {
+                StringQualifiers q = description.getStringQualifiers();
+                int length = q == null ? 0 : q.getLength();
+                boolean fixed = q != null && q.isFixed();
+                suffix = "(" + (length == 0 ? "unlimited" : Integer.toString(length)) //$NON-NLS-1$ //$NON-NLS-2$
+                    + (fixed ? ", Fixed" : length == 0 ? "" : ", Variable") + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            }
+            else if ("Number".equals(name) && description.getNumberQualifiers() != null) //$NON-NLS-1$
+            {
+                NumberQualifiers q = description.getNumberQualifiers();
+                suffix = "(" + q.getPrecision() + ", " + q.getScale() //$NON-NLS-1$ //$NON-NLS-2$
+                    + (q.isNonNegative() ? ", Nonnegative" : ", Signed") + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            else if ("Date".equals(name)) //$NON-NLS-1$
+            {
+                DateQualifiers q = description.getDateQualifiers();
+                DateFractions fractions = q == null ? DateFractions.DATE_TIME : q.getDateFractions();
+                suffix = "(" + fractions.getLiteral() + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            else if ("BinaryData".equals(name) && description.getBinaryQualifiers() != null) //$NON-NLS-1$
+            {
+                BinaryQualifiers q = description.getBinaryQualifiers();
+                suffix = "(" + (q.getLength() == 0 ? "unlimited" : Integer.toString(q.getLength())) //$NON-NLS-1$ //$NON-NLS-2$
+                    + (q.isFixed() ? ", Fixed" : ", Variable") + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            parts.add(name + suffix);
+        }
+        return String.join(", ", parts); //$NON-NLS-1$
     }
 
     /**

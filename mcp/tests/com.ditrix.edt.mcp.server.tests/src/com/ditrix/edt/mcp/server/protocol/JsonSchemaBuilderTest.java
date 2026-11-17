@@ -16,6 +16,21 @@ import org.junit.Test;
 public class JsonSchemaBuilderTest
 {
     @Test
+    public void testNestedObjectSchemaKeepsItsRequiredFieldsWithoutMutatingChild()
+    {
+        JsonSchemaBuilder child = JsonSchemaBuilder.object().stringArrayProperty("found", "Picture FQNs", true);
+        String before = child.build();
+        String schema = JsonSchemaBuilder.object().objectProperty("pictures", "Dependencies", child, true).build();
+        com.google.gson.JsonObject parsed = com.google.gson.JsonParser.parseString(schema).getAsJsonObject();
+        com.google.gson.JsonObject nested = parsed.getAsJsonObject("properties").getAsJsonObject("pictures");
+        assertEquals("string", nested.getAsJsonObject("properties").getAsJsonObject("found")
+            .getAsJsonObject("items").get("type").getAsString());
+        assertEquals("[\"found\"]", nested.get("required").toString());
+        assertEquals("[\"pictures\"]", parsed.get("required").toString());
+        assertEquals(before, child.build());
+    }
+
+    @Test
     public void testEmptyObject()
     {
         String schema = JsonSchemaBuilder.object().build();
@@ -183,4 +198,19 @@ public class JsonSchemaBuilderTest
         assertTrue(schema.contains("\"items\":{\"type\":\"object\"}"));
         assertTrue(schema.contains("\"required\":[\"configurations\"]"));
     }
+    @Test
+    public void testComposedPropertyCopiesSchemaAndPreservesAlternatives()
+    {
+        var alternatives = java.util.List.of(java.util.Map.of("type", "string"),
+            java.util.Map.of("type", "object"));
+        var property = new java.util.LinkedHashMap<String, Object>();
+        property.put("oneOf", alternatives);
+        var schema = JsonSchemaBuilder.object().property("value", "Either form", property).buildMap();
+        assertFalse(property.containsKey("description"));
+        var properties = (java.util.Map<?, ?>)schema.get("properties");
+        var value = (java.util.Map<?, ?>)properties.get("value");
+        assertEquals(alternatives, value.get("oneOf"));
+        assertEquals("Either form", value.get("description"));
+    }
+
 }

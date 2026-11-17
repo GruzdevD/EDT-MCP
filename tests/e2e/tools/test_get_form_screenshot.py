@@ -30,8 +30,8 @@ RENDER DEPENDENCY (the headline trap — a blank/empty result is NOT a bug)
   the offscreen handler is absent, extractFormImageData + the Control.print
   fallback both return null, and the tool returns the CLEAN sentinel error
   "Form image data is not available" (or "WYSIWYG viewer is not available" /
-  "...WYSIWYG page is not available"). ensureBufferedNativeRenderMode() is
-  best-effort and cannot retrofit the handler at runtime. Therefore the happy
+  "...WYSIWYG page is not available"). Changing the launch flag requires an
+  EDT restart; the screenshot tool only reads the render mode. Therefore the happy
   path asserts the REAL render-dependent contract: EITHER a genuine PNG blob OR
   one of the documented render-unavailable sentinels — never a crash, never an
   opaque/empty response, never a no-image-no-error. It does NOT assert a specific
@@ -54,10 +54,18 @@ REAL error paths exercised by the negative matrix (source-exact messages):
 FIXTURE TRUTH (TestConfiguration, English Names)
   CommonForm "Form" exists on disk at src/CommonForms/Form/Form.form, so the FQN
   "CommonForm.Form" resolves to a real, existing form file (confirmed by glob).
+  It has a Pages group "Pages" with the pages PageMain (label "Main page") and
+  PageExtra (label ExtraPageLabel, a longer line), so the two pages render
+  differently and a showElement switch that does nothing is visible.
   Catalog "Catalog" exists but is the WRONG KIND for a 2-part form FQN.
 """
 
+import os
+
 from harness import (
+    buffered_form_render_at_startup,
+    native_form_layout_render_mode,
+    E2ESkip,
     call,
     assert_ok,
     assert_error,
@@ -65,7 +73,104 @@ from harness import (
     assert_no_diff,
     e2e_test,
     PROJECT,
+    _post,
 )
+
+# CI and the stands opt the server in to get_form_screenshot before boot, so the rest of this
+# module can exercise it. Set EDT_MCP_FORM_SCREENSHOT_DEFAULT_E2E=1 only against a server whose
+# Tools preferences are the shipped defaults: then the default-off contract below runs and the
+# opt-in check skips (run it with --filter test_screenshot_is_disabled_by_default).
+SCREENSHOT_DEFAULT_SERVER = os.environ.get("EDT_MCP_FORM_SCREENSHOT_DEFAULT_E2E", "").strip() not in (
+    "", "0", "false", "no")
+
+
+def _advertised_tools():
+    raw = _post("tools/list", {})
+    return set(t["name"] for t in (raw.get("result", {}).get("tools", []) or []))
+
+
+@e2e_test(tool="get_form_screenshot", kind="read")
+def test_screenshot_is_disabled_by_default_and_refused():
+    """A default server must NOT advertise get_form_screenshot, and must refuse to run it.
+
+    Mutation check: a wrong default, a migration that skipped the stored list, or a
+    "Restore Defaults" that clears the disabled set would put back a tool whose launch flag
+    turns the human's form designer into a grey rectangle for the whole session.
+    """
+    if not SCREENSHOT_DEFAULT_SERVER:
+        raise E2ESkip("this server has get_form_screenshot ENABLED on purpose (CI and the stands "
+                      "opt in); set EDT_MCP_FORM_SCREENSHOT_DEFAULT_E2E=1 against a server with "
+                      "default Tools preferences to assert the default-off contract")
+
+    # Reveal the forms toolset first, so an absence below is the disabled set and not
+    # progressive disclosure hiding the tool.
+    assert_ok(call("enable_toolset", {"toolsets": ["forms"]}), "reveal forms before listing")
+    if "get_form_screenshot" in _advertised_tools():
+        raise AssertionError(
+            "get_form_screenshot must be DISABLED by default: it appeared in tools/list.")
+
+    # The shared disabled-tool path answers with TEXT flagged isError and no structured payload.
+    r = call("get_form_screenshot", {"projectName": PROJECT, "formPath": "CommonForm.Form"})
+    expected = "Tool 'get_form_screenshot' is disabled by the user"
+    if expected not in (r.text or ""):
+        raise AssertionError(
+            "a disabled tool must answer with the shared disabled-path message %r, got: %r"
+            % (expected, (r.text or "")[:300]))
+    if not r.is_error:
+        raise AssertionError(
+            "a disabled tool must answer with isError:true, got a success: %r" % (r.text or "")[:300])
+    if r.structured or _blob(r):
+        raise AssertionError(
+            "the disabled path carries no structured payload or image - anything here means the "
+            "tool RAN: %r" % (r.structured or "<image blob>"))
+
+    assert_no_diff("a refused call must not touch the project on disk")
+
+
+@e2e_test(tool="get_form_screenshot", kind="read")
+def test_screenshot_is_explicitly_enabled_and_advertises_the_session_warning():
+    """CI opts in before boot; stands must enable the tool in the Tools preferences.
+
+    This is a failure if setup forgot the opt-in, so screenshot coverage cannot silently
+    become disabled-tool skips. A default server's omission is pinned by
+    test_screenshot_is_disabled_by_default_and_refused (opt-in by environment) and by
+    FormScreenshotVisibilityTest.
+    """
+    if SCREENSHOT_DEFAULT_SERVER:
+        raise E2ESkip("EDT_MCP_FORM_SCREENSHOT_DEFAULT_E2E is set: this server keeps the default "
+                      "Tools preferences, so get_form_screenshot is off by design")
+    assert_ok(call("enable_toolset", {"toolsets": ["forms"]}), "reveal forms for screenshot checks")
+    raw = _post("tools/list", {})
+    tools = (raw.get("result") or {}).get("tools") or []
+    entry = next((tool for tool in tools if tool.get("name") == "get_form_screenshot"), None)
+    assert entry is not None, (
+        "Enable get_form_screenshot in Window > Preferences > MCP Server > Tools before "
+        "running screenshot e2e; CI seeds this explicit opt-in before EDT boots")
+    description = entry.get("description", "")
+    for clause in ("ATTENTION", "disabled by default", "-DnativeFormBufferedLayoutRender=true",
+                   "1cedt.ini", "grey rectangle", "EDT behaviour", "whole session", "restart",
+                   "get_tool_guide('get_form_screenshot')"):
+        assert clause in description, "screenshot description lost %r: %s" % (clause, description)
+    assert_no_diff("listing the explicitly enabled screenshot tool is read-only")
+
+
+@e2e_test(tool="get_form_screenshot", kind="read")
+def test_screenshot_preserves_startup_modes_and_requested_properties():
+    """An attempted capture may return a render sentinel; it must never change JVM flags."""
+    before = call("get_server_status", {})
+    assert_ok(before, "render flags before capture")
+    before_flags = before.structured["formRenderFlags"]
+    r = call("get_form_screenshot", {"projectName": PROJECT, "formPath": "CommonForm.Form"})
+    if r.is_error:
+        assert any(sentinel in r.error_text() for sentinel in _RENDER_UNAVAILABLE_SENTINELS), r.error_text()
+    else:
+        _png(r, "capture without any render-mode mutation")
+    after = call("get_server_status", {})
+    assert_ok(after, "render flags after capture")
+    assert after.structured["formRenderFlags"] == before_flags, (
+        "get_form_screenshot changed EDT's startup modes or requested JVM properties")
+    assert all("forcedAtRuntime" not in state for state in before_flags.values()), before_flags
+    assert_no_diff("capturing a form must not touch project files")
 
 
 # The PNG signature, base64-encoded, always begins with "iVBOR" (bytes 89 50 4E 47).
@@ -150,6 +255,107 @@ def test_capture_commonform_real_image_or_clean_render_sentinel():
             "signature %r); got prefix %r" % (_PNG_B64_PREFIX, blob[:16])
         )
 
+    assert_no_diff("a screenshot read must not touch the project on disk")
+
+
+@e2e_test(tool="get_form_screenshot", kind="read")
+def test_show_element_unknown_name_names_the_form_and_lists_its_pages():
+    """An unknown showElement fails fast, before the render gate: opening the editor and
+    resolving the name need no image and no particular render mode, so nothing excuses
+    a missing not-found here. The error names the value and the searched form and lists
+    the form's pages, so the caller needs no second call."""
+    r = call("get_form_screenshot", {
+        "projectName": PROJECT,
+        "formPath": "CommonForm.Form",
+        "showElement": "NoSuchElementXyz",
+    })
+    err = assert_error(r, "unknown showElement")
+    assert "'NoSuchElementXyz' was not found in form 'CommonForm.Form'" in err, (
+        "the not-found error must name the value and the searched form; got: %r" % (err[:400]))
+    assert "Its pages: PageMain, PageExtra." in err, (
+        "the not-found error must list the form's pages; got: %r" % (err[:400]))
+    assert_error_quality(
+        err,
+        names=["NoSuchElementXyz"],
+        suggests=["get_metadata_details"],
+        ctx="unknown showElement names the value and the tool listing every element",
+    )
+    assert_no_diff("a screenshot read must not touch the project on disk")
+
+
+def _png(result, ctx):
+    """The PNG blob of a successful capture; fails the test on an error or a non-PNG blob."""
+    assert not result.is_error, "[%s] must capture; got: %r" % (ctx, result.error_text()[:300])
+    blob = _blob(result)
+    assert blob and blob.startswith(_PNG_B64_PREFIX), (
+        "[%s] must return a real PNG; got prefix %r" % (ctx, (blob or "")[:16]))
+    return blob
+
+
+@e2e_test(tool="get_form_screenshot", kind="read")
+def test_show_element_switches_the_page_and_puts_the_editor_back():
+    """showElement must really switch the page, and the editor must not stay on it.
+
+    The prerequisites come from get_server_status, never from the tool's own failure:
+      * Java render (-DnativeFormLayoutRender=false): a KNOWN name is refused with the
+        restart advice - never a not-found, never the default page as success.
+      * Native render with -DnativeFormBufferedLayoutRender reported OFF at startup: no
+        form image exists on this install, so the test is skipped before any capture.
+        A status that cannot be read fails the test instead.
+      * Native render with the flag on, but the plain opening capture (no showElement)
+        reports a documented render-unavailable sentinel (CI's xvfb): skipped.
+      * Native render with the buffered image: every capture below MUST succeed. The form
+        is opened, then everything runs on the ACTIVE editor (no formPath), so no capture
+        reopens it and only the restore can bring it back:
+          - showElement=OK (outside every Pages group) renders nothing: same image;
+          - showElement=PageExtra differs from the baseline (a no-op switch fails here);
+          - showElement=extrapagelabel (an element ON that page, case-insensitive)
+            gives the same image as the page itself: same page, frame cleared both times;
+          - the capture afterwards no longer shows PageExtra (a missing restore fails).
+
+    Limit: no MCP tool can put a live editor on a user-clicked tab, so the editor here
+    starts on its default page, and this test cannot tell a restore of the user's tab
+    from a plain default-page render. The restore is best effort by EDT's design (it
+    re-selects the editor's last selection; other Pages groups return to their default
+    pages); FormPageSwitchTest pins its render sequence, not native pixels."""
+    mode = native_form_layout_render_mode()
+    if mode == "off":
+        r = call("get_form_screenshot", {
+            "projectName": PROJECT,
+            "formPath": "CommonForm.Form",
+            "showElement": "ExtraPageLabel",
+        })
+        err = assert_error(r, "showElement in Java render mode")
+        assert "showElement needs the native form render" in err and "'ExtraPageLabel'" in err, (
+            "Java render mode must refuse a known showElement explicitly; got: %r" % err[:400])
+        assert_no_diff("a screenshot read must not touch the project on disk")
+        return
+
+    if buffered_form_render_at_startup() == "off":
+        raise E2ESkip("EDT started without -DnativeFormBufferedLayoutRender=true, so this "
+                      "install produces no form image")
+
+    opening = call("get_form_screenshot", {"projectName": PROJECT, "formPath": "CommonForm.Form"})
+    if opening.is_error and any(s in opening.error_text() for s in _RENDER_UNAVAILABLE_SENTINELS):
+        # A plain capture is the base contract, not showElement: a virtual display (CI xvfb)
+        # renders no image even with the flag on. Every capture after this one must succeed.
+        raise E2ESkip("this install renders no form image even without showElement: %s"
+                      % opening.error_text()[:160])
+    _png(opening, "opening capture")
+    baseline = _png(call("get_form_screenshot", {}), "baseline capture of the active editor")
+    outside = _png(call("get_form_screenshot", {"showElement": "OK"}), "showElement=OK")
+    page = _png(call("get_form_screenshot", {"showElement": "PageExtra"}), "showElement=PageExtra")
+    element = _png(call("get_form_screenshot", {"showElement": "extrapagelabel"}),
+                   "showElement=extrapagelabel")
+    after = _png(call("get_form_screenshot", {}), "active-editor capture after showElement")
+
+    assert outside == baseline, (
+        "an element outside every Pages group is already visible: nothing may be re-rendered")
+    assert page != baseline, "showElement=PageExtra returned the page the editor showed: nothing was switched"
+    assert element == page, (
+        "an element on PageExtra must give the same image as the page itself (same page, "
+        "no selection frame); they differ")
+    assert after != page, "after showElement the editor still shows PageExtra: it was not put back"
     assert_no_diff("a screenshot read must not touch the project on disk")
 
 

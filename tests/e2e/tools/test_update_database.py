@@ -74,10 +74,12 @@ is only the launch-manager lookup and the two lines of execute() that join the s
 """
 
 from harness import (
+    E2ESkip,
     call,
     assert_error,
     assert_error_quality,
     assert_contains,
+    assert_ok,
     assert_not_contains,
     assert_no_diff,
     e2e_test,
@@ -89,6 +91,61 @@ from harness import (
 # Plain ASCII (no quotes/JSON delimiters) so it round-trips verbatim through the
 # JSON error payload and can be matched by assert_error_quality(names=[...]).
 BOGUS_APP_ID = "no_such_app_e2e_zzz"
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_confirmed_zero_wait_job_can_be_polled_without_mutating():
+    """The bogus target exercises the job lifecycle and finishes before any DB mutation."""
+    r = call("update_database", {
+        "projectName": PROJECT, "applicationId": BOGUS_APP_ID,
+        "confirm": True, "waitSeconds": 0,
+    })
+    # A very fast rejection may already be terminal even at the zero-wait boundary.
+    if not (r.structured or {}).get("jobId"):
+        e = assert_error(r, "inline completion at zero wait")
+        assert_contains(e, BOGUS_APP_ID, "inline rejection preserves the target")
+    else:
+        job_id = r.structured["jobId"]
+        assert_ok(r, "accepted background update")
+        assert_contains(r.structured.get("message", ""), "get_job_status",
+                        "pending reply supplies the polling hint")
+        for _ in range(4):
+            polled = call("get_job_status", {"jobId": job_id, "waitSeconds": 20})
+            assert_ok(polled, "poll accepted update")
+            if polled.text.startswith("# Background job: done"):
+                assert_contains(polled.text, "Application not found", "job retains the final refusal")
+                assert_contains(polled.text, BOGUS_APP_ID, "job retains target details")
+                break
+            assert_contains(polled.text, "# Background job: running", "job remains observable")
+        else:
+            raise AssertionError("the invalid-target update job did not finish")
+    assert_no_diff("a rejected background update must leave project sources unchanged")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_confirmed_update_finishing_within_wait_returns_inline_result():
+    r = call("update_database", {
+        "projectName": PROJECT, "applicationId": BOGUS_APP_ID,
+        "confirm": True, "waitSeconds": 45,
+    })
+    e = assert_error(r, "completed invalid-target update returns its final JSON inline")
+    assert_contains(e, BOGUS_APP_ID, "inline error preserves the target")
+    assert_contains(e, "get_applications", "inline error preserves next-step guidance")
+    assert not (r.structured or {}).get("jobId"), r.structured
+    assert_no_diff("inline rejection must leave project sources unchanged")
+
+
+@e2e_test(tool="update_database", kind="read")
+def test_timeout_guide_preserves_unknown_outcome_and_server_cancellation():
+    """Read the live guide without mutating an infobase; cancellation needs a dedicated stand."""
+    r = call("get_tool_guide", {"toolName": "update_database"})
+    assert_ok(r, "update_database timeout guide")
+    for text in ("unknown outcome", "includeBodies=true", "Command execution cancelled",
+                 "does not prove that nothing happened", "Check the infobase state"):
+        assert_contains(r.text, text, "timeout recovery must preserve observed evidence")
+    assert_not_contains(r.text, "keeps running in EDT to completion",
+                        "the transport cannot promise successful platform completion")
+    assert_no_diff("reading the update guide must leave project sources unchanged")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -151,6 +208,64 @@ def test_terminate_running_clients_param_accepted_without_mutation():
     assert_contains(e, "Application not found",
                     "the terminateRunningClients param must not change the application-lookup rejection")
     assert_no_diff("a rejected update (even with terminateRunningClients) must not touch the project on disk")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_infobase_session_preflight_opt_out_param_is_accepted_without_mutation():
+    """checkInfobaseSessions=false is parsed without changing target resolution.
+
+    The bogus application stops the call before confirmation, session inspection, or update, so
+    this pins the new parameter at the live protocol boundary without touching an infobase.
+    """
+    r = call("update_database", {
+        "projectName": PROJECT,
+        "applicationId": BOGUS_APP_ID,
+        "checkInfobaseSessions": False,
+    })
+    e = assert_error(r, "session preflight opt-out with non-existent application")
+    assert_error_quality(e, names=[BOGUS_APP_ID], suggests=["get_applications"],
+                         ctx="session opt-out still reaches the application lookup")
+    assert_contains(e, "Application not found",
+                    "checkInfobaseSessions must not alter target resolution")
+    assert_no_diff("a rejected update with session opt-out must not touch project sources")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_branch_binding_opt_out_param_is_accepted_without_mutation():
+    """ignoreBranchBinding=true is parsed without changing target resolution (#459): the bogus
+    application still stops the call at the lookup, before any binding check or update."""
+    r = call("update_database", {
+        "projectName": PROJECT,
+        "applicationId": BOGUS_APP_ID,
+        "ignoreBranchBinding": True,
+    })
+    e = assert_error(r, "branch-binding opt-out with non-existent application")
+    assert_error_quality(e, names=[BOGUS_APP_ID], suggests=["get_applications"],
+                         ctx="branch-binding opt-out still reaches the application lookup")
+    assert_contains(e, "Application not found",
+                    "ignoreBranchBinding must not alter target resolution")
+    assert_no_diff("a rejected update with the branch-binding opt-out must not touch project sources")
+
+
+@e2e_test(tool="update_database", kind="action")
+def test_preview_of_a_real_application_passes_when_the_branch_binds_nothing():
+    """No binding on the current branch is not a conflict (#459). The fixture's application (a
+    standalone-server one on the stand) stays listed whatever branch is checked out; with nothing
+    bound, the preview must still resolve it. confirm is omitted, so nothing is updated."""
+    branches = call("list_git_branches", {"projectName": PROJECT})
+    if branches.is_error or "No application bindings recorded" not in (branches.text or ""):
+        raise E2ESkip("the current branch of the fixture has infobase bindings (or they are "
+                      "unreadable); this test covers the unbound case only")
+    apps = call("get_applications", {"projectName": PROJECT})
+    listed = ((apps.structured or {}).get("applications") or []) if not apps.is_error else []
+    if not listed:
+        raise E2ESkip("the fixture project has no application to preview")
+    app_id = listed[0]["id"]
+    r = call("update_database", {"projectName": PROJECT, "applicationId": app_id})
+    assert_ok(r, "preview of a real application with no branch binding")
+    assert r.structured.get("action") == "preview",         "an unbound branch must not refuse the preview: %r" % (r.structured,)
+    assert r.structured.get("applicationId") == app_id, r.structured
+    assert_no_diff("a preview must not touch project sources")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

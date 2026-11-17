@@ -19,6 +19,7 @@ import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.MultiStatus;
 import org.eclipse.core.runtime.Status;
+import org.eclipse.debug.core.DebugException;
 import org.junit.Test;
 
 import com.e1c.g5.dt.applications.ApplicationException;
@@ -41,6 +42,63 @@ import com.jcraft.jsch.JSchException;
 public class PlatformFailuresTest
 {
     private static final String PLUGIN = "com.ditrix.edt.mcp.server";
+
+    @Test
+    public void testIsObjectIdentityRequiresTheWholeString()
+    {
+        assertTrue(PlatformFailures.isObjectIdentity("com.example.Outer$Inner@a"));
+        assertTrue(PlatformFailures.isObjectIdentity("Foo@DEADBEEF"));
+        assertFalse(PlatformFailures.isObjectIdentity(null));
+        assertFalse(PlatformFailures.isObjectIdentity(""));
+        assertFalse(PlatformFailures.isObjectIdentity(" Foo@deadbeef "));
+        assertFalse(PlatformFailures.isObjectIdentity("<p>Foo@deadbeef</p>"));
+        assertFalse(PlatformFailures.isObjectIdentity("Details: Foo@deadbeef"));
+        assertFalse(PlatformFailures.isObjectIdentity(
+            "Connect(Repository): Clones ssh://git@db/repo into the workspace."));
+    }
+
+    @Test
+    public void testDebugExceptionStatusAlreadyUsesCoreExceptionShape()
+    {
+        IStatus status = new Status(IStatus.ERROR, PLUGIN, "Debug request failed");
+        assertSame(status, PlatformFailures.statusOf(new DebugException(status)));
+    }
+
+    @Test
+    public void testDebugExceptionPrefersStatusExceptionOverWrapperMessage()
+    {
+        IStatus status = new Status(IStatus.ERROR, PLUGIN, "Debug request failed",
+            new IllegalStateException("Variable is no longer available; call wait_for_break again."));
+        assertEquals("Variable is no longer available; call wait_for_break again.",
+            PlatformFailures.describe(new DebugException(status)));
+    }
+
+    @Test
+    public void testDebugExceptionPrefersStatusExceptionOverChildren()
+    {
+        MultiStatus status = new MultiStatus(PLUGIN, 0, "Debug request failed",
+            new IllegalStateException("Refresh the suspended frame before setting the value."));
+        status.add(new Status(IStatus.ERROR, PLUGIN, "Aggregate child message"));
+        assertEquals("Refresh the suspended frame before setting the value.",
+            PlatformFailures.describe(new DebugException(status)));
+    }
+
+    @Test
+    public void testDebugExceptionWithBlankCarriedMessageUsesStatusMessage()
+    {
+        IStatus status = new Status(IStatus.ERROR, PLUGIN, "Debug request failed",
+            new IllegalStateException("  "));
+        assertEquals("Debug request failed", PlatformFailures.describe(new DebugException(status)));
+    }
+
+    @Test
+    public void testOrdinaryCoreExceptionKeepsWrapperPreference()
+    {
+        IStatus status = new Status(IStatus.ERROR, PLUGIN, "Platform request failed",
+            new IllegalStateException("Carried detail"));
+        assertEquals("Platform request failed", PlatformFailures.describe(new CoreException(status)));
+        assertEquals("Platform request failed", PlatformFailures.describe(new ApplicationException(status)));
+    }
 
     /** The #452 leak, exactly as the platform reported it on the stand. */
     private static final String LEAKING_MESSAGE = "Failed to persist reference value"
@@ -382,6 +440,35 @@ public class PlatformFailuresTest
 
         assertEquals("equal selected and terminal messages must not be repeated", "", //$NON-NLS-1$ //$NON-NLS-2$
             rootCause(failure));
+    }
+
+    @Test
+    public void testDescribeStatusAppendsItsDeepestDistinctCause()
+    {
+        String cause = "another process still owns the standalone server ports"; //$NON-NLS-1$
+        IStatus status = new Status(IStatus.ERROR, PLUGIN, "server start failed", //$NON-NLS-1$
+            new RuntimeException("start operation failed", new IllegalStateException(cause))); //$NON-NLS-1$
+
+        assertEquals("server start failed Caused by: " + cause, //$NON-NLS-1$
+            PlatformFailures.describeStatus(status));
+    }
+
+    @Test
+    public void testDescribeStatusDoesNotRepeatItsHeadlineAsTheCause()
+    {
+        String headline = "server start failed"; //$NON-NLS-1$
+        IStatus status = new Status(IStatus.ERROR, PLUGIN, headline,
+            new IllegalStateException(headline));
+
+        assertEquals(headline, PlatformFailures.describeStatus(status));
+    }
+
+    @Test
+    public void testDescribeStatusWithoutAnExceptionReturnsItsMessage()
+    {
+        IStatus status = new Status(IStatus.ERROR, PLUGIN, "server start failed"); //$NON-NLS-1$
+
+        assertEquals("server start failed", PlatformFailures.describeStatus(status)); //$NON-NLS-1$
     }
 
     @Test

@@ -6,6 +6,7 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -31,7 +32,6 @@ import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.PlatformUI;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
@@ -43,6 +43,7 @@ import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com.ditrix.edt.mcp.server.utils.ReadToolExecution;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
@@ -54,6 +55,7 @@ import com.ditrix.edt.mcp.server.utils.MarkdownUtils;
 import com.ditrix.edt.mcp.server.utils.BslModuleUtils;
 import com.ditrix.edt.mcp.server.utils.Pagination;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
+import com.ditrix.edt.mcp.server.utils.Refusals;
 
 /**
  * Tool to find method call hierarchy - who calls this method (callers)
@@ -71,6 +73,18 @@ import com.ditrix.edt.mcp.server.utils.ProjectContext;
 public class GetMethodCallHierarchyTool implements IMcpTool
 {
     public static final String NAME = "get_method_call_hierarchy"; //$NON-NLS-1$
+
+    private final java.util.function.BiFunction<IProject, String, Module> moduleLoader;
+
+    public GetMethodCallHierarchyTool()
+    {
+        this(BslModuleUtils::loadModule);
+    }
+
+    GetMethodCallHierarchyTool(java.util.function.BiFunction<IProject, String, Module> moduleLoader)
+    {
+        this.moduleLoader = moduleLoader;
+    }
 
     /** Input param: name of the procedure/function to analyze. */
     private static final String KEY_METHOD_NAME = "methodName"; //$NON-NLS-1$
@@ -219,7 +233,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         String direction = normalizeArg(JsonUtils.extractStringArgument(params, KEY_DIRECTION));
         if (methodName != null && !methodName.isEmpty())
         {
-            return "call-hierarchy-" + methodName.toLowerCase() + //$NON-NLS-1$
+            return "call-hierarchy-" + methodName.toLowerCase(Locale.ROOT) + //$NON-NLS-1$
                    "-" + (direction != null ? direction : KEY_CALLERS) + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
         }
         // Module-wide outgoing scope has no method name; keep a distinct, descriptive file name.
@@ -317,7 +331,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         {
             direction = KEY_CALLERS;
         }
-        direction = direction.toLowerCase();
+        direction = direction.toLowerCase(Locale.ROOT);
         request.direction = direction;
 
         if (!KEY_CALLERS.equals(direction) && !"callees".equals(direction) //$NON-NLS-1$
@@ -369,15 +383,14 @@ public class GetMethodCallHierarchyTool implements IMcpTool
     private String runOnDisplay(String projectName, String modulePath, RequestArgs request)
     {
         AtomicReference<String> resultRef = new AtomicReference<>();
-        Display display = PlatformUI.getWorkbench().getDisplay();
-        display.syncExec(() -> {
+        ReadToolExecution.dispatch(() -> {
             try
             {
-                resultRef.set(dispatch(projectName, modulePath, request));
+                resultRef.set(ReadToolExecution.readOnHost(projectName, NAME, () -> dispatch(projectName, modulePath, request)));
             }
             catch (Exception e)
             {
-                Activator.logError("Error finding call hierarchy", e); //$NON-NLS-1$
+                Refusals.log("Error finding call hierarchy", e); //$NON-NLS-1$
                 resultRef.set(ToolResult.error(e.getMessage()).toJson());
             }
         });
@@ -455,7 +468,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         }
         IProject project = ctx.project();
 
-        Module module = BslModuleUtils.loadModule(project, modulePath);
+        Module module = moduleLoader.apply(project, modulePath);
         if (module == null)
         {
             return moduleLoadFailure(modulePath);
@@ -464,7 +477,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         Method method = BslModuleUtils.findMethod(module, methodName);
         if (method == null)
         {
-            return BslModuleUtils.buildMethodNotFoundResponse(module, modulePath, methodName);
+            return ToolResult.error(BslModuleUtils.buildMethodNotFoundResponse(module, modulePath, methodName)).toJson();
         }
 
         final URI methodUri = EcoreUtil.getURI(method);
@@ -588,7 +601,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         {
             return candidates;
         }
-        final String lowerName = methodName.toLowerCase();
+        final String lowerName = methodName.toLowerCase(Locale.ROOT);
         try
         {
             srcFolder.accept(res -> {
@@ -597,7 +610,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
                 {
                     IFile file = (IFile)res;
                     String text = readCandidateText(file);
-                    if (text != null && text.toLowerCase().contains(lowerName))
+                    if (text != null && text.toLowerCase(Locale.ROOT).contains(lowerName))
                     {
                         candidates.add(file);
                     }
@@ -851,7 +864,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         }
         IProject project = ctx.project();
 
-        Module module = BslModuleUtils.loadModule(project, modulePath);
+        Module module = moduleLoader.apply(project, modulePath);
         if (module == null)
         {
             return moduleLoadFailure(modulePath);
@@ -860,7 +873,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         Method method = BslModuleUtils.findMethod(module, methodName);
         if (method == null)
         {
-            return BslModuleUtils.buildMethodNotFoundResponse(module, modulePath, methodName);
+            return ToolResult.error(BslModuleUtils.buildMethodNotFoundResponse(module, modulePath, methodName)).toJson();
         }
 
         // Traverse AST of this method to find invocations
@@ -974,16 +987,16 @@ public class GetMethodCallHierarchyTool implements IMcpTool
                 return ToolResult.error(ProjectContext.notFoundMessage(projectName)).toJson();
             }
 
-            Display display = PlatformUI.getWorkbench().getDisplay();
+            var readExecutor = transitiveExecutor(projectName);
             RootResolution root = new RootResolution();
-            display.syncExec(() -> resolveRoot(ctx.project(), modulePath, request.methodName, root));
+            readExecutor.accept(() -> resolveRoot(ctx.project(), modulePath, request.methodName, root));
             if (root.error != null)
             {
                 return root.error;
             }
 
             TransitiveContext context =
-                new TransitiveContext(ctx.project(), projectName, root.resourceSet, display);
+                new TransitiveContext(ctx.project(), projectName, root.resourceSet, readExecutor);
             long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TRANSITIVE_TIME_BUDGET_MS);
             BooleanSupplier expired = () -> System.nanoTime() - deadline >= 0;
 
@@ -1003,7 +1016,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         }
         catch (Exception e)
         {
-            Activator.logError("Error finding transitive call hierarchy", e); //$NON-NLS-1$
+            Refusals.log("Error finding transitive call hierarchy", e); //$NON-NLS-1$
             return ToolResult.error(e.getMessage()).toJson();
         }
     }
@@ -1021,7 +1034,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
     {
         try
         {
-            Module module = BslModuleUtils.loadModule(project, modulePath);
+            Module module = moduleLoader.apply(project, modulePath);
             if (module == null)
             {
                 out.error = moduleLoadFailure(modulePath);
@@ -1030,7 +1043,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
             Method method = BslModuleUtils.findMethod(module, methodName);
             if (method == null)
             {
-                out.error = BslModuleUtils.buildMethodNotFoundResponse(module, modulePath, methodName);
+                out.error = ToolResult.error(BslModuleUtils.buildMethodNotFoundResponse(module, modulePath, methodName)).toJson();
                 return;
             }
             if (method.eResource() == null || method.eResource().getResourceSet() == null)
@@ -1046,7 +1059,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         }
         catch (Exception e)
         {
-            Activator.logError("Error resolving call-hierarchy root", e); //$NON-NLS-1$
+            Refusals.log("Error resolving call-hierarchy root", e); //$NON-NLS-1$
             out.error = ToolResult.error(e.getMessage()).toJson();
         }
     }
@@ -1060,13 +1073,20 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         ResourceSet resourceSet;
     }
 
+    private static java.util.function.Consumer<Runnable> transitiveExecutor(String projectName)
+    {
+        var display = ReadToolExecution.workbenchExecutor();
+        return work -> display.accept(() -> ReadToolExecution.readOnHost(projectName, NAME,
+            () -> { work.run(); return null; }));
+    }
+
     /** Everything a level expansion needs that does not change between levels. */
     private static final class TransitiveContext
     {
         final IProject project;
         final String projectName;
         final ResourceSet resourceSet;
-        final Display display;
+        final java.util.function.Consumer<Runnable> readExecutor;
 
         /**
          * Paths already counted in each diagnostic category. The walk re-reads and re-scans the
@@ -1082,12 +1102,13 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         /** Paths already counted as unverified; see {@link #unreadable}. */
         final Set<String> unverified = new HashSet<>();
 
-        TransitiveContext(IProject project, String projectName, ResourceSet resourceSet, Display display)
+        TransitiveContext(IProject project, String projectName, ResourceSet resourceSet,
+            java.util.function.Consumer<Runnable> readExecutor)
         {
             this.project = project;
             this.projectName = projectName;
             this.resourceSet = resourceSet;
-            this.display = display;
+            this.readExecutor = readExecutor;
         }
     }
 
@@ -1218,7 +1239,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
             }
             List<IFile> chunk = candidates.subList(from, Math.min(from + UI_CHUNK_SIZE, candidates.size()));
             boolean[] chunkCut = { false };
-            ctx.display.syncExec(() -> chunkCut[0] = matchChunk(ctx, chunk, byName, found, diag, expired));
+            ctx.readExecutor.accept(() -> chunkCut[0] = matchChunk(ctx, chunk, byName, found, diag, expired));
             if (chunkCut[0])
             {
                 cutShort = true;
@@ -1963,7 +1984,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
         }
         IProject project = ctx.project();
 
-        Module module = BslModuleUtils.loadModule(project, modulePath);
+        Module module = moduleLoader.apply(project, modulePath);
         if (module == null)
         {
             return moduleLoadFailure(modulePath);
@@ -1976,7 +1997,7 @@ public class GetMethodCallHierarchyTool implements IMcpTool
             Method method = BslModuleUtils.findMethod(module, methodName);
             if (method == null)
             {
-                return BslModuleUtils.buildMethodNotFoundResponse(module, modulePath, methodName);
+                return ToolResult.error(BslModuleUtils.buildMethodNotFoundResponse(module, modulePath, methodName)).toJson();
             }
             scope = method;
         }

@@ -26,11 +26,10 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 import com.ditrix.edt.mcp.server.bridge.BridgeActivity;
+import com.ditrix.edt.mcp.server.Activator;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.text.IDocument;
-import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.PlatformUI;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.FrameworkUtil;
@@ -55,6 +54,8 @@ import org.osgi.framework.FrameworkUtil;
  */
 public class WorkmateGateway
 {
+    private static final java.util.Set<Class<?>> CLOSED_SESSION_WARNED =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
     /**
      * The id Workmate generated for the session published under {@link #CHAT_SESSION_ID},
      * remembered so that key can be kept warm too. Volatile: written by whichever thread
@@ -246,8 +247,8 @@ public class WorkmateGateway
      */
     public static final String CHAT_SESSION_ID = "edt-mcp"; //$NON-NLS-1$
 
-    /** Manual id the rules pair with {@link #CHAT_SESSION_ID}; stable across restarts. */
-    public static final String CHAT_MANUAL_ID = "jshell_edt_canonical_imports"; //$NON-NLS-1$
+    /** Eclipse manual id present in Workmate 1.0.5/1.0.7 and verified on 1.0.8. */
+    public static final String CHAT_MANUAL_ID = "active_workbench"; //$NON-NLS-1$
 
     private static final String SESSION_MANAGER =
         "com.e1c.edt.ai.tools.IJShellSessionManager"; //$NON-NLS-1$
@@ -2089,25 +2090,12 @@ public class WorkmateGateway
         }
     }
 
-    /**
-     * Returns the running workbench's display, or {@code null} when there is none.
-     * <p>
-     * Deliberately not {@code Display.getDefault()}: that CREATES a display when none exists,
-     * and on a background worker during shutdown the created one has no event loop, so anything
-     * posted to it waits forever.
-     *
-     * @return a live workbench display, or {@code null}
-     */
-    private static Display workbenchDisplay()
+    /** Keeps Workmate's shutdown refusal for any workbench-probe failure. */
+    private static BoundedUiCall.UiExecutor workbenchExecutor()
     {
         try
         {
-            if (!PlatformUI.isWorkbenchRunning())
-            {
-                return null;
-            }
-            Display display = PlatformUI.getWorkbench().getDisplay();
-            return display == null || display.isDisposed() ? null : display;
+            return BoundedUiCall.workbenchExecutorOrNull();
         }
         catch (RuntimeException e)
         {
@@ -2116,28 +2104,24 @@ public class WorkmateGateway
         }
     }
 
-    /**
-     * Reports whether a Workmate JShell session has already been closed.
-     * <p>
-     * Tolerant on purpose: when the field cannot be read the session is treated as ALIVE,
-     * because the alternative - recreating on every pass - would churn Workmate's session
-     * cache instead of merely leaving the chat without a bridge.
-     *
-     * @param session the session object to inspect
-     * @return {@code true} only when the session is provably closed
-     */
-    private static boolean isClosedSession(Object session)
+    /** Reports the session state, refusing an unreadable state before reuse or publication. */
+    private static boolean isClosedSession(Object session) throws GatewayException
     {
         try
         {
-            Field closedField = session.getClass().getDeclaredField("isClosed"); //$NON-NLS-1$
+            Field closedField = session.getClass().getDeclaredField("isClosed");
             closedField.setAccessible(true);
             Object closed = closedField.get(session);
-            return closed instanceof AtomicBoolean && ((AtomicBoolean)closed).get();
+            if (closed instanceof AtomicBoolean flag) return flag.get();
+            throw new IllegalStateException("isClosed is not an AtomicBoolean");
         }
         catch (ReflectiveOperationException | RuntimeException e)
         {
-            return false;
+            if (CLOSED_SESSION_WARNED.add(session == null ? Void.class : session.getClass()))
+            {
+                Activator.logWarning("Cannot read Workmate session member isClosed; state is unknown: " + e);
+            }
+            throw GatewayException.incompatible("cannot read session member isClosed; its state is unknown");
         }
     }
 
@@ -2310,8 +2294,8 @@ public class WorkmateGateway
             // worker, and getDefault() CREATES a display when none exists. During shutdown that
             // would build a fresh display on the worker thread with no event loop behind it, so
             // the asyncExec below would never run and the hand-off would hang until its timeout.
-            Display display = workbenchDisplay();
-            if (display == null)
+            BoundedUiCall.UiExecutor executor = workbenchExecutor();
+            if (executor == null)
             {
                 throw GatewayException.notReady("the EDT workbench UI is gone (EDT is closing " //$NON-NLS-1$
                     + "or running headless), so the chat view cannot be opened"); //$NON-NLS-1$
@@ -2326,7 +2310,7 @@ public class WorkmateGateway
             // read "not abandoned", this thread can then time out, and the question is
             // asked anyway, after the caller was told it failed and possibly retried.
             AtomicBoolean claimed = new AtomicBoolean(false);
-            display.asyncExec(() -> {
+            BoundedUiCall.submit(executor::asyncExec, () -> {
                 if (!claimed.compareAndSet(false, true))
                 {
                     return;
@@ -2349,14 +2333,11 @@ public class WorkmateGateway
                 {
                     failure.set(e);
                 }
-                finally
-                {
-                    delivered.countDown();
-                }
-            });
+            }, delivered);
             try
             {
-                if (!delivered.await(CHAT_HANDOFF_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                if (!BoundedUiCall.awaitInterruptibly(delivered,
+                    TimeUnit.SECONDS.toMillis(CHAT_HANDOFF_TIMEOUT_SECONDS))
                     && claimed.compareAndSet(false, true))
                 {
                     throw GatewayException.timedOut();

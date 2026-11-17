@@ -48,6 +48,8 @@ public final class FormStructureReader
     private static final String FEATURE_ATTRIBUTES = "attributes"; //$NON-NLS-1$
     /** The columns of a collection-typed form attribute (issue #295). */
     private static final String FEATURE_COLUMNS = "columns"; //$NON-NLS-1$
+    /** The additional-column entries of an object attribute's tabular sections (issue #737). */
+    private static final String FEATURE_ADDITIONAL_COLUMNS = "additionalColumns"; //$NON-NLS-1$
     /** EReference name holding the {@code FormCommand}s on a {@code Form}. */
     private static final String FEATURE_FORM_COMMANDS = "formCommands"; //$NON-NLS-1$
 
@@ -333,10 +335,12 @@ public final class FormStructureReader
     {
         int limit = Math.min(Math.max(1, rowLimit), MAX_NODES);
         StringBuilder sb = new StringBuilder();
-        sb.append("# Form Structure: ").append(formPath).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+        sb.append("# Form Structure: ").append(MetadataTypeUtils.toCanonicalEnglishFqn(formPath))
+            .append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
         renderItems(sb, formModel, language, limit);
         renderAttributes(sb, formModel, language, limit);
-        renderAttributeColumns(sb, formModel, language, limit);
+        renderAttributeColumns(sb, formModel, language, limit, false);
+        renderAttributeColumns(sb, formModel, language, limit, true);
         renderCommands(sb, formModel, language, limit);
         renderParameters(sb, formModel, limit);
         renderEventHandlers(sb, formModel, language, limit);
@@ -489,64 +493,96 @@ public final class FormStructureReader
      * Renders the {@code ## Attribute columns} table for every COLLECTION attribute (ValueTable /
      * ValueTree) that has columns - the only place a column is visible, since the attributes table shows
      * just the owner's own type. The section is OMITTED entirely when no attribute has columns, so a form
-     * without collections renders exactly as before. Issue #295.
+     * without collections renders exactly as before. Issue #295. With {@code additional} it renders the
+     * {@code ## Additional columns} table instead: the columns of each attribute's additional-column
+     * entries with their table path, under a row cap of its own (issue #737).
      *
      * @param sb the output buffer
      * @param formModel the form content model
      * @param language the language code for the title column
+     * @param limit the row cap of this table
+     * @param additional whether to render the additional columns rather than the direct ones
      */
     private static void renderAttributeColumns(StringBuilder sb, EObject formModel, String language,
-        int limit)
+        int limit, boolean additional)
     {
+        // A model without this containment cannot contribute a row. Avoid an otherwise
+        // unbounded second attribute pass on older/synthetic models that only have direct columns.
+        EStructuralFeature attributes = formModel == null ? null
+            : formModel.eClass().getEStructuralFeature(FEATURE_ATTRIBUTES);
+        if (additional && (!(attributes instanceof EReference)
+            || ((EReference)attributes).getEReferenceType().getEStructuralFeature(FEATURE_ADDITIONAL_COLUMNS) == null))
+        {
+            return;
+        }
         // ONE pass, into a buffer of its own. Whether the section exists at all is a claim about
         // every attribute, so nothing can shorten the walk in the case where no attribute carries
         // a column; what used to be paid for regardless was a LIST of the ones that do, built in
         // full before the row cap could admit its first row. The cap now ends the pass, and the
         // only rows held are the ones it admitted.
         StringBuilder rows = new StringBuilder();
-        int shown = 0;
+        int[] shown = {0};
         boolean capped = false;
         for (EObject attribute : getReferenceList(formModel, FEATURE_ATTRIBUTES))
         {
-            if (attribute == null)
+            if (attribute != null && appendColumnRows(rows, attribute, additional, language, limit, shown))
             {
-                continue;
-            }
-            for (EObject column : getReferenceList(attribute, FEATURE_COLUMNS))
-            {
-                if (column == null)
-                {
-                    continue;
-                }
-                if (shown >= limit)
-                {
-                    capped = true;
-                    break;
-                }
-                rows.append(MarkdownUtils.tableRow(nameOf(attribute), nameOf(column),
-                    titleOf(column, language), valueTypeOf(column)));
-                shown++;
-            }
-            if (capped)
-            {
+                capped = true;
                 break;
             }
         }
-        if (shown == 0)
+        if (shown[0] == 0)
         {
             // No attribute carries a column, and that is the only thing this can mean: render
             // clamps the limit to at least 1, so a form that has a column always produces a row
             // before the cap can bite.
             return;
         }
-        sb.append("## Attribute columns\n\n"); //$NON-NLS-1$
-        sb.append(MarkdownUtils.tableHeader("Attribute", "Name", "Synonym", "Type")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        sb.append(additional ? "## Additional columns\n\n" : "## Attribute columns\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+        sb.append(additional
+            ? MarkdownUtils.tableHeader("Attribute", "Table path", "Name", "Synonym", "Type") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            : MarkdownUtils.tableHeader("Attribute", "Name", "Synonym", "Type")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         sb.append(rows);
         if (capped)
         {
-            appendCapNote(sb, "attribute columns", limit); //$NON-NLS-1$
+            appendCapNote(sb, additional ? "additional columns" : "attribute columns", limit); //$NON-NLS-1$ //$NON-NLS-2$
         }
         sb.append('\n');
+    }
+
+    /**
+     * Appends the rows of one attribute's direct columns, or of every one of its additional-column
+     * entries, until the row cap is reached.
+     *
+     * @return whether the cap ended the pass (a further column existed but was not admitted)
+     */
+    private static boolean appendColumnRows(StringBuilder rows, EObject attribute, boolean additional,
+        String language, int limit, int[] shown)
+    {
+        List<EObject> containers = additional
+            ? getReferenceList(attribute, FEATURE_ADDITIONAL_COLUMNS) : Collections.singletonList(attribute);
+        for (EObject container : containers)
+        {
+            for (EObject column : getReferenceList(container, FEATURE_COLUMNS))
+            {
+                if (column == null)
+                {
+                    continue;
+                }
+                if (shown[0] >= limit)
+                {
+                    return true;
+                }
+                rows.append(additional
+                    ? MarkdownUtils.tableRow(nameOf(attribute),
+                        dataPathText(getSingleReference(container, "tablePath")), nameOf(column), //$NON-NLS-1$
+                        titleOf(column, language), valueTypeOf(column))
+                    : MarkdownUtils.tableRow(nameOf(attribute), nameOf(column),
+                        titleOf(column, language), valueTypeOf(column)));
+                shown[0]++;
+            }
+        }
+        return false;
     }
 
     /**
@@ -573,7 +609,7 @@ public final class FormStructureReader
                 continue;
             }
             sb.append(MarkdownUtils.tableRow(nameOf(command), titleOf(command, language),
-                actionHandlerOf(command)));
+                MarkdownUtils.cappedList(actionHandlerNames(command))));
         }
         if (shown < commands.size())
         {
@@ -1090,7 +1126,7 @@ public final class FormStructureReader
                 names.add(typeItemName(type));
             }
         }
-        return String.join(", ", names); //$NON-NLS-1$
+        return MarkdownUtils.cappedList(names);
     }
 
     /**
@@ -1123,22 +1159,31 @@ public final class FormStructureReader
     }
 
     /**
+     * The text of the Commands table's "Action handler" column. Package-visible so
+     * {@link FormElementWriter}'s refusal of a second command action names the bound procedure in
+     * exactly this text (issue #628).
+     *
      * @return the BSL procedure name(s) bound to a form command's Action - the single
      *         {@code CommandHandler} of a {@code FormCommandHandlerContainer} or the
      *         {@code CommandHandlerExtension}s of an extension container - or {@code ""} when the
      *         command has no action handler. Addressed as {@code ...Command.X.Handler.Action}.
      */
-    private static String actionHandlerOf(EObject command)
+    static String actionHandlerOf(EObject command)
+    {
+        return String.join(", ", actionHandlerNames(command)); //$NON-NLS-1$
+    }
+
+    private static List<String> actionHandlerNames(EObject command)
     {
         EObject action = getSingleReference(command, FEATURE_ACTION);
         if (action == null)
         {
-            return ""; //$NON-NLS-1$
+            return List.of();
         }
         EObject single = getSingleReference(action, FEATURE_HANDLER);
         if (single != null)
         {
-            return stringValue(getValue(single, FEATURE_NAME));
+            return List.of(stringValue(getValue(single, FEATURE_NAME)));
         }
         List<String> names = new ArrayList<>();
         for (EObject handler : getReferenceList(action, FEATURE_HANDLERS))
@@ -1149,7 +1194,7 @@ public final class FormStructureReader
                 names.add(name);
             }
         }
-        return String.join(", ", names); //$NON-NLS-1$
+        return names;
     }
 
     /**
@@ -1209,10 +1254,14 @@ public final class FormStructureReader
      *         {@code "."} (e.g. {@code Object.Description}), or {@code ""} when the item carries no
      *         data path or it has no segments
      */
-    @SuppressWarnings("unchecked")
     private static String dataPathOf(EObject item)
     {
-        EObject dataPath = getSingleReference(item, FEATURE_DATA_PATH);
+        return dataPathText(getSingleReference(item, FEATURE_DATA_PATH));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String dataPathText(EObject dataPath)
+    {
         if (dataPath == null)
         {
             return ""; //$NON-NLS-1$
@@ -1465,28 +1514,16 @@ public final class FormStructureReader
                 continue;
             }
             budget[0]--;
-            for (EObject handler : getReferenceList(current.element, FEATURE_HANDLERS))
+            // Both lists this element binds through, walked in place and in order. The extInfo's
+            // list is consulted only while the cap is still taking rows.
+            EObject extInfo = getSingleReference(current.element, FEATURE_EXT_INFO);
+            boolean declined = collectBoundHandlers(
+                getReferenceList(current.element, FEATURE_HANDLERS), current.ownerLabel, language,
+                rows);
+            if (!declined && extInfo != null)
             {
-                if (handler == null)
-                {
-                    // Never a row, and never counted as one: the cap decides between handlers
-                    // this element HAS, and the model's list may legally hold a null.
-                    continue;
-                }
-                // Asked BEFORE the row is built: past the cap the strings would be read off the
-                // model only to be dropped, and the whole point of the cap is that nothing past it
-                // is retained. Leaving the loop still RECORDS the decline - there is a handler in
-                // hand, so "there were more rows than are shown" is established - and it leaves
-                // only this element's remaining handlers; the WALK carries on, because the element
-                // budget is a separate statement (see this method's own doc).
-                if (rows.full())
-                {
-                    rows.decline();
-                    break;
-                }
-                String procName = stringValue(getValue(handler, FEATURE_NAME));
-                String eventName = eventNameOf(getSingleReference(handler, FEATURE_EVENT), language);
-                rows.add(current.ownerLabel, eventName, procName);
+                collectBoundHandlers(getReferenceList(extInfo, FEATURE_HANDLERS),
+                    current.ownerLabel, language, rows);
             }
             pushHandlerChildren(current.element, pending, budget, cutShort);
         }
@@ -1623,6 +1660,45 @@ public final class FormStructureReader
      * @return the children present, at most {@link #SINGULAR_ITEM_CONTAINMENTS}{@code .length} of
      *         them
      */
+    /**
+     * Adds one bound-handler list to {@code rows} under {@code ownerLabel}.
+     *
+     * <p>An element binds through TWO lists: its own, and the one its {@code extInfo} holds when
+     * that ext-info is an event-handler container - a form root's is, which is where EDT keeps a
+     * record form's write and read events (issue #592). They are walked separately rather than
+     * merged so the row cap is consulted before anything is built, exactly as it was with one.</p>
+     *
+     * @return {@code true} when the cap DECLINED a row, so the caller stops offering more
+     */
+    private static boolean collectBoundHandlers(List<EObject> handlers, String ownerLabel,
+        String language, HandlerRows rows)
+    {
+        for (EObject handler : handlers)
+        {
+            if (handler == null)
+            {
+                // Never a row, and never counted as one: the cap decides between handlers
+                // this element HAS, and the model's list may legally hold a null.
+                continue;
+            }
+            // Asked BEFORE the row is built: past the cap the strings would be read off the
+            // model only to be dropped, and the whole point of the cap is that nothing past it
+            // is retained. Leaving the loop still RECORDS the decline - there is a handler in
+            // hand, so "there were more rows than are shown" is established - and it leaves
+            // only this element's remaining handlers; the WALK carries on, because the element
+            // budget is a separate statement (see collectHandlers' own doc).
+            if (rows.full())
+            {
+                rows.decline();
+                return true;
+            }
+            String procName = stringValue(getValue(handler, FEATURE_NAME));
+            String eventName = eventNameOf(getSingleReference(handler, FEATURE_EVENT), language);
+            rows.add(ownerLabel, eventName, procName);
+        }
+        return false;
+    }
+
     private static List<EObject> handlerSingularChildren(EObject element)
     {
         List<EObject> present = new ArrayList<>(SINGULAR_ITEM_CONTAINMENTS.length);

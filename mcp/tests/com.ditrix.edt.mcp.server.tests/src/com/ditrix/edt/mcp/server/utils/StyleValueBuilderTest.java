@@ -148,8 +148,8 @@ public class StyleValueBuilderTest
 
         assertNotNull(r.error);
         assertTrue(r.error, r.error.contains("MissingStyle")); //$NON-NLS-1$
-        assertTrue(r.error, r.error.contains("Configuration > Style items")); //$NON-NLS-1$
-        assertTrue(r.error, r.error.contains("Common/StyleItems")); //$NON-NLS-1$
+        assertTrue(r.error, r.error.contains("Unknown Style color")); //$NON-NLS-1$
+        assertTrue(r.error, r.error.contains("platform catalogue is unavailable")); //$NON-NLS-1$
     }
 
     // ==================== building a Font ====================
@@ -265,4 +265,69 @@ public class StyleValueBuilderTest
     {
         assertNull(StyleValueBuilder.renderFont(null));
     }
+
+    // ---- shared font members + configuration lookup ----------------------------------------------
+
+    @Test
+    public void testTheStyleItemFontPolicyStaysLenient()
+    {
+        // The StyleItem / DCS contract: an unknown member and 'scale' are ignored, not refused.
+        Result r = StyleValueBuilder.build(json("{font:{faceName:'Arial', scale:150, extra:1}}")); //$NON-NLS-1$
+        assertNull(r.error);
+        FontDef def = (FontDef)((FontValue)r.value).getValue();
+        assertEquals("Arial", def.getFaceName()); //$NON-NLS-1$
+        assertTrue("scale is not part of the StyleItem vocabulary", //$NON-NLS-1$
+            !def.eIsSet(def.eClass().getEStructuralFeature("scale"))); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testTheStrictPolicyRefusesWhatTheLenientOneIgnores()
+    {
+        assertNull(StyleValueBuilder.parseFontMembers(json("{extra:1}"), false).error); //$NON-NLS-1$
+        assertTrue(StyleValueBuilder.parseFontMembers(json("{extra:1}"), false).isEmpty()); //$NON-NLS-1$
+        assertEquals("Unknown font member 'extra'.", //$NON-NLS-1$
+            StyleValueBuilder.parseFontMembers(json("{extra:1}"), true).error); //$NON-NLS-1$
+        StyleValueBuilder.FontMembers strict =
+            StyleValueBuilder.parseFontMembers(json("{height:9, scale:80, bold:false}"), true); //$NON-NLS-1$
+        assertNull(strict.error);
+        assertEquals(Integer.valueOf(9), strict.height);
+        assertEquals(Integer.valueOf(80), strict.scale);
+        assertEquals(Boolean.FALSE, strict.bold);
+        assertNull("an omitted member stays omitted", strict.italic); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testTheConfigurationLookupFindsAnItemWhateverItHolds()
+    {
+        Configuration config = MdClassFactory.eINSTANCE.createConfiguration();
+        StyleItem header = MdClassFactory.eINSTANCE.createStyleItem();
+        header.setName("HeaderFont"); //$NON-NLS-1$
+        header.setAppearanceItem(McoreFactory.eINSTANCE.createStyleFont());
+        config.getStyleItems().add(header);
+        assertEquals(header, StyleValueBuilder.findStyleItem(config, "headerfont")); //$NON-NLS-1$
+        assertEquals(header.getAppearanceItem(), StyleValueBuilder.appearanceOf(header));
+        assertTrue("a font item is no named color", //$NON-NLS-1$
+            StyleValueBuilder.forConfiguration(config).resolveColor("Style", "HeaderFont").error //$NON-NLS-1$ //$NON-NLS-2$
+                .contains("holds no color")); //$NON-NLS-1$
+        assertNull(StyleValueBuilder.findPaletteColor(config, "HeaderFont")); //$NON-NLS-1$
+        assertNull(StyleValueBuilder.findStyleItem(null, "HeaderFont")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testPaletteLookupUsesTheCatalogueNameRule()
+    {
+        var config = MdClassFactory.eINSTANCE.createConfiguration();
+        var item = MdClassFactory.eINSTANCE.createPaletteColor();
+        String name = "\u0410\u043A\u0446\u0435\u043D\u0442"; // Акцент
+        item.setName(name);
+        item.getSynonym().put("en", "Display accent");
+        config.getPaletteColors().add(item);
+        assertEquals(MetadataTypeUtils.findObject(config, "PaletteColor", name),
+            StyleValueBuilder.findPaletteColor(config, name.toLowerCase(java.util.Locale.ROOT)));
+        assertEquals(item, StyleValueBuilder.findPaletteColor(config, name));
+        assertNull(StyleValueBuilder.findPaletteColor(config, "Display accent"));
+        assertNull(StyleValueBuilder.findPaletteColor(config, "Missing"));
+        assertNull(StyleValueBuilder.findPaletteColor(null, name));
+    }
+
 }

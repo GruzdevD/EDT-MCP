@@ -29,16 +29,70 @@ A full create -> launch -> verify round-trip is Tier-2 (live stand with EDT_MCP_
 
 from harness import (
     call,
+    calls_aborted,
     assert_ok,
     assert_error,
     assert_error_quality,
     assert_no_diff,
     e2e_test,
+    requires_live_infobase,
     PROJECT,
 )
 
 # Config name unlikely to collide with existing configs in the workspace.
 _CONFIG_NAME = "e2e_CreateLaunchConfigTest_ThinClient"
+
+
+def _check_created_testing_settings(mode, port, expected_port):
+    requires_live_infobase("saves a throwaway testing launch configuration")
+    name = "e2e_create_testing_settings"
+    params = {"projectName": PROJECT, "name": name}
+    if mode is not None:
+        params["automatedTestingMode"] = mode
+    if port is not None:
+        params["automatedTestingPort"] = port
+    created = call("create_launch_config", params)
+    assert_ok(created, "create testing configuration")
+    try:
+        sc = created.structured
+        assert isinstance(sc, dict), sc
+        if mode is None:
+            assert "automatedTestingMode" not in sc, sc
+        else:
+            assert sc.get("automatedTestingMode") == mode, sc
+        if expected_port is None:
+            assert "automatedTestingPort" not in sc, sc
+        else:
+            assert sc.get("automatedTestingPort") == expected_port, sc
+        listed = call("list_configurations", {"projectName": PROJECT, "type": "client"})
+        assert_ok(listed, "read back saved testing configuration")
+        matches = [c for c in listed.structured["configurations"] if c.get("name") == name]
+        assert len(matches) == 1 and matches[0].get("applicationId") == sc.get("applicationId"), matches
+        assert_no_diff("creating launch settings must not change project sources")
+    finally:
+        if not calls_aborted():
+            deleted = call("delete_launch_config", {"name": name, "confirm": True})
+            assert_ok(deleted, "remove throwaway testing configuration")
+
+
+@e2e_test(tool="create_launch_config", kind="action")
+def test_created_testclient_reports_explicit_port():
+    _check_created_testing_settings("TESTCLIENT", 1550, 1550)
+
+
+@e2e_test(tool="create_launch_config", kind="action")
+def test_created_testclient_reports_default_port():
+    _check_created_testing_settings("TESTCLIENT", None, 1538)
+
+
+@e2e_test(tool="create_launch_config", kind="action")
+def test_created_testmanager_omits_port():
+    _check_created_testing_settings("TESTMANAGER", None, None)
+
+
+@e2e_test(tool="create_launch_config", kind="action")
+def test_created_without_testing_omits_both_settings():
+    _check_created_testing_settings(None, None, None)
 
 
 def _ensure_config_absent():
@@ -218,3 +272,58 @@ def test_duplicate_name_errors_with_hint():
         assert_no_diff("rejected duplicate must not touch the fixture")
     finally:
         _ensure_config_absent()
+
+
+def _assert_automated_testing_refusal(arguments, names, suggests):
+    """No infobase needed; clean up a config if a regression unexpectedly creates one."""
+    config_name = "e2e_654_InvalidTestingConfig"
+    result = None
+    try:
+        result = call("create_launch_config", dict(arguments, projectName=PROJECT, name=config_name))
+        # One disk check immediately after the action, before another MCP round trip.
+        assert_no_diff("a refused testing configuration must not touch the fixture")
+        error = assert_error(result, "invalid automated-testing configuration")
+        assert_error_quality(error, names=names, suggests=suggests)
+    finally:
+        if result is not None and not result.is_error and not calls_aborted():
+            assert_ok(call("delete_launch_config", {"name": config_name, "confirm": True}),
+                      "remove a configuration unexpectedly created by an invalid request")
+
+
+@e2e_test(tool="create_launch_config", kind="action")
+def test_create_unknown_automated_testing_mode_names_native_values():
+    _assert_automated_testing_refusal(
+        {"automatedTestingMode": "UNKNOWN"},
+        ["automatedTestingMode", "UNKNOWN"], ["TESTCLIENT", "TESTMANAGER"])
+
+
+@e2e_test(tool="create_launch_config", kind="action")
+def test_create_automated_testing_port_requires_client_mode():
+    _assert_automated_testing_refusal(
+        {"automatedTestingPort": 1540}, ["automatedTestingPort"],
+        ["automatedTestingMode=TESTCLIENT", "omit"])
+
+
+@e2e_test(tool="create_launch_config", kind="action")
+def test_create_test_manager_refuses_automated_testing_port():
+    _assert_automated_testing_refusal(
+        {"automatedTestingMode": "TESTMANAGER", "automatedTestingPort": 1540},
+        ["automatedTestingPort"], ["automatedTestingMode=TESTCLIENT", "omit"])
+
+
+@e2e_test(tool="create_launch_config", kind="action")
+def test_create_automated_testing_port_range_is_enforced():
+    for port in (0, -1, 65536):
+        _assert_automated_testing_refusal(
+            {"automatedTestingMode": "TESTCLIENT", "automatedTestingPort": port},
+            ["automatedTestingPort", "Invalid automatedTestingPort: '%s'." % port], ["1 to 65535", "TESTCLIENT"])
+
+
+@e2e_test(tool="create_launch_config", kind="action")
+def test_create_malformed_automated_testing_port_names_caller_value():
+    for port in ("abc", "1.5", "2147483648", "", True):
+        raw = "true" if port is True else port
+        _assert_automated_testing_refusal(
+            {"automatedTestingMode": "TESTCLIENT", "automatedTestingPort": port},
+            ["automatedTestingPort", "Invalid automatedTestingPort: '%s'." % raw],
+            ["Use an integer from 1 to 65535", "TESTCLIENT"])

@@ -1,8 +1,10 @@
 # EDT MCP Server — Tool Reference
 
+This reference provides generated descriptions, parameters and guides; [tool overviews](../tool-overviews.md) keeps maintained usage summaries.
+
 One page per tool: what it does, every parameter, and how it works. Generated from the live server by `docs/generate_tool_docs.py` (re-run to refresh; the source of truth is each tool's Java).
 
-**114 tools.**
+**131 tools.**
 
 ## Core
 
@@ -10,13 +12,14 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 
 | Tool | Description |
 |------|-------------|
+| [`edt_dialog`](edt_dialog.md) | List open EDT modal dialogs, then explicitly press an exact button on an answerable dialog. |
 | [`enable_toolset`](enable_toolset.md) | Make additional MCP tool groups visible or hide them. Parameters and examples: get_tool_guide('enable_toolset'). |
 | [`get_edt_version`](get_edt_version.md) | Identify the installed 1C:EDT version. Parameters and examples: get_tool_guide('get_edt_version'). |
-| [`get_metadata_details`](get_metadata_details.md) | Inspect metadata objects and members, including managed-form root properties and structure. Parameters and examples: get_tool_guide('get_metadata_details'). |
+| [`get_metadata_details`](get_metadata_details.md) | Inspect metadata objects and members, including managed-form root properties and structure, and a section's command interface. Parameters and examples: get_t… |
 | [`get_metadata_objects`](get_metadata_objects.md) | Discover metadata objects available in a 1C configuration. Parameters and examples: get_tool_guide('get_metadata_objects'). |
 | [`get_module_structure`](get_module_structure.md) | Discover procedures, functions, regions, and execution contexts in a BSL module. Parameters and examples: get_tool_guide('get_module_structure'). |
 | [`get_server_status`](get_server_status.md) | Diagnose the EDT MCP server and its feature configuration. Parameters and examples: get_tool_guide('get_server_status'). |
-| [`get_tool_guide`](get_tool_guide.md) | Retrieve detailed instructions for an MCP tool. Parameters and examples: get_tool_guide('get_tool_guide'). |
+| [`get_tool_guide`](get_tool_guide.md) | Retrieve detailed instructions for an MCP tool. mode=summary lists sections; section=<heading\|#anchor>; query=<text>. |
 | [`list_modules`](list_modules.md) | Discover BSL modules available in an EDT project. Parameters and examples: get_tool_guide('list_modules'). |
 | [`list_projects`](list_projects.md) | Discover projects available in the EDT workspace. Parameters and examples: get_tool_guide('list_projects'). |
 | [`list_toolsets`](list_toolsets.md) | Discover available groups of MCP tools and their visibility. Parameters and examples: get_tool_guide('list_toolsets'). |
@@ -32,7 +35,10 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | Tool | Description |
 |------|-------------|
 | [`adopt_metadata_object`](adopt_metadata_object.md) | Add a base-configuration object or member to an extension for customization. Parameters and examples: get_tool_guide('adopt_metadata_object'). |
+| [`business_process_route_map`](business_process_route_map.md) | Read, replace or remove a BusinessProcess route map. Call action='get' before replacing; replace discards all existing items, preserving point identity only… |
+| [`clone_metadata_object`](clone_metadata_object.md) | Clone one metadata object with EDT's native paste semantics. Call once without confirm to preview, then repeat the same newName and transfer selection with c… |
 | [`create_launch_config`](create_launch_config.md) | Configure an EDT runtime client for launching a 1C application. Parameters and examples: get_tool_guide('create_launch_config'). |
+| [`sort_metadata`](sort_metadata.md) | Reorder metadata by Name, explicit order or one sibling move. |
 | [`create_metadata`](create_metadata.md) | Add a new metadata object or member to a configuration. Parameters and examples: get_tool_guide('create_metadata'). |
 | [`dcs`](dcs.md) | Read, author, and losslessly XML-round-trip 1C DCS schemas, settings variants, form conditional appearance, and form dynamic lists. Call action='get' first;… |
 | [`delete_launch_config`](delete_launch_config.md) | Remove an unused EDT runtime or attach launch configuration. Two-phase: call once WITHOUT confirm to preview, then again with confirm=true to apply. Paramete… |
@@ -43,8 +49,9 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | [`list_common_pictures`](list_common_pictures.md) | Inventory common pictures available in a 1C configuration. Parameters and examples: get_tool_guide('list_common_pictures'). |
 | [`list_configurations`](list_configurations.md) | Discover EDT runtime and server-side launch configurations. Parameters and examples: get_tool_guide('list_configurations'). |
 | [`list_subsystems`](list_subsystems.md) | Discover the subsystem hierarchy of a 1C configuration. Parameters and examples: get_tool_guide('list_subsystems'). |
-| [`modify_metadata`](modify_metadata.md) | Set properties of any metadata node, including managed-form roots, items, attributes, commands, and handlers. Parameters and examples: get_tool_guide('modify… |
+| [`modify_metadata`](modify_metadata.md) | Set properties of any metadata node, including managed-form roots, items, attributes, commands, and handlers, and edit a section's command interface. Paramet… |
 | [`rename_metadata_object`](rename_metadata_object.md) | Rename a metadata object or member and rewrite the references EDT RESOLVES for it. CASCADES ACROSS THE WHOLE CONFIGURATION - BSL, forms, roles, subsystems -… |
+| [`search_in_dcs`](search_in_dcs.md) | Literal/regex full-text search inside DCS schemas (*.dcs under src/); names the template FQN when the layout is recognised. Parameters and examples: get_tool… |
 
 ## Code
 
@@ -58,16 +65,18 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | [`get_outgoing_structures`](get_outgoing_structures.md) | Discover the fields passed to outgoing or qualified BSL method calls. BEST-EFFORT and incomplete by design: only top-level LITERAL keys of the first argument… |
 | [`get_symbol_info`](get_symbol_info.md) | Inspect the type and documentation of a BSL symbol at its source location. Parameters and examples: get_tool_guide('get_symbol_info'). |
 | [`go_to_definition`](go_to_definition.md) | Locate the source definition of a BSL symbol or metadata object. Parameters and examples: get_tool_guide('go_to_definition'). |
-| [`read_method_source`](read_method_source.md) | Inspect the source of one BSL procedure or function. Parameters and examples: get_tool_guide('read_method_source'). |
-| [`validate_query`](validate_query.md) | Check a 1C query for syntax and metadata-reference errors. Parameters and examples: get_tool_guide('validate_query'). |
+| [`open_editor`](open_editor.md) | Open an EDT editor for metadata, a managed form, or BSL source. Requires Allow UI navigation in MCP Server preferences (off by default). Parameters and examp… |
+| [`read_method_source`](read_method_source.md) | Inspect the source of one or more BSL procedures or functions. Parameters and examples: get_tool_guide('read_method_source'). |
+| [`validate_query`](validate_query.md) | Check a 1C query or stored BSL query literals for syntax and metadata-reference errors. Parameters and examples: get_tool_guide('validate_query'). |
 | [`write_module_source`](write_module_source.md) | Create or edit BSL source in a metadata module. Parameters and examples: get_tool_guide('write_module_source'). |
 
 ## Debug
 
-> Runtime debugging: launch/attach, breakpoints, step/resume, variables, expression evaluation.
+> Runtime debugging: launch/attach, breakpoints, step/resume/pause, variables, expression evaluation.
 
 | Tool | Description |
 |------|-------------|
+| [`debug_pause`](debug_pause.md) | Pause a running 1C debug session now and return where it is executing (thread and stack frames); unlike wait_for_break, it requests the suspend itself. Param… |
 | [`debug_status`](debug_status.md) | Check which EDT debug sessions are running or paused. Parameters and examples: get_tool_guide('debug_status'). |
 | [`evaluate_expression`](evaluate_expression.md) | Evaluate a BSL expression in a paused debug frame and return the value. WARNING: this executes arbitrary code in the running application - it can change stat… |
 | [`get_applications`](get_applications.md) | Discover infobases connected to an EDT project. Parameters and examples: get_tool_guide('get_applications'). |
@@ -110,23 +119,27 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 
 ## Profiling
 
-> Performance profiling: start/stop a measurement and read the results.
+> Performance profiling and 1C technological logs: capture, inspect, compare and exchange.
 
 | Tool | Description |
 |------|-------------|
-| [`get_profiling_results`](get_profiling_results.md) | Identify performance hotspots in executed BSL code. Returns the MOST RECENT measurement session GLOBALLY - applicationId only changes the reported active-sta… |
+| [`get_tech_log`](get_tech_log.md) | Analyze 1C JSON technological logs: problems first, then details and correlated chains; describe explains events and capture profiles. Absent events do not prove absence of a problem. Full parameters and examples: call get_tool_guide('get_tech_log'). |
+| [`manage_tech_log`](manage_tech_log.md) | Preview and manage 1C JSON technological-log capture, or export CSV. Preview before start; start, stop and export require consent and refuse read-only mode. Stop after a short reproduction to restore logcfg.xml. Full parameters and examples: call get_tool_guide('manage_tech_log'). |
+| [`get_profiling_results`](get_profiling_results.md) | Read-only Markdown summary (default), measurement list, paged lines and comparison. Select a UUID with `measurementId`; `applicationId` only scopes the active flag. |
+| [`manage_profiling_results`](manage_profiling_results.md) | Export complete CSV/EDT measurements or import native EDT folders with `mode`. Requires separate write permission, consent, a writable preset and absolute host paths; never overwrites. |
 | [`start_profiling`](start_profiling.md) | Measure execution time and coverage of BSL code in a debug session. Parameters and examples: get_tool_guide('start_profiling'). |
 | [`stop_profiling`](stop_profiling.md) | Finish measuring BSL performance in a debug session. Parameters and examples: get_tool_guide('stop_profiling'). |
 
 ## Forms
 
-> Form and template rendering: form layout snapshot, form screenshot, template screenshot.
+> Forms: layout snapshot, form screenshot, template screenshot, and structural validation of a form model.
 
 | Tool | Description |
 |------|-------------|
-| [`get_form_layout_snapshot`](get_form_layout_snapshot.md) | Inspect the calculated visual layout of an EDT form. Requires EDT launched with -DnativeFormBufferedLayoutRender=true: without the flag the layout comes back… |
-| [`get_form_screenshot`](get_form_screenshot.md) | Visually inspect an EDT form as rendered by the designer. Requires EDT launched with -DnativeFormBufferedLayoutRender=true: without the flag the image comes… |
+| [`get_form_layout_snapshot`](get_form_layout_snapshot.md) | Inspect the calculated visual layout of an EDT form. Parameters and examples: get_tool_guide('get_form_layout_snapshot'). |
+| [`get_form_screenshot`](get_form_screenshot.md) | Visually inspect an EDT form. ATTENTION: disabled by default; on Windows it needs EDT started with -DnativeFormBufferedLayoutRender=true in 1cedt.ini, which… *(not enabled by default)* |
 | [`get_template_screenshot`](get_template_screenshot.md) | Visually inspect how a spreadsheet print template renders. Parameters and examples: get_tool_guide('get_template_screenshot'). |
+| [`validate_form_model`](validate_form_model.md) | Check ONE managed form for structural defects: duplicate names or ids, a data path that names no attribute, a button with no command, a handler with no proce… |
 
 ## Tags
 
@@ -149,7 +162,7 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 
 ## Project
 
-> Project operations: clean/revalidate, update DB, export/import XML, problems and markers, docs.
+> Project operations: clean/revalidate, inspect infobase sessions/update DB, export/import XML, problems and markers, docs.
 
 | Tool | Description |
 |------|-------------|
@@ -157,26 +170,32 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | [`build_external_objects`](build_external_objects.md) | Compile external 1C data processors and reports into deployable files. NOT self-contained: the project needs an associated infobase AND a resolvable 1C runti… |
 | [`clean_project`](clean_project.md) | Rebuild an EDT project from the on-disk src/ files and revalidate everything. Direction DISK -> MODEL; slow, and it DISCARDS unsaved in-memory model edits -… |
 | [`create_git_branch`](create_git_branch.md) | Start isolated work on a new Git branch for an EDT project. Parameters and examples: get_tool_guide('create_git_branch'). |
-| [`create_infobase`](create_infobase.md) | Prepare an infobase for an EDT project by creating a database or registering an existing one. Passing user/password/access STORES those credentials in EDT's… |
+| [`create_infobase`](create_infobase.md) | Create a file infobase or register an existing file/cluster infobase and bind it to an EDT project. EDT may open a Designer connection during binding when a… |
 | [`create_project`](create_project.md) | Start a new EDT configuration, extension, or external-objects project. Parameters and examples: get_tool_guide('create_project'). |
 | [`delete_infobase`](delete_infobase.md) | Remove a project's infobase or its standalone-server registration, optionally deleting the database files. DESTRUCTIVE and IRREVERSIBLE. Two-phase: call once… |
 | [`delete_project`](delete_project.md) | Remove an EDT project from the workspace, optionally with its sources on disk. DESTRUCTIVE and IRREVERSIBLE. Two-phase: call once WITHOUT confirm to preview,… |
+| [`export_configuration_to_file`](export_configuration_to_file.md) | Export the configuration (.cf) or an extension (.cfe) FROM an application's infobase to a file via the 1C thick client - the infobase's content, not the proj… |
 | [`export_configuration_to_xml`](export_configuration_to_xml.md) | Export an EDT configuration into 1C XML files. Parameters and examples: get_tool_guide('export_configuration_to_xml'). |
 | [`get_check_description`](get_check_description.md) | Understand an EDT validation rule and how to fix its diagnostic. Parameters and examples: get_tool_guide('get_check_description'). |
 | [`get_event_log`](get_event_log.md) | Investigate infobase activity and errors through its event log. Reads the LEGACY text format only (ver 2.0: 1Cv8.lgf + *.lgp); an infobase on the modern SQLi… |
 | [`get_markers`](get_markers.md) | Find bookmarks and TODO-style task markers in the workspace. Parameters and examples: get_tool_guide('get_markers'). |
 | [`get_mcp_history`](get_mcp_history.md) | Diagnose MCP tool calls by reviewing recent requests, failures, timings, and context usage. Parameters and examples: get_tool_guide('get_mcp_history'). |
 | [`get_platform_documentation`](get_platform_documentation.md) | Look up a built-in 1C type or global function in the platform documentation. Returns headers and member names by default - pass responseFormat='detailed' for… |
-| [`get_problem_summary`](get_problem_summary.md) | See validation problem counts grouped by project and severity. Parameters and examples: get_tool_guide('get_problem_summary'). |
+| [`get_problem_summary`](get_problem_summary.md) | See validation problem counts grouped by project, severity, check, module or object. Parameters and examples: get_tool_guide('get_problem_summary'). |
 | [`get_project_errors`](get_project_errors.md) | Find detailed validation errors and warnings in an EDT project. Parameters and examples: get_tool_guide('get_project_errors'). |
-| [`import_configuration_from_xml`](import_configuration_from_xml.md) | Create an EDT project from exported 1C configuration XML files. Parameters and examples: get_tool_guide('import_configuration_from_xml'). |
+| [`import_configuration_from_xml`](import_configuration_from_xml.md) | Create an EDT project from exported 1C configuration XML files. Use platformVersion for the new project's runtime, derived from the dump by default (xmlVersi… |
+| [`import_project_from_file`](import_project_from_file.md) | Create a NEW EDT project from a 1C binary file: .cf (configuration), .cfe (extension; baseProjectName required) or .epf/.erf (external data processor/report)… |
+| [`infobase_extensions`](infobase_extensions.md) | List installed infobase extensions and install, update or uninstall .cfe files. DESTRUCTIVE: call once WITHOUT confirm to preview a write, then with confirm=… |
+| [`infobase_sessions`](infobase_sessions.md) | List or terminate sessions on a running standalone-server infobase. DESTRUCTIVE for terminate: pass confirm=true; bulk termination skips Designer, while its… |
 | [`list_git_branches`](list_git_branches.md) | Inspect available Git branches and their EDT infobase bindings. Parameters and examples: get_tool_guide('list_git_branches'). |
+| [`project_checks`](project_checks.md) | List or change EDT validation checks; switch, create, copy or delete check-settings profiles. Writes ask for consent; profile deletion is destructive. Parame… |
 | [`resync_to_disk`](resync_to_disk.md) | Write the in-memory model back out to the on-disk src/ .mdo files and report model-to-disk desync; fixes 'object file does not exist' failures and dangling C… |
 | [`revalidate_objects`](revalidate_objects.md) | Revalidate a project or a named list of objects, picking up .mdo edits made outside EDT. Targeted, lightweight alternative to clean_project - no full rebuild… |
 | [`set_branch_infobase`](set_branch_infobase.md) | Associate an existing infobase with a Git branch of an EDT project. Parameters and examples: get_tool_guide('set_branch_infobase'). |
 | [`set_infobase_credentials`](set_infobase_credentials.md) | STORE infobase credentials (user/password) in EDT settings so update_database and launch can authenticate. The secret PERSISTS beyond this call, and addressi… |
+| [`standalone_server`](standalone_server.md) | Report, stop or start the EDT standalone server (ibsrv) of a wst-server application. DESTRUCTIVE for stop/restart: it ends every session and client of that s… |
 | [`switch_git_branch`](switch_git_branch.md) | Change the active version of an EDT project through Git branch checkout. Parameters and examples: get_tool_guide('switch_git_branch'). |
-| [`update_database`](update_database.md) | Apply the current EDT configuration to an infobase. DESTRUCTIVE - restructures data and can evict live sessions. Two-phase: call once WITHOUT confirm to prev… |
+| [`update_database`](update_database.md) | Apply the current EDT configuration to an infobase. Before applying, call infobase_sessions(action='list'); any non-agent session blocks the update, so clear… |
 | [`validate_xdto_package`](validate_xdto_package.md) | Check an XDTO package for configuration validation problems. Reads the markers EDT computed EARLIER - it does not validate on demand, so a verdict right afte… |
 
 ## Comparison
@@ -196,6 +215,7 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | Tool | Description |
 |------|-------------|
 | [`git`](git.md) | Run a git command in a project's repository through the real git CLI, sent as a shell-style string. Only a whitelisted set of subcommands runs, and the write… *(not enabled by default)* |
+
 
 ## Other
 

@@ -15,6 +15,8 @@ import org.eclipse.osgi.util.NLS;
  * runtime (Platform NL) - no manual locale handling.
  */
 public class Messages extends NLS {
+    public static String GeneralTab_AllowUiNavigation; // NOSONAR Eclipse NLS field
+    public static String GeneralTab_AllowUiNavigation_Tooltip; // NOSONAR Eclipse NLS field
 
     private static final String BUNDLE_NAME = "com.ditrix.edt.mcp.server.preferences.messages"; //$NON-NLS-1$
 
@@ -26,6 +28,14 @@ public class Messages extends NLS {
     public static String McpServerPreferencePage_TabPrivacy; // NOSONAR Eclipse NLS field: value injected by NLS.initializeMessages, cannot be final; Eclipse NLS field name must equal its .properties key
 
     // GeneralTab
+    public static String GeneralTab_HttpEnabled; // NOSONAR Eclipse NLS field
+    public static String GeneralTab_HttpGroup; // NOSONAR Eclipse NLS field
+    public static String GeneralTab_StdioReady; // NOSONAR Eclipse NLS field
+    public static String GeneralTab_StdioUnavailable; // NOSONAR Eclipse NLS field
+    public static String GeneralTab_StdioLaunchNote; // NOSONAR Eclipse NLS field
+    public static String GeneralTab_CopyStdioConfig; // NOSONAR Eclipse NLS field
+    public static String GeneralTab_CopyStdioConfig_Tooltip; // NOSONAR Eclipse NLS field
+    public static String GeneralTab_CopyFailedTitle; // NOSONAR Eclipse NLS field
     public static String GeneralTab_ServerPort; // NOSONAR Eclipse NLS field: value injected by NLS.initializeMessages, cannot be final; Eclipse NLS field name must equal its .properties key
     public static String GeneralTab_AutoStart; // NOSONAR Eclipse NLS field: value injected by NLS.initializeMessages, cannot be final; Eclipse NLS field name must equal its .properties key
     public static String GeneralTab_AllowRemote; // NOSONAR Eclipse NLS field: value injected by NLS.initializeMessages, cannot be final; Eclipse NLS field name must equal its .properties key

@@ -13,6 +13,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Mockito.*;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -23,6 +24,10 @@ import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.junit.Test;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.BundleException;
+import org.osgi.framework.ServiceReference;
 
 import com.ditrix.edt.mcp.server.utils.StandaloneServerSupport.RegistryCleanup;
 
@@ -47,6 +52,97 @@ import com.ditrix.edt.mcp.server.utils.StandaloneServerSupport.RegistryCleanup;
  */
 public class StandaloneServerSupportTest
 {
+    @Test
+    public void sharedServiceLookupKeepsActiveAndLazyStartupCases() throws Exception
+    {
+        for (boolean needsStart : new boolean[] {false, true})
+        {
+            var bundle = mock(TestBundle.class);
+            var context = mock(TestBundleContext.class);
+            var reference = mock(TestServiceReference.class);
+            var service = new Object();
+            if (needsStart) { when(bundle.getBundleContext()).thenReturn(null, context); }
+            else { when(bundle.getBundleContext()).thenReturn(context); }
+            doReturn(reference).when(context).getServiceReference(
+                "com.e1c.g5.v8.dt.platform.standaloneserver.wst.core.IStandaloneServerService");
+            doReturn(service).when(context).getService(reference);
+            assertSame(service, acquireFrom(bundle));
+            verify(bundle, times(needsStart ? 1 : 0)).start(Bundle.START_TRANSIENT);
+            verify(bundle, times(needsStart ? 2 : 1)).getBundleContext();
+            verify(context).getService(reference);
+        }
+    }
+
+    @Test
+    public void missingBundleContextAndServiceRegistrationRemainUnavailable() throws Exception
+    {
+        assertNull(acquireFrom(null));
+        var inactive = mock(TestBundle.class);
+        assertNull(acquireFrom(inactive));
+        verify(inactive).start(Bundle.START_TRANSIENT);
+        verify(inactive, times(2)).getBundleContext();
+        var active = mock(TestBundle.class);
+        var context = mock(TestBundleContext.class);
+        when(active.getBundleContext()).thenReturn(context);
+        assertNull(acquireFrom(active));
+        verify(active, never()).start(anyInt());
+        verify(context, never()).getService(any());
+    }
+
+    @Test
+    public void serviceAndStartupFailuresKeepTheUnavailableResult() throws Exception
+    {
+        var bundle = mock(TestBundle.class);
+        doThrow(new BundleException("startup refused")).when(bundle).start(Bundle.START_TRANSIENT);
+        assertNull(acquireFrom(bundle));
+        verify(bundle, times(1)).getBundleContext();
+        var active = mock(TestBundle.class);
+        var context = mock(TestBundleContext.class);
+        when(active.getBundleContext()).thenReturn(context);
+        when(context.getServiceReference(anyString())).thenThrow(new IllegalStateException("registry unavailable"));
+        assertNull(acquireFrom(active));
+        assertNull(StandaloneServerSupport.acquireService("create_infobase", "startup failed", id -> {
+            throw new NoClassDefFoundError("feature unavailable");
+        }));
+    }
+
+    @Test
+    public void sharedMethodLookupKeepsInheritedPublicMethodsAndExactArity()
+    {
+        var inherited = StandaloneServerSupport.findMethod(LookupChild.class, "call", 1);
+        assertNotNull(inherited);
+        assertEquals(LookupParent.class, inherited.getDeclaringClass());
+        assertEquals(0, StandaloneServerSupport.findMethod(LookupChild.class, "call", 0).getParameterCount());
+        assertNull(StandaloneServerSupport.findMethod(LookupChild.class, "call", 2));
+        assertNull(StandaloneServerSupport.findMethod(LookupChild.class, "privateCall", 0));
+        assertNull(StandaloneServerSupport.findMethod(LookupChild.class, "absent", 0));
+    }
+
+    // Local interfaces keep Mockito's generated classes in the test bundle's class loader.
+    public interface TestBundle extends Bundle { }
+    public interface TestBundleContext extends BundleContext { }
+    public interface TestServiceReference extends ServiceReference<Object> { }
+
+    private static Object acquireFrom(Bundle bundle)
+    {
+        return StandaloneServerSupport.acquireService("create_infobase",
+            "create_infobase: could not start standalone-server bundle", id -> {
+                assertEquals("com.e1c.g5.v8.dt.platform.standaloneserver.wst.core", id);
+                return bundle;
+            });
+    }
+
+    public static class LookupParent
+    {
+        public void call(String value) { }
+    }
+
+    public static class LookupChild extends LookupParent
+    {
+        public void call() { }
+        @SuppressWarnings("unused") private void privateCall() { }
+    }
+
     private static final IProgressMonitor MONITOR = new NullProgressMonitor();
 
     // ==================== RegistryCleanup enum ====================
@@ -204,6 +300,28 @@ public class StandaloneServerSupportTest
     }
 
     @Test
+    public void testDatabaseDirOrThrowAnswersNullOnlyForRdbms() throws Exception
+    {
+        // The strict read: only an RDBMS database has no local directory; missing data is unreadable.
+        assertNull(StandaloneServerSupport.databaseDirOrThrow(
+            new FakeServerInfobaseModule(new FakeConfiguration(new FakeRdbmsDatabase()))));
+        for (Object module : new Object[] { new FakeServerInfobaseModule(null),
+            new FakeServerInfobaseModule(new FakeConfiguration(null)),
+            new FakeServerInfobaseModule(new FakeConfiguration(new FakeNonStringDirDatabase())) })
+        {
+            try
+            {
+                StandaloneServerSupport.databaseDirOrThrow(module);
+                fail("missing server data must raise, not read as 'no local directory'"); //$NON-NLS-1$
+            }
+            catch (IllegalStateException expected)
+            {
+                // unreadable, as required
+            }
+        }
+    }
+
+    @Test
     public void testDatabaseDirOfReturnsNullWhenConfigDirectoryIsNotAString()
     {
         // getConfigDirectory() exists but returns a non-String -> null (instanceof guard).
@@ -277,7 +395,34 @@ public class StandaloneServerSupportTest
         assertNull(StandaloneServerSupport.findServerByModuleName(service, "Any")); //$NON-NLS-1$
     }
 
-    // ==================== deleteServer ====================
+    // ==================== startServer / deleteServer ====================
+
+    @Test
+    public void testStartServerInvokesTheThreeArgumentServiceMethod() throws Exception
+    {
+        Object server = new Object();
+        IStatus expected = org.eclipse.core.runtime.Status.OK_STATUS;
+        FakeStartService service = new FakeStartService(expected);
+
+        IStatus actual = StandaloneServerSupport.startServer(service, server, "run", MONITOR); //$NON-NLS-1$
+
+        assertSame(expected, actual);
+        assertSame(server, service.server);
+        assertEquals("run", service.launchMode); //$NON-NLS-1$
+        assertSame(MONITOR, service.monitor);
+    }
+
+    @Test
+    public void testInterruptedStartMayStillBeRunningAndDoesNotReportItsException()
+    {
+        BoundedJob.Result interrupted = new BoundedJob.Result(BoundedJob.Outcome.INTERRUPTED,
+            5L, new InterruptedException("join interrupted")); //$NON-NLS-1$
+
+        String reason = StandaloneServerSupport.startFailureReason(interrupted, 5L);
+
+        assertTrue(reason, reason.contains("may still be running")); //$NON-NLS-1$
+        assertFalse(reason, reason.contains("join interrupted")); //$NON-NLS-1$
+    }
 
     @Test
     public void testDeleteServerReturnsErrorStatusWhenMethodAbsent()
@@ -757,6 +902,159 @@ public class StandaloneServerSupportTest
                 throw toThrow;
             }
             return result;
+        }
+    }
+
+    /** A service exposing the erased three-argument standalone-server start signature. */
+    public static final class FakeStartService
+    {
+        private final IStatus result;
+        Object server;
+        String launchMode;
+        Object monitor;
+
+        FakeStartService(IStatus result)
+        {
+            this.result = result;
+        }
+
+        public IStatus startServer(Object passedServer, String passedLaunchMode, Object passedMonitor)
+        {
+            server = passedServer;
+            launchMode = passedLaunchMode;
+            monitor = passedMonitor;
+            return result;
+        }
+    }
+
+    // ==================== explicit start: dialog guards of a queued start (#890) ====================
+
+    @Test
+    public void aJobBoundStartAQueuedJobKeepsItsDialogGuardsUntilTheJobEnds() throws Exception
+    {
+        org.eclipse.core.runtime.jobs.IJobManager jobs = org.eclipse.core.runtime.jobs.Job.getJobManager();
+        int before = InfobaseAuthDialogSuppressor.inFlightCount();
+        java.util.concurrent.atomic.AtomicInteger claimReleases = new java.util.concurrent.atomic.AtomicInteger();
+        StandaloneServerSupport.GuardedStartResult result;
+        jobs.suspend();
+        try
+        {
+            result = StandaloneServerSupport.startServerGuarded(
+                new FakeStartService(org.eclipse.core.runtime.Status.OK_STATUS), new Object(),
+                "test: queued explicit start", "debug", null, null, //$NON-NLS-1$ //$NON-NLS-2$
+                StandaloneServerPortConflictPolicy.REASSIGN, 30_000L, 300_000L,
+                claimReleases::incrementAndGet, null, true);
+            assertTrue("a start the suspended manager holds may still run", result.mayStillRun()); //$NON-NLS-1$
+            assertEquals("its auth-dialog suppression must stay armed for when it runs", //$NON-NLS-1$
+                before + 1, InfobaseAuthDialogSuppressor.inFlightCount());
+            assertEquals(0, claimReleases.get());
+        }
+        finally
+        {
+            jobs.resume();
+        }
+        long deadline = System.currentTimeMillis() + 10_000L;
+        while ((claimReleases.get() == 0 || InfobaseAuthDialogSuppressor.inFlightCount() != before)
+            && System.currentTimeMillis() < deadline)
+        {
+            Thread.sleep(20L);
+        }
+        assertEquals("the end notification releases the claim", 1, claimReleases.get()); //$NON-NLS-1$
+        assertEquals("and the guards", before, InfobaseAuthDialogSuppressor.inFlightCount()); //$NON-NLS-1$
+    }
+
+    @Test
+    public void aCappedStartAQueuedJobStillReleasesItsDialogGuardsAtOnce()
+    {
+        org.eclipse.core.runtime.jobs.IJobManager jobs = org.eclipse.core.runtime.jobs.Job.getJobManager();
+        int before = InfobaseAuthDialogSuppressor.inFlightCount();
+        jobs.suspend();
+        try
+        {
+            StandaloneServerSupport.startServerGuarded(
+                new FakeStartService(org.eclipse.core.runtime.Status.OK_STATUS), new Object(),
+                "test: queued capped start", "debug", null, null, //$NON-NLS-1$ //$NON-NLS-2$
+                StandaloneServerPortConflictPolicy.CANCEL, 30_000L, 300_000L);
+            assertEquals("the capped callers keep their established classification", before, //$NON-NLS-1$
+                InfobaseAuthDialogSuppressor.inFlightCount());
+        }
+        finally
+        {
+            jobs.resume();
+        }
+    }
+
+    // ==================== explicit stop: process-exit verification (#890) ====================
+
+    @Test
+    public void awaitProcessExitReturnsAsSoonAsTheProcessIsGone()
+    {
+        java.util.concurrent.atomic.AtomicInteger polls = new java.util.concurrent.atomic.AtomicInteger();
+        long started = System.nanoTime();
+        boolean exited = StandaloneServerSupport.awaitProcessExit(() -> polls.incrementAndGet() < 3,
+            10_000L, 10L);
+        long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
+        assertTrue("the process stopped answering alive on the third poll", exited);
+        assertEquals(3, polls.get());
+        assertTrue("the wait must end long before its bound: " + elapsedMs, elapsedMs < 5_000L);
+    }
+
+    @Test
+    public void awaitProcessExitReportsATimeoutHonestly()
+    {
+        long started = System.nanoTime();
+        boolean exited = StandaloneServerSupport.awaitProcessExit(() -> true, 150L, 10L);
+        long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
+        assertFalse("a process that never exits must not be reported gone", exited);
+        assertTrue("the wait must last its whole bound: " + elapsedMs, elapsedMs >= 140L);
+    }
+
+    @Test
+    public void aMissingLaunchHasNoProcess() throws Exception
+    {
+        assertFalse(StandaloneServerSupport.proceedAtLivePid(new NoLaunchServer(),
+            pid -> fail("no process")));
+        assertFalse(StandaloneServerSupport.liveProcess(null).isPresent());
+        assertFalse(StandaloneServerSupport.liveProcess(new NoLaunchServer()).isPresent());
+    }
+
+    @Test
+    public void anErrorFromTheLaunchAccessorIsWrappedAsTheSessionCommandsAlwaysDid()
+    {
+        try
+        {
+            StandaloneServerSupport.proceedAtLivePid(new ErrorLaunchServer(), pid -> fail("no process"));
+            fail("a failing accessor must not read as a missing launch");
+        }
+        catch (IllegalStateException wrapped)
+        {
+            assertTrue(String.valueOf(wrapped.getCause()), wrapped.getCause() instanceof NoClassDefFoundError);
+        }
+        catch (Exception other)
+        {
+            fail("an Error cause must be wrapped in IllegalStateException, not rethrown as " + other);
+        }
+        catch (NoClassDefFoundError bare)
+        {
+            fail("an Error cause must be wrapped, not rethrown bare");
+        }
+    }
+
+    /** A WST server whose launch accessor fails with an Error, as a missing class would. */
+    public static final class ErrorLaunchServer
+    {
+        public Object getLaunch()
+        {
+            throw new NoClassDefFoundError("simulated missing WST class"); //$NON-NLS-1$
+        }
+    }
+
+    /** A WST server with no launch, as the pid read addresses it. */
+    public static final class NoLaunchServer
+    {
+        public Object getLaunch()
+        {
+            return null;
         }
     }
 }

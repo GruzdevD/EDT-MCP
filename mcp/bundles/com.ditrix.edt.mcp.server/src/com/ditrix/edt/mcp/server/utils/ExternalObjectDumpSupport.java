@@ -6,17 +6,16 @@
 
 package com.ditrix.edt.mcp.server.utils;
 
-import java.lang.reflect.Method;
-
-import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.ecore.EClass;
 import org.eclipse.emf.ecore.EObject;
-import org.osgi.framework.Bundle;
 
 import com._1c.g5.v8.dt.metadata.mdclass.ExternalDataProcessor;
 import com._1c.g5.v8.dt.metadata.mdclass.ExternalReport;
 import com._1c.g5.v8.dt.platform.services.core.dump.IExternalObjectDumpSupport;
 import com._1c.g5.v8.dt.platform.services.core.dump.IExternalObjectDumper;
+import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
+import com.e1c.g5.dt.applications.ApplicationException;
 import com.ditrix.edt.mcp.server.Activator;
 
 /**
@@ -42,13 +41,30 @@ import com.ditrix.edt.mcp.server.Activator;
  */
 public final class ExternalObjectDumpSupport
 {
-    /** Symbolic name of the bundle that owns the internal PlatformServicesCore (and its Guice injector). */
-    private static final String PLATFORM_SERVICES_CORE_BUNDLE_ID =
-        "com._1c.g5.v8.dt.platform.services.core"; //$NON-NLS-1$
+    /** Mirrors EDT's AbstractExternalObjectOperator before it reads the default application. */
+    public static IProject infobaseProject(IProject project)
+    {
+        Activator activator = Activator.getDefault();
+        return infobaseProject(project, activator == null ? null : activator.getDtProjectManager());
+    }
 
-    /** Internal singleton holding the platform-services Guice injector (loaded via the owning bundle). */
-    private static final String PLATFORM_SERVICES_CORE_CLASS =
-        "com._1c.g5.v8.dt.internal.platform.services.core.PlatformServicesCore"; //$NON-NLS-1$
+    static IProject infobaseProject(IProject project,
+        IDtProjectManager manager)
+    {
+        if (manager == null)
+        {
+            throw new ApplicationException("The EDT project manager is unavailable; the external-object "
+                + "dump's infobase lock cannot be resolved. Retry once EDT is responsive.");
+        }
+        var model = manager.getDtProject(project);
+        if (model == null)
+        {
+            throw new ApplicationException("The EDT project '" + project.getName()
+                + "' could not be resolved; no external objects were built. Check list_projects and retry.");
+        }
+        var parent = manager.findParentProject(model);
+        return parent == null ? null : parent.getWorkspaceProject();
+    }
 
     /** File extension of a dumped external data processor. */
     public static final String EXTENSION_EPF = "epf"; //$NON-NLS-1$
@@ -108,35 +124,7 @@ public final class ExternalObjectDumpSupport
     {
         try
         {
-            Bundle psCoreBundle = Platform.getBundle(PLATFORM_SERVICES_CORE_BUNDLE_ID);
-            if (psCoreBundle == null)
-            {
-                Activator.logError("external object dump: bundle '" + PLATFORM_SERVICES_CORE_BUNDLE_ID //$NON-NLS-1$
-                    + "' not found — the EDT platform-services plugin is not installed (resolving " //$NON-NLS-1$
-                    + service.getSimpleName() + ")", null); //$NON-NLS-1$
-                return null;
-            }
-            Class<?> coreClass = psCoreBundle.loadClass(PLATFORM_SERVICES_CORE_CLASS);
-            Method getDefault = coreClass.getDeclaredMethod("getDefault"); //$NON-NLS-1$
-            getDefault.setAccessible(true); // NOSONAR reflective access required (EDT internals, no Require-Bundle)
-            Object coreInstance = getDefault.invoke(null);
-            if (coreInstance == null)
-            {
-                psCoreBundle.start(Bundle.START_TRANSIENT);
-                coreInstance = getDefault.invoke(null);
-                if (coreInstance == null)
-                {
-                    return null;
-                }
-            }
-            Method getInjector = coreClass.getDeclaredMethod("getInjector"); //$NON-NLS-1$
-            getInjector.setAccessible(true); // NOSONAR reflective access required (EDT internals, no Require-Bundle)
-            Object injector = getInjector.invoke(coreInstance);
-            if (injector == null)
-            {
-                return null;
-            }
-            return ((com.google.inject.Injector)injector).getInstance(service);
+            return PlatformServicesSupport.resolve(service);
         }
         catch (Exception e) // NOSONAR probe must never crash the tool
         {

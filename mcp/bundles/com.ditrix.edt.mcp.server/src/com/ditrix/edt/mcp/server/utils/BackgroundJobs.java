@@ -25,6 +25,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import com.ditrix.edt.mcp.server.Activator;
+
 /**
  * Small bounded registry for long-running MCP work whose result is polled by id.
  * <p>
@@ -225,13 +227,15 @@ public final class BackgroundJobs implements AutoCloseable
         private final List<ProgressEntry> progress;
         private final Object result;
         private final String errorMessage;
+        private final String errorMarker;
         private final String cancellationPreview;
         private final boolean claimed;
         private final boolean cancellationHandlerInFlight;
 
         JobSnapshot(String id, String owningTool, Status status, long startedAtMs, long completedAtMs,
             long elapsedMs, List<ProgressEntry> progress, Object result, String errorMessage,
-            String cancellationPreview, boolean claimed, boolean cancellationHandlerInFlight)
+            String errorMarker, String cancellationPreview, boolean claimed,
+            boolean cancellationHandlerInFlight)
         {
             this.id = id;
             this.owningTool = owningTool;
@@ -242,6 +246,7 @@ public final class BackgroundJobs implements AutoCloseable
             this.progress = Collections.unmodifiableList(progress);
             this.result = result;
             this.errorMessage = errorMessage;
+            this.errorMarker = errorMarker;
             this.cancellationPreview = cancellationPreview;
             this.claimed = claimed;
             this.cancellationHandlerInFlight = cancellationHandlerInFlight;
@@ -291,6 +296,15 @@ public final class BackgroundJobs implements AutoCloseable
         public String getErrorMessage()
         {
             return errorMessage;
+        }
+
+        /**
+         * @return the error-contract marker a {@link MarkedFailure} published with the failure,
+         *     e.g. {@code mutationCommitted}, or {@code null}
+         */
+        public String getErrorMarker()
+        {
+            return errorMarker;
         }
 
         /** @return destructive committed-cancellation warning, or {@code null} when unsupported */
@@ -382,6 +396,20 @@ public final class BackgroundJobs implements AutoCloseable
         }
 
         /**
+         * Hands in the result of a committed cancellation that settled WITHOUT one - an owner's handler
+         * that gave up waiting and answered {@link CommittedCancellation#stopInitiated} with a
+         * {@code null} result - so the job, once cancelled, still carries the work's own account of what
+         * the stop left behind. Does nothing in every other case: before any cancellation, when the
+         * cancellation already carries a result, or for a reporter that is not registry-backed.
+         *
+         * @param result the work's report of the stopped run
+         */
+        default void cancellationResult(Object result)
+        {
+            // Not registry-backed: nothing to settle.
+        }
+
+        /**
          * What is left of the job's TOTAL budget, measured from submission.
          * <p>
          * The budget starts when the job is submitted, not when a worker picks it up, and the
@@ -450,8 +478,8 @@ public final class BackgroundJobs implements AutoCloseable
         private final AtomicReference<HandlerExecutionState> state =
             new AtomicReference<>(HandlerExecutionState.QUEUED);
 
-        private volatile CommittedCancellation outcome;
-        private volatile Throwable failure;
+        private final AtomicReference<CommittedCancellation> outcome = new AtomicReference<>();
+        private final AtomicReference<Throwable> failure = new AtomicReference<>();
 
         HandlerInvocation(JobRecord record, CommittedCancellationHandler handler)
         {
@@ -469,18 +497,18 @@ public final class BackgroundJobs implements AutoCloseable
             }
             try
             {
-                outcome = handler.cancel();
+                outcome.set(handler.cancel());
             }
             catch (Throwable e) // NOSONAR retained for publication on the requesting thread
             {
-                failure = e;
+                failure.set(e);
             }
             finally
             {
                 state.set(HandlerExecutionState.EXITED);
                 try
                 {
-                    if (record.committedCancellationHandlerExited(outcome, failure))
+                    if (record.committedCancellationHandlerExited(outcome.get(), failure.get()))
                     {
                         // The record monitor is deliberately not held here: cancelling queued
                         // work may release its admission slot through the registry callback.
@@ -520,6 +548,33 @@ public final class BackgroundJobs implements AutoCloseable
     }
 
     /**
+     * A failure of work that changed something before it failed. The marker is kept with the
+     * failure, so a caller polling the job learns what a caller of the owning tool would.
+     */
+    public static final class MarkedFailure extends Exception
+    {
+        private static final long serialVersionUID = 1L;
+
+        private final String marker;
+
+        /**
+         * @param message the failure to publish
+         * @param marker the error-contract marker, e.g. {@code mutationCommitted}, or {@code null}
+         */
+        public MarkedFailure(String message, String marker)
+        {
+            super(message);
+            this.marker = marker;
+        }
+
+        /** @return the marker, or {@code null} */
+        public String getMarker()
+        {
+            return marker;
+        }
+    }
+
+    /**
      * Jobs admitted whose work has not finished running yet.
      * <p>
      * Counted rather than derived from job STATUS on purpose: a timed-out job is published
@@ -533,6 +588,7 @@ public final class BackgroundJobs implements AutoCloseable
     private final Object jobsLock = new Object();
     private final Map<String, JobRecord> jobs = new LinkedHashMap<>();
     private final int maxStoredJobs;
+    private final int workerThreads;
     private final ExecutorService workers;
     private final ScheduledExecutorService deadlines;
     private final ExecutorService cancellationHandlers;
@@ -562,6 +618,7 @@ public final class BackgroundJobs implements AutoCloseable
             throw new IllegalArgumentException("BackgroundJobs limits must be positive"); //$NON-NLS-1$
         }
         this.maxStoredJobs = maxStoredJobs;
+        this.workerThreads = workerThreads;
         this.committedCancellationHandlerTimeoutMs = committedCancellationHandlerTimeoutMs;
         workers = Executors.newFixedThreadPool(workerThreads,
             new NamedDaemonThreadFactory("EDT-MCP background-job-worker-")); //$NON-NLS-1$
@@ -571,6 +628,18 @@ public final class BackgroundJobs implements AutoCloseable
         // expires must not occupy the only cancellation thread and wedge every unrelated job.
         cancellationHandlers = Executors.newCachedThreadPool(
             new NamedDaemonThreadFactory("EDT-MCP background-job-cancellation-")); //$NON-NLS-1$
+    }
+
+    /**
+     * The fixed number of worker threads. A caller that must not queue behind other tools' jobs
+     * passes it as {@code maxRunning}: while fewer jobs than workers are admitted, a free worker
+     * picks the new job up at once, so its deadline never runs down in the queue.
+     *
+     * @return the worker thread count this registry was created with
+     */
+    public int getWorkerThreads()
+    {
+        return workerThreads;
     }
 
     /** @return bundle-wide registry, recreated lazily after bundle restart */
@@ -661,7 +730,21 @@ public final class BackgroundJobs implements AutoCloseable
         return start(owningTool, timeoutMs, maxRunning, initialProgress, null, work);
     }
 
-    private JobSnapshot start(String owningTool, long timeoutMs, int maxRunning,
+    /**
+     * {@link #start(String, long, int, String, JobWork)} for an owner that also declares a
+     * committed-work cancellation capability: admitted only while fewer than {@code maxRunning}
+     * jobs run, and stoppable after its commit through {@code cancellation}.
+     *
+     * @param owningTool MCP tool that creates and owns the job
+     * @param timeoutMs total job budget in milliseconds
+     * @param maxRunning admit only while strictly fewer jobs are running
+     * @param initialProgress first domain-specific progress message
+     * @param cancellation owner-declared committed-work cancellation capability, or {@code null}
+     * @param work work to execute off the caller thread
+     * @return the initial snapshot, or {@code null} when the running limit is reached
+     * @throws RejectedExecutionException when the registry is stopped or full
+     */
+    public JobSnapshot start(String owningTool, long timeoutMs, int maxRunning,
         String initialProgress, CancellationCapability cancellation, JobWork work)
     {
         if (owningTool == null || owningTool.isBlank())
@@ -676,6 +759,7 @@ public final class BackgroundJobs implements AutoCloseable
         JobRecord record = new JobRecord(UUID.randomUUID().toString(), owningTool,
             initialProgress, cancellation);
 
+        com.ditrix.edt.mcp.server.HeadlessLifetime.Lease lease;
         synchronized (jobsLock)
         {
             ensureOpen();
@@ -694,6 +778,9 @@ public final class BackgroundJobs implements AutoCloseable
                 throw new RejectedExecutionException("Background job registry is full with " //$NON-NLS-1$
                     + maxStoredJobs + " running jobs"); //$NON-NLS-1$
             }
+            var lifetime = Activator.getDefault() == null ? null : Activator.getDefault().getHeadlessLifetime();
+            lease = lifetime == null ? null : lifetime.tool();
+            if (lifetime != null && lease == null) { throw new RejectedExecutionException("Headless EDT is shutting down"); }
             jobs.put(record.id, record);
             inFlight.incrementAndGet();
         }
@@ -702,7 +789,10 @@ public final class BackgroundJobs implements AutoCloseable
         // callable when it unwinds, or the cancelling side when the callable will never run.
         // Neither alone is enough - a callable that ignores interruption keeps its thread long
         // after cancellation, and a task cancelled in the queue never reaches its callable.
-        record.onSlotRelease(inFlight::decrementAndGet);
+        record.onSlotRelease(() -> {
+            inFlight.decrementAndGet();
+            if (lease != null) { lease.close(); }
+        });
 
         FutureTask<Void> task = new FutureTask<>(() -> {
             if (record.beginWork())
@@ -871,18 +961,18 @@ public final class BackgroundJobs implements AutoCloseable
     private static CancellationAttempt publishHandlerInvocation(JobRecord record,
         HandlerInvocation invocation)
     {
-        if (invocation.failure == null)
+        if (invocation.failure.get() == null)
         {
-            return record.publishCommittedCancellation(invocation.outcome, null);
+            return record.publishCommittedCancellation(invocation.outcome.get(), null);
         }
 
-        String detail = committedCancellationFailureDetail(invocation.failure);
+        String detail = committedCancellationFailureDetail(invocation.failure.get());
         CancellationAttempt attempt = record.publishCommittedCancellation(null, detail);
-        if (invocation.failure instanceof Error)
+        if (invocation.failure.get() instanceof Error)
         {
             // Publishing first releases the deferred worker outcome. The Error then remains
             // visible instead of being dressed up as an ordinary handler failure.
-            throw (Error)invocation.failure;
+            throw (Error)invocation.failure.get();
         }
         return attempt;
     }
@@ -969,6 +1059,12 @@ public final class BackgroundJobs implements AutoCloseable
         }
     }
 
+    /**
+     * Publishes a failure for any Throwable raised by the work, including after commit.
+     * Errors are logged and rethrown after recording the failure; existing terminal and
+     * cancellation decisions remain authoritative.
+     * This rule must migrate to the MCP Tasks store when #338 lands.
+     */
     private static void runWork(JobRecord record, long timeoutMs, JobWork work)
     {
         if (!record.isRunning())
@@ -996,6 +1092,12 @@ public final class BackgroundJobs implements AutoCloseable
                 {
                     return record.remainingMillis(timeoutMs);
                 }
+
+                @Override
+                public void cancellationResult(Object result)
+                {
+                    record.lateCancellationResult(result);
+                }
             });
             record.complete(result);
         }
@@ -1004,13 +1106,19 @@ public final class BackgroundJobs implements AutoCloseable
             Thread.currentThread().interrupt();
             record.fail("Background job was interrupted."); //$NON-NLS-1$
         }
+        catch (MarkedFailure e)
+        {
+            record.fail(failureMessage(e), null, e.getMarker());
+        }
         catch (Exception e) // NOSONAR job failures are retained for polling
         {
             record.fail(failureMessage(e));
         }
-        catch (LinkageError e)
+        catch (Error e) // NOSONAR fail the record before logging and rethrowing the Error
         {
             record.fail(failureMessage(e));
+            Activator.logError("Background job " + record.id + " failed with an Error", e); //$NON-NLS-1$ //$NON-NLS-2$
+            throw e;
         }
     }
 
@@ -1102,10 +1210,12 @@ public final class BackgroundJobs implements AutoCloseable
         private PendingTerminalOutcome pendingTerminalOutcome;
         private Object pendingResult;
         private String pendingErrorMessage;
+        private String pendingErrorMarker;
         private long completedAtMs;
         private long completedAtNanos;
         private Object result;
         private String errorMessage;
+        private String errorMarker;
         private Future<?> workFuture;
         private ScheduledFuture<?> deadlineFuture;
         /** Gives the admission slot back; see {@link #releaseSlot()}. */
@@ -1158,6 +1268,22 @@ public final class BackgroundJobs implements AutoCloseable
             }
             committed = true;
             return true;
+        }
+
+        /** See {@link ProgressReporter#cancellationResult}: fills a committed cancellation's missing result. */
+        synchronized void lateCancellationResult(Object late)
+        {
+            boolean committedStop = cancellationOutcome == CancellationOutcome.TERMINATED
+                || cancellationOutcome == CancellationOutcome.TERMINATION_REQUESTED;
+            if (late == null || !cancellationRequested || !committedStop || cancellationResult != null)
+            {
+                return;
+            }
+            cancellationResult = late;
+            if (status == Status.CANCELLED && result == null)
+            {
+                result = late;
+            }
         }
 
         synchronized void setWorkFuture(Future<?> future)
@@ -1267,7 +1393,7 @@ public final class BackgroundJobs implements AutoCloseable
 
         boolean fail(String message)
         {
-            return fail(message, null);
+            return fail(message, null, null);
         }
 
         /**
@@ -1279,7 +1405,7 @@ public final class BackgroundJobs implements AutoCloseable
          */
         boolean failUnlessCommitted(String message, String committedNote)
         {
-            return fail(message, committedNote);
+            return fail(message, committedNote, null);
         }
 
         /**
@@ -1488,7 +1614,7 @@ public final class BackgroundJobs implements AutoCloseable
             completed.countDown();
         }
 
-        private boolean fail(String message, String committedNote)
+        private boolean fail(String message, String committedNote, String marker)
         {
             ScheduledFuture<?> deadline;
             synchronized (this)
@@ -1508,6 +1634,7 @@ public final class BackgroundJobs implements AutoCloseable
                 {
                     pendingTerminalOutcome = PendingTerminalOutcome.FAILED;
                     pendingErrorMessage = message;
+                    pendingErrorMarker = marker;
                     return true;
                 }
                 if (cancellationRequested)
@@ -1520,6 +1647,7 @@ public final class BackgroundJobs implements AutoCloseable
                     "Failed: " + message)); //$NON-NLS-1$
                 status = Status.FAILED;
                 errorMessage = message;
+                errorMarker = marker;
                 completedAtMs = System.currentTimeMillis();
                 completedAtNanos = System.nanoTime();
                 deadline = deadlineFuture;
@@ -1556,6 +1684,7 @@ public final class BackgroundJobs implements AutoCloseable
                     "Failed: " + pendingErrorMessage)); //$NON-NLS-1$
                 status = Status.FAILED;
                 errorMessage = pendingErrorMessage;
+                errorMarker = pendingErrorMarker;
             }
             completedAtMs = System.currentTimeMillis();
             completedAtNanos = System.nanoTime();
@@ -1572,6 +1701,7 @@ public final class BackgroundJobs implements AutoCloseable
             pendingTerminalOutcome = null;
             pendingResult = null;
             pendingErrorMessage = null;
+            pendingErrorMarker = null;
         }
 
         /**
@@ -1619,7 +1749,10 @@ public final class BackgroundJobs implements AutoCloseable
             }
             try
             {
-                completed.await(waitMs, TimeUnit.MILLISECONDS);
+                if (!completed.await(waitMs, TimeUnit.MILLISECONDS))
+                {
+                    return; // A timeout still leaves the latest snapshot available to the caller.
+                }
             }
             catch (InterruptedException e)
             {
@@ -1640,7 +1773,7 @@ public final class BackgroundJobs implements AutoCloseable
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(
                 Math.max(0L, endNanos - startedAtNanos));
             return new JobSnapshot(id, owningTool, status, startedAtMs, completedAtMs, elapsedMs,
-                new ArrayList<>(progress), result, errorMessage,
+                new ArrayList<>(progress), result, errorMessage, errorMarker,
                 cancellation != null ? cancellation.previewWarning : null, isClaimed(),
                 cancellationHandlerInFlight);
         }

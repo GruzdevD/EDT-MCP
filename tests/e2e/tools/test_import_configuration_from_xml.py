@@ -8,22 +8,28 @@ It reads a directory of XML source files and creates a NEW EDT project in the
 workspace from them. The reverse of export_configuration_to_xml.
 
 Required params (JsonSchemaBuilder): importPath, projectName.
-Optional params: projectNature, xmlVersion (empty string -> null -> EDT auto-detect).
+Optional params: platformVersion, baseProjectName, projectNature (a dump-kind check),
+xmlVersion (deprecated platformVersion alias). Blank strings are treated as omitted.
 
-WHY THERE IS NO HAPPY MUTATION TEST HERE (deliberate, per ACTION-TOOL SAFETY):
-A genuine success calls api.importProject(...) which IMPORTS XML INTO A NEW
-workspace project. This is destructive in two ways the e2e suite must never do:
-  1. it requires a real, valid XML configuration dump as input — the only
-     such artifact on hand is TestConfiguration itself, and re-importing it
-     would mean creating a second project / risking the committed fixture;
-  2. it mutates EDT workspace state (creates+opens a project) that the
-     git-fixture protocol (which only resets TestConfiguration/) cannot undo.
-So a "real import" happy path is OMITTED on purpose. Instead the positive-shape
-coverage is the EXISTING-PROJECT guard (below): it is the deepest validation the
-tool performs with VALID-shaped arguments, it is fully deterministic, and —
-critically — it is reached BEFORE Activator...getImportConfigurationFilesApi()
-is ever called, so NO import is attempted. That proves the tool validates and
-REFUSES to overwrite an existing project, with zero risk to the fixture.
+THE HAPPY PATH IS A REAL IMPORT (issue #647):
+This file used to say a real import could not be tested here, because it needs a
+valid XML dump and creates workspace state the git-fixture protocol cannot undo.
+Neither half holds: export_configuration_to_xml MANUFACTURES the dump from
+TestConfiguration into an OS temp directory, and delete_project removes the
+imported project again — the same create-then-delete shape test_create_project.py
+and test_delete_project.py already use. The fixture is only READ (the import
+creates a SEPARATE project), and every test still asserts assert_no_diff().
+
+The happy path exists because the REPORTED STATE is the thing under test. The CLI
+import API leaves the new project behind a blocked start latch, so EDT never
+starts it and list_projects reports it 'not_available' forever; the tool now
+refreshes it, asks EDT to start it and waits, then states what it observed in
+the front matter (state: ready / state: importing + projectReady). The latch is
+NOT released on that path (releasing it would arm a second, competing start);
+it is released only if the refresh or the start request itself fails, so EDT's
+own watchdog can still start the project. A pre-fix server answers success with
+NO state at all and the project never leaves 'not_available' — so this test
+fails on it.
 
 execute() validation order (each returns ToolResult.error -> isError, and each
 happens BEFORE the CLI API is invoked, so every test below is non-destructive):
@@ -33,7 +39,11 @@ happens BEFORE the CLI API is invoked, so every test below is non-destructive):
   3. !Files.isDirectory(importPath)   -> "importPath is not a directory: <abs>"
   4. workspace project already exists -> "Project already exists in workspace:
        <name>. Import requires a new project name."
-  5. api == null                      -> "IImportConfigurationFilesApi is not
+  5. an import of the SAME projectName is already running -> "An import into
+       project `<name>` is already in progress (started N seconds ago)..."
+       (claimed BEFORE guard 4, which cannot see a project the other call has
+       not created yet)
+  6. api == null                      -> "IImportConfigurationFilesApi is not
        available. Required EDT plugin com._1c.g5.v8.dt.cli.api is not installed."
   (only AFTER all of the above does it call importProject(...).)
 
@@ -42,16 +52,23 @@ call must never touch the committed fixture on disk.
 """
 
 import os
+import shutil
+import tempfile
 
 from harness import (
     call,
+    assert_ok,
     assert_error,
     assert_error_quality,
     assert_contains,
     assert_not_contains,
     assert_no_diff,
+    settle_or_fail,
     e2e_test,
+    calls_aborted,
+    split_markdown_row,
     PROJECT,
+    PROJECT_DIR,
     REPO_ROOT,
 )
 
@@ -65,11 +82,95 @@ _EXISTING_DIR = REPO_ROOT
 _EXISTING_FILE = os.path.join(REPO_ROOT, "CLAUDE.md")
 # A path that does not exist at all.
 _MISSING_PATH = os.path.join(REPO_ROOT, "no_such_import_dir_e2e_zzz")
+# The throwaway project the round-trip imports into (never the committed fixture).
+_ROUND_TRIP_PROJECT = "ZZImportRoundTrip"
+
+
+def _ensure_absent(project_name):
+    """Best-effort pre/post clean so a leftover project from a crashed run cannot make the
+    round-trip trip over the tool's own "project already exists" guard. Ignores the result."""
+    call("delete_project", {"projectName": project_name, "deleteContent": True, "confirm": True})
+
+
+def _project_state(list_projects_markdown, project_name):
+    """The `state` cell list_projects prints for one project, or None when it has no row.
+
+    Parsed the same way harness._all_edt_projects_ready parses the table: a leading "|", the
+    name in the first cell and the state in the second.
+    """
+    for line in list_projects_markdown.splitlines():
+        line = line.strip()
+        if not line.startswith("|") or set(line) <= set("|- "):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) >= 2 and cells[0] == project_name:
+            return cells[1].strip().lower()
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# POSITIVE-SHAPE (deepest non-destructive validation) — the existing-project guard
+# POSITIVE: the real import round-trip, then the existing-project guard
 # ──────────────────────────────────────────────────────────────────────────────
+@e2e_test(tool="import_configuration_from_xml", kind="write-metadata")
+def test_import_round_trip_leaves_a_project_edt_has_started():
+    """Export the fixture to XML, import it as a NEW project, and require that EDT has
+    actually STARTED the result.
+
+    The assertion that matters is the reported state. A pre-fix server returns success with
+    no `state`/`projectReady` in the front matter at all, and the imported project stays
+    'not_available' in list_projects indefinitely (the CLI import API parks a blocked start
+    latch on it and nothing releases it), so both halves below fail on it.
+
+    Cleanup is unconditional: the throwaway project and the temp dump are removed in finally,
+    so the test is repeatable and leaves no workspace residue.
+    """
+    _ensure_absent(_ROUND_TRIP_PROJECT)
+    dump_dir = tempfile.mkdtemp(prefix="edt_import_e2e_")
+    try:
+        ex = call("export_configuration_to_xml",
+                  {"projectName": PROJECT, "outputPath": dump_dir})
+        assert_ok(ex, "export the fixture configuration to XML")
+        assert os.listdir(dump_dir), "export must produce the XML dump the import reads"
+
+        im = call("import_configuration_from_xml",
+                  {"importPath": dump_dir, "projectName": _ROUND_TRIP_PROJECT})
+        assert_ok(im, "import the dumped XML into a new project")
+        assert_contains(im.text, "project: " + _ROUND_TRIP_PROJECT,
+                        "front matter must echo the created project")
+        # The honest-state contract: the answer says which of the two states it observed.
+        assert_contains(im.text, "projectReady:",
+                        "the answer must state whether EDT started the project")
+        assert ("state: ready" in im.text) or ("state: importing" in im.text), \
+            "front matter must carry state: ready or state: importing, got:\n" + im.text
+        if "state: ready" in im.text:
+            assert_contains(im.text, "projectReady: true",
+                            "a ready project must be reported as ready")
+        else:
+            assert_contains(im.text, "projectReady: false",
+                            "a project still starting must not be reported as ready")
+        # Settle on BOTH branches, not just the 'importing' one: the tool's `ready` means the
+        # project CONTEXT is started (isStarted + a DtProject exists), while list_projects reports
+        # `building` until EDT has finished the derived data. Going straight to the assertion below
+        # on the ready branch would be a race, not a check. settle_or_fail, not the bare wait: a
+        # wait that ran out would otherwise be dropped on the floor and the assertion below would
+        # then fail on a `building` row with no diagnostics about WHY EDT never settled.
+        settle_or_fail("the list_projects ground-truth check of the imported project")
+
+        # GROUND TRUTH, independent of the import's own answer: list_projects must report the
+        # imported project as an EDT project in state 'ready' - i.e. EDT really started it.
+        lp = call("list_projects", {})
+        assert_contains(lp.text, _ROUND_TRIP_PROJECT,
+                        "the imported project must appear in list_projects")
+        state = _project_state(lp.text, _ROUND_TRIP_PROJECT)
+        assert state == "ready", \
+            "the imported project must reach state 'ready', got %r:\n%s" % (state, lp.text)
+    finally:
+        _ensure_absent(_ROUND_TRIP_PROJECT)
+        shutil.rmtree(dump_dir, ignore_errors=True)
+
+    assert_no_diff("the round-trip only READS the fixture; the import creates a separate project")
+
+
 @e2e_test(tool="import_configuration_from_xml", kind="action")
 def test_existing_project_name_is_refused_before_any_import():
     """Valid-shaped args (a real directory + a real project name), but the
@@ -199,3 +300,132 @@ def test_existence_check_precedes_directory_check():
     assert_not_contains(e, "is not a directory",
                         "a missing path must not surface the directory-kind error")
     assert_no_diff("a rejected call must not touch the fixture")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ISSUE #669: CLI version/base slots and the nature assertion
+# ──────────────────────────────────────────────────────────────────────────────
+_VERSION_PROJECT = "ZZImportXmlVersion669"
+_NATURE_PROJECT = "ZZImportXmlNature669"
+_EXTENSION_NATURE = "com._1c.g5.v8.dt.core.V8ExtensionNature"
+
+
+def _project_dir(project):
+    """Use list_projects' Path column; imported projects need not share the fixture's parent."""
+    projects = call("list_projects", {})
+    assert_ok(projects, "locate the imported project's directory")
+    columns = None
+    for line in (projects.text or "").splitlines():
+        cells = split_markdown_row(line)
+        if not cells:
+            continue
+        if columns is None:
+            lowered = [cell.lower() for cell in cells]
+            if "name" in lowered and "path" in lowered:
+                columns = (lowered.index("name"), lowered.index("path"))
+            continue
+        if len(cells) > max(columns) and cells[columns[0]] == project and cells[columns[1]]:
+            return cells[columns[1]]
+    raise AssertionError("list_projects has no path for %r:\n%s" % (project, projects.text))
+
+
+def _assert_runtime_reaches_manifest(version_key):
+    """The requested runtime reaches PROJECT.PMF; neither the nature nor a version becomes a base.
+
+    Use the fixture's supported runtime. xmlVersion alone catches the original bug:
+    that alias used to occupy the base-project slot even when auto-detection agrees.
+    """
+    with open(os.path.join(PROJECT_DIR, "DT-INF", "PROJECT.PMF"), encoding="utf-8-sig") as stream:
+        runtimes = [line.partition(":")[2].strip() for line in stream
+                    if line.startswith("Runtime-Version:")]
+    assert len(runtimes) == 1 and runtimes[0], "fixture must declare one Runtime-Version"
+    runtime = runtimes[0]
+    _ensure_absent(_VERSION_PROJECT)
+    dump_dir = tempfile.mkdtemp(prefix="edt_import_version_669_")
+    try:
+        ex = call("export_configuration_to_xml",
+                  {"projectName": PROJECT, "outputPath": dump_dir})
+        assert_ok(ex, "export the fixture for the CLI argument regression")
+        assert os.path.isfile(os.path.join(dump_dir, "Configuration.xml")), \
+            "export must produce the root XML file"
+
+        im = call("import_configuration_from_xml", {
+            "importPath": dump_dir,
+            "projectName": _VERSION_PROJECT,
+            version_key: runtime,
+        })
+        assert_ok(im, "import with the fixture's runtime through " + version_key)
+        manifest = os.path.join(_project_dir(_VERSION_PROJECT), "DT-INF", "PROJECT.PMF")
+        # One disk read at the reported path; EDT creates this manifest synchronously.
+        with open(manifest, encoding="utf-8-sig") as stream:
+            lines = stream.read().splitlines()
+        runtimes = [line.partition(":")[2].strip() for line in lines
+                    if line.startswith("Runtime-Version:")]
+        assert runtimes == [runtime], "%s must be the manifest runtime: %r" % (version_key, lines)
+        assert not any(line.startswith("Base-Project:") for line in lines), \
+            "a main configuration import must have no Base-Project line: %r" % lines
+
+        settle_or_fail("the imported version-regression project")
+        projects = call("list_projects", {})
+        assert_ok(projects, "read back the imported project's state")
+        assert _project_state(projects.text, _VERSION_PROJECT) == "ready", projects.text
+    finally:
+        # A timed-out import may still be reading its dump; leave it alone for the operator.
+        if not calls_aborted():
+            _ensure_absent(_VERSION_PROJECT)
+            shutil.rmtree(dump_dir)
+    assert_no_diff("the version regression imports a separate project and only reads the fixture")
+
+
+@e2e_test(tool="import_configuration_from_xml", kind="action")
+def test_platform_version_reaches_project_manifest_without_a_base_project():
+    """Pin the canonical runtime argument using platform support already installed on the stand."""
+    _assert_runtime_reaches_manifest("platformVersion")
+
+
+@e2e_test(tool="import_configuration_from_xml", kind="action")
+def test_deprecated_xml_version_reaches_manifest_without_a_base_project():
+    """Red on master: the deprecated alias must never become a Base-Project manifest entry."""
+    _assert_runtime_reaches_manifest("xmlVersion")
+
+
+@e2e_test(tool="import_configuration_from_xml", kind="action")
+def test_project_nature_mismatch_is_refused_before_project_creation():
+    """A main-configuration dump cannot be forced into an extension by projectNature."""
+    _ensure_absent(_NATURE_PROJECT)
+    dump_dir = tempfile.mkdtemp(prefix="edt_import_nature_669_")
+    try:
+        ex = call("export_configuration_to_xml",
+                  {"projectName": PROJECT, "outputPath": dump_dir})
+        assert_ok(ex, "export the fixture for the nature check")
+        result = call("import_configuration_from_xml", {
+            "importPath": dump_dir,
+            "projectName": _NATURE_PROJECT,
+            "projectNature": _EXTENSION_NATURE,
+        })
+        error = assert_error(result, "reject a nature that disagrees with Configuration.xml")
+        assert_error_quality(error, names=[_EXTENSION_NATURE], suggests=["Omit projectNature"],
+                             ctx="the nature refusal names the value and the fix")
+        assert_contains(error, "main configuration dump", "identify the actual dump kind")
+        projects = call("list_projects", {})
+        assert_ok(projects, "verify the refused import created no project")
+        assert _project_state(projects.text, _NATURE_PROJECT) is None, projects.text
+    finally:
+        if not calls_aborted():
+            _ensure_absent(_NATURE_PROJECT)
+            shutil.rmtree(dump_dir)
+    assert_no_diff("a refused nature check must not touch the fixture")
+
+
+@e2e_test(tool="import_configuration_from_xml", kind="action")
+def test_conflicting_platform_version_and_deprecated_alias_are_refused():
+    result = call("import_configuration_from_xml", {
+        "importPath": _EXISTING_DIR,
+        "projectName": _VERSION_PROJECT,
+        "platformVersion": "8.3.27",
+        "xmlVersion": "8.3.24",
+    })
+    error = assert_error(result, "conflicting version arguments")
+    assert_error_quality(error, names=["8.3.27", "8.3.24"], suggests=["Pass platformVersion only"],
+                         ctx="conflicting aliases identify both values and the canonical argument")
+    assert_no_diff("a refused version conflict must not touch the fixture")

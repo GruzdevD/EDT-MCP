@@ -248,6 +248,29 @@ public final class RoleRightsWriter
     public static Result apply(IProject project, Configuration config, Role role,
         List<JsonObject> rights, List<JsonObject> templates, JsonObject roleProperties)
     {
+        long id = ReadToolExecution.readOnHost(project, "Read role identity", () -> ((IBmObject)role).bmGetId());
+        return applyWithId(project, config, role, id, rights, templates, roleProperties);
+    }
+
+    public static Result apply(IProject project, String fqn, List<JsonObject> rights,
+        List<JsonObject> templates, JsonObject roleProperties)
+    {
+        return ReadToolExecution.readOnHost(project, "Prepare role write", () -> {
+            var root = ProjectContext.resolveMetadataRoot(project.getName());
+            if (!root.ok()) return (java.util.function.Supplier<Result>)() -> Result.failed(root.errorJson());
+            var node = MetadataNodeResolver.resolveExistingWithYoFallback(root.scope(), fqn).node;
+            if (node == null || !(node.object instanceof Role role) || !(role instanceof IBmObject bm))
+                return (java.util.function.Supplier<Result>)() -> Result.failed(ToolResult.error("Role not found: " + fqn).toJson());
+            long id = bm.bmGetId();
+            // Native rights tasks rebind this opaque handle with toTransactionObject before use.
+            return (java.util.function.Supplier<Result>)() -> applyWithId(project, null, role, id,
+                rights, templates, roleProperties);
+        }).get();
+    }
+
+    private static Result applyWithId(IProject project, Configuration config, Role role, long roleBmId,
+        List<JsonObject> rights, List<JsonObject> templates, JsonObject roleProperties)
+    {
         if (rights.isEmpty() && templates.isEmpty() && roleProperties == null)
         {
             return Result.failed(ToolResult.error("Nothing to apply to the role: provide at least one " //$NON-NLS-1$
@@ -282,8 +305,6 @@ public final class RoleRightsWriter
                 + "generator). Ensure the EDT workbench is fully started, then retry.").toJson()); //$NON-NLS-1$
         }
 
-        long roleBmId = ((IBmObject)role).bmGetId();
-
         Context ctx = new Context(project, config, holder.model, role, roleBmId, rightInfos, eventBroker,
             sorter);
         return applyResolved(ctx, fqnGenerator, rights, templates, roleProperties);
@@ -312,7 +333,9 @@ public final class RoleRightsWriter
         // the log line and the caller-facing refusal - sit in the catch blocks below, which run
         // AFTER the last BM task has finished, where role.getName() would be an EMF feature read on
         // the bare calling thread with no transaction open at all.
-        String roleName = BmTransactions.read(ctx.model, "ReadRoleName", (tx, pm) -> ctx.role.getName()); //$NON-NLS-1$
+        String roleName = BmTransactions.read(ctx.model, "ReadRoleName", (tx, pm) -> //$NON-NLS-1$
+            (com.ditrix.edt.mcp.server.HostKind.current() == com.ditrix.edt.mcp.server.HostKind.HEADLESS
+                ? (Role)tx.getObjectById(ctx.roleBmId) : ctx.role).getName());
         // Assigned by the bootstrap inside the try and read from BOTH catch blocks: when the
         // bootstrap could name the rights resource, every refusal raised after it still owes the
         // caller that name to export under (see Result#rightsFqn). WHETHER to export is a separate
@@ -325,6 +348,21 @@ public final class RoleRightsWriter
             // resolution refusal can leave the role exactly as the call found it. Template resolution
             // genuinely needs the description and therefore remains after the bootstrap.
             List<RightPlan> rightsPlan = planRights(ctx, rights);
+            if (!rightsPlan.isEmpty())
+            {
+                // EDT's rights tasks sort the role's entries and fail on one whose target is an
+                // unresolved proxy (no UUID); refuse before anything commits.
+                List<String> unresolved = BmTransactions.read(ctx.model, "FindUnresolvedRights", //$NON-NLS-1$
+                    (tx, pm) -> {
+                        IBmObject current = tx.getObjectById(ctx.roleBmId);
+                        return current instanceof Role ? unresolvedTargets(((Role)current).getRights())
+                            : Collections.<String>emptyList();
+                    });
+                if (unresolved != null && !unresolved.isEmpty())
+                {
+                    throw new RoleWriteException(unresolvedTargetsRefusal(roleName, unresolved));
+                }
+            }
 
             // A RoleDescription must exist AND be registered as a BM top object before ANY rights task
             // runs (the tasks downcast Role.getRights() to RoleDescription without auto-creating it,
@@ -398,26 +436,32 @@ public final class RoleRightsWriter
      */
     private static List<RightPlan> planRights(Context ctx, List<JsonObject> rights)
     {
+        return BmTransactions.read(ctx.model, "Plan role rights", (tx, monitor) -> {
+        Configuration config = com.ditrix.edt.mcp.server.HostKind.current() == com.ditrix.edt.mcp.server.HostKind.HEADLESS
+            ? (Configuration)tx.getTopObjectByFqn("Configuration") : ctx.config;
         List<RightPlan> plan = new ArrayList<>(rights.size());
         for (JsonObject entry : rights)
         {
             String objectFqn = str(entry.get(KEY_OBJECT));
-            MdObject targetMd = resolveObject(ctx.config, objectFqn);
+            String malformed = malformedChain(objectFqn);
+            if (malformed != null)
+            {
+                throw new RoleWriteException(ToolResult.error(malformed).toJson());
+            }
+            MdObject targetMd = resolveObject(config, objectFqn);
             if (targetMd == null)
             {
-                throw new RoleWriteException(objectNotFound(ctx.config, objectFqn));
+                throw new RoleWriteException(objectNotFound(config, objectFqn));
             }
             EObject target = targetMd;
 
             String rightName = str(entry.get(KEY_RIGHT));
             // The right is resolved by walking rightInfos.getRights(object) - a model read - so it runs
             // inside a read boundary; only the resolved Right handle (a task input) escapes.
-            Right right = BmTransactions.read(ctx.model, "ResolveRight", //$NON-NLS-1$
-                (tx, pm) -> resolveRight(ctx.rightInfos, target, rightName));
+            Right right = resolveRight(ctx.rightInfos, target, rightName);
             if (right == null)
             {
-                throw new RoleWriteException(BmTransactions.read(ctx.model, "RightNotFound", //$NON-NLS-1$
-                    (tx, pm) -> rightNotFound(ctx.rightInfos, target, rightName, objectFqn)));
+                throw new RoleWriteException(rightNotFound(ctx.rightInfos, target, rightName, objectFqn));
             }
 
             RightValue value = parseRightValue(entry.get(KEY_VALUE));
@@ -428,17 +472,16 @@ public final class RoleRightsWriter
                 List<String> fieldNames = strList(entry.get("rlsFields")); //$NON-NLS-1$
                 // DbViewUtil.getRlsFields reads DB-view derived data - a model read - so resolve inside
                 // a read boundary; only the resolved field collection (a task input) escapes.
-                fields = BmTransactions.read(ctx.model, "ResolveRlsFields", //$NON-NLS-1$
-                    (tx, pm) -> resolveRlsFields(targetMd, fieldNames));
+                fields = resolveRlsFields(targetMd, fieldNames);
                 if (fields == null)
                 {
-                    throw new RoleWriteException(BmTransactions.read(ctx.model, "RlsFieldsNotFound", //$NON-NLS-1$
-                        (tx, pm) -> rlsFieldsNotFound(targetMd, fieldNames)));
+                    throw new RoleWriteException(rlsFieldsNotFound(targetMd, fieldNames));
                 }
             }
             plan.add(new RightPlan(target, right, value, rls, fields));
         }
         return plan;
+        });
     }
 
     /**
@@ -838,8 +881,10 @@ public final class RoleRightsWriter
      *     (nothing was mutated on that branch, so the write stands and only the rights-resource export
      *     is lost); a FRESH description that cannot be given an FQN is refused instead, because there
      *     the reference has already been repointed and leaving it is the unpersistable #452 state
+     * @throws RoleWriteException when a fresh description cannot be safely registered
      */
-    static String attachRoleDescription(IBmTransaction tx, Role inTx, ITopObjectFqnGenerator fqnGenerator)
+    public static String attachRoleDescription(IBmTransaction tx, Role inTx,
+        ITopObjectFqnGenerator fqnGenerator)
     {
         AbstractRoleDescription current = inTx.getRights();
         if (current instanceof RoleDescription && current instanceof IBmObject
@@ -908,8 +953,8 @@ public final class RoleRightsWriter
                 + "this project's model, so this role's rights model cannot be attached under it. " //$NON-NLS-1$
                 + "This call did not determine why that FQN is taken: if the " //$NON-NLS-1$
                 + "registration is stale (a rights model whose role no longer exists on disk), run " //$NON-NLS-1$
-                + "clean_project on the project and retry the same call; otherwise re-read the role " //$NON-NLS-1$
-                + "with get_metadata_details first.").toJson()); //$NON-NLS-1$
+                + "clean_project on the project and retry the same call; otherwise resolve the " //$NON-NLS-1$
+                + "conflicting registration before retrying.").toJson()); //$NON-NLS-1$
         }
 
         // (3) ...and only now register it. A role whose reference was set but whose attach did not
@@ -930,8 +975,86 @@ public final class RoleRightsWriter
             : PlatformFailures.withoutObjectIdentity(PlatformFailures.describe(cause));
         return ToolResult.error("Could not generate the rights model FQN for role '" + inTx.getName() //$NON-NLS-1$
             + "' (" + detail + "), so its rights model was not created and nothing was written. The " //$NON-NLS-1$ //$NON-NLS-2$
-            + "role is most likely not resolvable in the configuration tree: re-read it with " //$NON-NLS-1$
-            + "get_metadata_details, then retry.").toJson(); //$NON-NLS-1$
+            + "role is most likely not resolvable in the configuration tree. Run clean_project on " //$NON-NLS-1$
+            + "the project, then retry the same call.").toJson(); //$NON-NLS-1$
+    }
+
+    /** Extracts the error text; unexpected payloads pass through so error handling cannot fail again. */
+    public static String extractErrorMessage(RoleWriteException failure)
+    {
+        if (failure == null)
+        {
+            return null;
+        }
+        String errorJson = failure.getErrorJson();
+        try
+        {
+            JsonElement parsed = JsonParser.parseString(errorJson);
+            if (parsed.isJsonObject())
+            {
+                JsonElement error = parsed.getAsJsonObject().get(McpKeys.ERROR);
+                if (error != null && error.isJsonPrimitive()
+                    && error.getAsJsonPrimitive().isString())
+                {
+                    return error.getAsString();
+                }
+            }
+        }
+        catch (RuntimeException e)
+        {
+            // Error handling must preserve the original payload instead of failing again.
+        }
+        return errorJson;
+    }
+
+    /**
+     * @param rights the role's {@code getRights()} value, inside a read transaction
+     * @return the addresses of the entries whose target is an unresolved proxy (empty when none)
+     */
+    static List<String> unresolvedTargets(Object rights)
+    {
+        List<String> result = new ArrayList<>();
+        List<ObjectRights> entries = rights instanceof RoleDescription ? ((RoleDescription)rights).getRights() : null;
+        if (entries != null)
+        {
+            for (ObjectRights objectRights : entries)
+            {
+                // Same rule as the orphan scan: a missing target blocks exactly like a proxy one.
+                EObject target = objectRights.getObject();
+                if (target == null)
+                {
+                    result.add(RoleRightsOrphans.NO_TARGET);
+                }
+                else if (target.eIsProxy())
+                {
+                    result.add(RoleRightsOrphans.addressOrUri(target));
+                }
+            }
+        }
+        return result;
+    }
+
+    /** How many unresolved targets the edit refusal lists before summarising the rest. */
+    static final int MAX_LISTED_UNRESOLVED = 20;
+
+    /**
+     * The refusal for a rights edit on a role that holds unresolved entries. Pure.
+     *
+     * @param roleName the role name
+     * @param unresolved the unresolved targets (non-empty)
+     * @return a ready JSON error
+     */
+    static String unresolvedTargetsRefusal(String roleName, List<String> unresolved)
+    {
+        int shown = Math.min(unresolved.size(), MAX_LISTED_UNRESOLVED);
+        String listed = String.join(", ", unresolved.subList(0, shown)) //$NON-NLS-1$
+            + (unresolved.size() > shown ? " and " + (unresolved.size() - shown) + " more" : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return ToolResult.error("Role " + roleName + " has " + unresolved.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + " rights entr" + (unresolved.size() == 1 ? "y" : "ies") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " whose object no longer resolves (" + listed //$NON-NLS-1$
+            + "); EDT's rights tasks cannot edit the role while they remain, so nothing was written. " //$NON-NLS-1$
+            + "Remove them with resync_to_disk(cleanOrphanRoleRights=true) - it reports first - then " //$NON-NLS-1$
+            + "retry; an entry it reports as undetermined is re-linked by clean_project.").toJson(); //$NON-NLS-1$
     }
 
     /**
@@ -1039,7 +1162,13 @@ public final class RoleRightsWriter
 
     // ---- resolution (bilingual) ---------------------------------------------------------------
 
-    /** Resolves an object FQN (bilingual type token) to its metadata top object, or null. */
+    /**
+     * Resolves an object FQN (bilingual type tokens) to the metadata object a right is granted on, or
+     * null. A nested subsystem ({@code Subsystem.<Parent>.Subsystem.<Child>}) is a separate top object
+     * its parent only refers to, so it goes by its chain through the shared subsystem descent (issue
+     * #897); every other address through the containment grammar. Both are exact, as before: no yo
+     * retry.
+     */
     static MdObject resolveObject(Configuration config, String fqn)
     {
         if (fqn == null || fqn.isEmpty())
@@ -1047,8 +1176,24 @@ public final class RoleRightsWriter
             return null;
         }
         String norm = MetadataTypeUtils.normalizeFqn(fqn);
-        MetadataNodeResolver.MetadataNode node = MetadataNodeResolver.resolveExisting(config, norm);
+        MetadataNodeResolver.MetadataNode node = SubsystemUtils.nestedChain(norm) != null
+            ? MetadataNodeResolver.resolveNestedSubsystem(MetadataScope.ofConfiguration(config), norm, false).node
+            : MetadataNodeResolver.resolveExisting(config, norm);
         return node != null ? node.object : null;
+    }
+
+    /**
+     * The refusal of a {@code rights[].object} that asks for a subsystem below a top-level one without
+     * being a well-formed chain ({@link SubsystemUtils#malformedChainError} - an empty or padded segment,
+     * a foreign kind token, a level without its name), or {@code null} for any other address: a right is
+     * WRITTEN on the object, so such an address is refused by the rule modify / delete refuse it with,
+     * rather than granted on the subsystem its trimmed reading names or answered by "Did you mean" with
+     * the top-level parent.
+     */
+    static String malformedChain(String fqn)
+    {
+        String malformed = SubsystemUtils.malformedChainError(fqn);
+        return malformed == null ? null : "Invalid right entry object: " + malformed + " Nothing was changed."; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -1299,8 +1444,15 @@ public final class RoleRightsWriter
 
     // ---- error builders (actionable) ----------------------------------------------------------
 
-    private static String objectNotFound(Configuration config, String fqn)
+    static String objectNotFound(Configuration config, String fqn)
     {
+        if (fqn != null && SubsystemUtils.nestedChain(MetadataTypeUtils.normalizeFqn(fqn)) != null)
+        {
+            // A missed chain level: the "Did you mean" of the leading Type.Name pair would offer the
+            // top-level PARENT, a different subsystem than the one asked for (issue #897).
+            return ToolResult.error("Object not found for right entry: '" + fqn + "'. " //$NON-NLS-1$ //$NON-NLS-2$
+                + SubsystemUtils.addressingHint() + ".").toJson(); //$NON-NLS-1$
+        }
         List<String> similar = similarObjects(config, fqn);
         String suggestion = similar.isEmpty() ? "" //$NON-NLS-1$
             : " Did you mean: " + String.join(", ", similar) + "?"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -1516,7 +1668,7 @@ public final class RoleRightsWriter
                 return new IBmModelManagerHolder(null,
                     ToolResult.error("IBmModelManager not available").toJson()); //$NON-NLS-1$
             }
-            IBmModel model = manager.getModel(project);
+            IBmModel model = BmModelResolver.resolve(project, manager).getModel();
             if (model == null)
             {
                 return new IBmModelManagerHolder(null,
@@ -1531,7 +1683,7 @@ public final class RoleRightsWriter
      * top-level {@link #apply} returns it verbatim. Unchecked so it crosses the BM task boundary; the
      * message is a validated {@link ToolResult#error} JSON string.
      */
-    static final class RoleWriteException extends RuntimeException
+    public static final class RoleWriteException extends RuntimeException
     {
         private static final long serialVersionUID = 1L;
         private final transient String errorJson;
@@ -1542,7 +1694,7 @@ public final class RoleRightsWriter
             this.errorJson = errorJson;
         }
 
-        String getErrorJson()
+        public String getErrorJson()
         {
             return errorJson;
         }

@@ -7,13 +7,15 @@
 package com.ditrix.edt.mcp.server.tools;
 
 import java.util.Collection;
-import java.util.Collections;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import com.ditrix.edt.mcp.server.Activator;
+import com.ditrix.edt.mcp.server.HostKind;
 import com.ditrix.edt.mcp.server.preferences.ToolSettingsService;
 
 /**
@@ -37,7 +39,8 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
      * as unknown, so a bulk update publishes a finished map instead: every reader sees either
      * the whole previous catalogue or the whole new one.
      */
-    private volatile Map<String, IMcpTool> tools = new ConcurrentHashMap<>();
+    private final AtomicReference<Map<String, IMcpTool>> tools =
+        new AtomicReference<>(new ConcurrentHashMap<>());
 
     private McpToolRegistry()
     {
@@ -65,7 +68,7 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
         {
             return;
         }
-        tools.put(tool.getName(), tool);
+        tools.get().put(tool.getName(), tool);
         Activator.logInfo("Registered MCP tool: " + tool.getName()); //$NON-NLS-1$
     }
 
@@ -96,24 +99,28 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
             }
         }
         // The single point where readers switch over, and they switch over completely.
-        tools = published;
+        tools.set(published);
     }
 
     /**
      * Returns a tool by name.
      * 
-     * @param name the tool name
+     * @param name the tool name (may be null)
      * @return tool or null if not found
      */
     public IMcpTool getTool(String name)
     {
-        IMcpTool tool = tools.get(name);
+        if (name == null)
+        {
+            return null;
+        }
+        IMcpTool tool = tools.get().get(name);
         if (tool != null)
         {
             return tool;
         }
         String currentName = LEGACY_TOOL_NAMES.get(name);
-        return currentName == null ? null : tools.get(currentName);
+        return currentName == null ? null : tools.get().get(currentName);
     }
     
     /**
@@ -125,35 +132,38 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
     {
         if (name != null)
         {
-            tools.remove(name);
+            tools.get().remove(name);
         }
     }
 
     /**
-     * Returns all registered tools (regardless of enablement state).
+     * Returns all registered tools (regardless of enablement state), sorted by name.
      *
-     * @return collection of all tools
+     * @return an unmodifiable snapshot of all tools in ascending name order
      */
     public Collection<IMcpTool> getAllTools()
     {
-        return Collections.unmodifiableCollection(tools.values());
+        return tools.get().values().stream()
+            .sorted(Comparator.comparing(IMcpTool::getName))
+            .collect(Collectors.toUnmodifiableList());
     }
 
     /**
-     * Returns only enabled tools (filtered by ToolSettingsService).
+     * Returns every tool on the headless host; windowed enablement follows ToolSettingsService.
      * This is the method used by the MCP protocol handler to determine
      * which tools are exposed to clients.
      *
-     * @return collection of enabled tools
+     * @return an unmodifiable snapshot of enabled tools in ascending name order
      */
     public Collection<IMcpTool> getEnabledTools()
     {
+        if (HostKind.current() == HostKind.HEADLESS) { return getAllTools(); }
         Set<String> disabled = ToolSettingsService.getInstance().getDisabledTools();
         if (disabled.isEmpty())
         {
-            return Collections.unmodifiableCollection(tools.values());
+            return getAllTools();
         }
-        return tools.values().stream()
+        return getAllTools().stream()
             .filter(tool -> !disabled.contains(tool.getName()))
             .collect(Collectors.toUnmodifiableList());
     }
@@ -169,12 +179,14 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
      * never affects callability: a hidden tool is still registered and can be called
      * by name (the protocol handler gates calls on {@link #isToolEnabled} only).
      *
-     * @return the visible tools
+     * @return an unmodifiable snapshot of visible tools in ascending name order
      */
     public Collection<IMcpTool> getVisibleTools()
     {
-        Collection<IMcpTool> enabled = getEnabledTools();
-        if (!Toolsets.isProgressiveDisclosureEnabled())
+        Collection<IMcpTool> enabled = getEnabledTools().stream()
+            .filter(tool -> HostToolCapabilities.availableOnCurrentHost(tool.getName()))
+            .collect(Collectors.toUnmodifiableList());
+        if (HostKind.current() == HostKind.HEADLESS || !Toolsets.isProgressiveDisclosureEnabled())
         {
             return enabled;
         }
@@ -198,7 +210,8 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
         }
         IMcpTool tool = getTool(name);
         return tool != null
-            && ToolSettingsService.getInstance().isToolEnabled(tool.getName());
+            && (HostKind.current() == HostKind.HEADLESS
+                || ToolSettingsService.getInstance().isToolEnabled(tool.getName()));
     }
     
     /**
@@ -208,7 +221,7 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
      */
     public int getToolCount()
     {
-        return tools.size();
+        return tools.get().size();
     }
     
     /**
@@ -219,6 +232,6 @@ public class McpToolRegistry // NOSONAR intentional singleton (Eclipse service /
      */
     public void clear()
     {
-        tools = new ConcurrentHashMap<>();
+        tools.set(new ConcurrentHashMap<>());
     }
 }

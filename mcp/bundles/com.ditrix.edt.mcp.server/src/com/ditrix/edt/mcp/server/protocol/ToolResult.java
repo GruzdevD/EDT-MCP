@@ -20,10 +20,17 @@ import com.google.gson.JsonParser;
  */
 public class ToolResult
 {
-    private final Map<String, Object> data = new HashMap<>();
+    private final Map<String, Object> data;
+    private boolean preserveNulls;
     
     private ToolResult()
     {
+        this(new HashMap<>());
+    }
+
+    private ToolResult(Map<String, Object> data)
+    {
+        this.data = data;
     }
     
     /**
@@ -79,6 +86,30 @@ public class ToolResult
     public static ToolResult errorWithUnknownMutationOutcome(String message)
     {
         return error(message).put("mutationOutcomeUnknown", true); //$NON-NLS-1$
+    }
+
+    /** True only for an explicit boolean success:false; Markdown and malformed JSON are not errors. */
+    public static boolean isErrorPayload(String result)
+    {
+        if (result == null)
+        {
+            return false;
+        }
+        try
+        {
+            JsonElement parsed = JsonParser.parseString(result);
+            if (!parsed.isJsonObject())
+            {
+                return false;
+            }
+            JsonElement success = parsed.getAsJsonObject().get("success"); //$NON-NLS-1$
+            return success != null && success.isJsonPrimitive()
+                && success.getAsJsonPrimitive().isBoolean() && !success.getAsBoolean();
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
     }
 
     /**
@@ -150,6 +181,48 @@ public class ToolResult
         }
     }
     
+    /** Appends a diagnostic to an error while retaining its other fields. */
+    public ToolResult withNote(String note)
+    {
+        if (Boolean.FALSE.equals(data.get("success")) && note != null && !note.isEmpty())
+        {
+            Object error = data.get("error");
+            String message = error instanceof JsonElement element ? element.getAsString() : String.valueOf(error);
+            data.put("error", message.isEmpty() ? note : message + " " + note);
+        }
+        return this;
+    }
+
+    /** Parses an existing object once for further result assembly. */
+    public static ToolResult parse(String json)
+    {
+        JsonObject object = JsonParser.parseString(json).getAsJsonObject();
+        ToolResult result = new ToolResult(new java.util.LinkedHashMap<>());
+        result.preserveNulls = true;
+        object.entrySet().forEach(entry -> result.data.put(entry.getKey(), entry.getValue()));
+        JsonElement success = object.get("success");
+        if (success != null && success.isJsonPrimitive() && success.getAsJsonPrimitive().isBoolean())
+        {
+            result.data.put("success", success.getAsBoolean());
+        }
+        return result;
+    }
+
+    /** Appends to an explicit error; other payloads pass through byte for byte. */
+    public static String appendErrorNote(String json, String note)
+    {
+        if (note == null || note.isEmpty()) { return json; }
+        try
+        {
+            ToolResult result = parse(json);
+            Object error = result.data.get("error");
+            if (!Boolean.FALSE.equals(result.data.get("success")) || error == null
+                || error instanceof JsonElement element && !element.isJsonPrimitive()) { return json; }
+            return result.withNote(note).toJson();
+        }
+        catch (RuntimeException e) { return json; }
+    }
+
     /**
      * Adds a string field.
      */
@@ -209,7 +282,7 @@ public class ToolResult
      */
     public String toJson()
     {
-        return GsonProvider.toJson(data);
+        return preserveNulls ? GsonProvider.toJsonSerializeNulls(data) : GsonProvider.toJson(data);
     }
     
     /**

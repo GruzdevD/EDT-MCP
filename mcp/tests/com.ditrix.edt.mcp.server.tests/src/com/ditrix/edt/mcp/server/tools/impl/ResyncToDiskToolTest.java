@@ -12,6 +12,13 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyZeroInteractions;
+import static org.mockito.Mockito.when;
 
 import java.io.File;
 import java.io.IOException;
@@ -24,10 +31,22 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.UnaryOperator;
 
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.InternalEObject;
 import org.junit.Test;
 
+import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.integration.IBmModel;
+import com._1c.g5.v8.bm.integration.IBmTask;
+import com._1c.g5.v8.dt.core.model.EditingMode;
+import com._1c.g5.v8.dt.core.model.IModelEditingSupport;
+import com._1c.g5.v8.dt.metadata.mdclass.Catalog;
+import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassFactory;
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
 import com.ditrix.edt.mcp.server.tools.base.WriteScope;
+import com.ditrix.edt.mcp.server.utils.VendorSupportGuard;
 
 /**
  * Lightweight contract tests for {@link ResyncToDiskTool}: tool metadata, the bundled
@@ -396,6 +415,125 @@ public class ResyncToDiskToolTest
         result.removedFromModel = true;
         assertEquals("a committed removal reports exactly the found count", //$NON-NLS-1$
             4, result.removedCount());
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // cleanDanglingReferences and vendor support: a locked configuration keeps its dangling entries.
+    // They are scanned in a read and reported with a warning; the write transaction is never entered.
+    // ---------------------------------------------------------------------------------------------
+
+    /** A configuration holding one dangling (unresolvable proxy) catalog entry. */
+    private static Configuration configurationWithADanglingCatalog()
+    {
+        Configuration config = MdClassFactory.eINSTANCE.createConfiguration();
+        config.setName("Vendor"); //$NON-NLS-1$
+        Catalog lost = MdClassFactory.eINSTANCE.createCatalog();
+        ((InternalEObject)lost).eSetProxyURI(URI.createURI("platform:/resource/Vendor/src/Catalogs/Lost/Lost.mdo#/")); //$NON-NLS-1$
+        config.getCatalogs().add(lost);
+        return config;
+    }
+
+    /** A model whose read and write tasks run against a transaction that answers {@code config}. */
+    private static IBmModel modelOver(Configuration config)
+    {
+        IBmTransaction tx = mock(IBmTransaction.class);
+        when(tx.getObjectById(anyLong())).thenReturn((IBmObject)config);
+        IBmModel model = mock(IBmModel.class);
+        when(model.executeReadonlyTask(any())).thenAnswer(inv -> ((IBmTask<?>)inv.getArgument(0)).execute(tx, null));
+        // The write path is only observed: removing and re-exporting needs a live BM.
+        when(model.execute(any())).thenAnswer(inv -> Boolean.FALSE);
+        return model;
+    }
+
+    @Test
+    public void testALockedConfigurationKeepsItsDanglingEntriesAndSaysWhy()
+    {
+        Configuration config = configurationWithADanglingCatalog();
+        IModelEditingSupport support = mock(IModelEditingSupport.class);
+        when(support.canEdit(any(), any())).thenReturn(true);
+        when(support.canEdit(config, EditingMode.DIRECT)).thenReturn(false);
+        VendorSupportGuard.setServiceForTests(() -> support);
+        try
+        {
+            IBmModel model = modelOver(config);
+
+            ResyncToDiskTool.DanglingResult result = ResyncToDiskTool.cleanDanglingReferences(config, model, null, true);
+
+            verify(model, never()).execute(any());
+            assertEquals("the dangling entry is still reported", 1, result.found); //$NON-NLS-1$
+            assertEquals("Catalog.Lost is still registered", 1, config.getCatalogs().size()); //$NON-NLS-1$
+            assertFalse(result.removedFromModel);
+            assertEquals(0, result.removedCount());
+            assertEquals(ResyncToDiskTool.LOCKED_DANGLING_WARNING, result.warning);
+            assertTrue(result.warning, result.warning.startsWith("The dangling references were not removed: the " //$NON-NLS-1$
+                + "configuration is under vendor support")); //$NON-NLS-1$
+            assertTrue(result.warning, result.warning.contains("Support settings")); //$NON-NLS-1$
+        }
+        finally
+        {
+            VendorSupportGuard.setServiceForTests(null);
+        }
+    }
+
+    @Test
+    public void testAnUnanswerableSupportCheckAlsoKeepsTheEntries()
+    {
+        Configuration config = configurationWithADanglingCatalog();
+        VendorSupportGuard.setServiceForTests(() -> null);
+        try
+        {
+            IBmModel model = modelOver(config);
+
+            ResyncToDiskTool.DanglingResult result = ResyncToDiskTool.cleanDanglingReferences(config, model, null, true);
+
+            verify(model, never()).execute(any());
+            assertEquals(1, result.found);
+            assertEquals("fail closed", ResyncToDiskTool.LOCKED_DANGLING_WARNING, result.warning); //$NON-NLS-1$
+        }
+        finally
+        {
+            VendorSupportGuard.setServiceForTests(null);
+        }
+    }
+
+    @Test
+    public void testAnEditableConfigurationEntersTheRemovalWrite()
+    {
+        Configuration config = configurationWithADanglingCatalog();
+        IModelEditingSupport support = mock(IModelEditingSupport.class);
+        when(support.canEdit(any(), any())).thenReturn(true);
+        VendorSupportGuard.setServiceForTests(() -> support);
+        try
+        {
+            IBmModel model = modelOver(config);
+
+            ResyncToDiskTool.DanglingResult result = ResyncToDiskTool.cleanDanglingReferences(config, model, null, true);
+
+            verify(model).execute(any());
+            assertNull(result.warning);
+        }
+        finally
+        {
+            VendorSupportGuard.setServiceForTests(null);
+        }
+    }
+
+    @Test
+    public void testAReportOnlyRunNeverAsksVendorSupport()
+    {
+        Configuration config = configurationWithADanglingCatalog();
+        IModelEditingSupport support = mock(IModelEditingSupport.class);
+        VendorSupportGuard.setServiceForTests(() -> support);
+        try
+        {
+            ResyncToDiskTool.cleanDanglingReferences(config, modelOver(config), null, false);
+
+            verifyZeroInteractions(support);
+        }
+        finally
+        {
+            VendorSupportGuard.setServiceForTests(null);
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -900,4 +1038,107 @@ public class ResyncToDiskToolTest
         assertEquals("a no-op must still revalidate, and must not wait for anything", //$NON-NLS-1$
             Collections.singletonList("revalidated"), order); //$NON-NLS-1$
     }
+
+    // ---- orphaned role rights (issue #462) -----------------------------------------------------
+
+    @Test
+    public void testOrphanRoleRightsOptInIsDeclaredAndReportedByDefault()
+    {
+        ResyncToDiskTool tool = new ResyncToDiskTool();
+        assertTrue(tool.getInputSchema().contains("\"cleanOrphanRoleRights\"")); //$NON-NLS-1$
+        String output = tool.getOutputSchema();
+        for (String key : Arrays.asList("orphanRoleRightsFound", "orphanRoleRightsUndetermined", //$NON-NLS-1$ //$NON-NLS-2$
+            "orphanRoleRightsRemovedCount", "orphanRoleRights", "orphanRlsFieldsFound", "orphanRlsFields", //$NON-NLS-1$ //$NON-NLS-2$
+            "orphanRoleRightsWarning")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        {
+            assertTrue("output schema must declare " + key, output.contains('"' + key + '"')); //$NON-NLS-1$
+        }
+        // The protocol clause lives in the always-loaded description: review first, then opt in.
+        String desc = tool.getDescription();
+        assertTrue(desc, desc.contains("cleanOrphanRoleRights=true")); //$NON-NLS-1$
+        assertTrue(desc, desc.contains("call once to review them")); //$NON-NLS-1$
+        assertTrue(tool.getGuide().contains("cleanOrphanRoleRights")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testOrphanSummarySaysNothingForACleanProject()
+    {
+        assertEquals("", ResyncToDiskTool.orphanSummary(0, 0, 0, 0, false)); //$NON-NLS-1$
+        assertEquals("", ResyncToDiskTool.orphanSummary(0, 0, 0, 0, true)); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testOrphanSummaryReportOnlyPointsAtTheOptIn()
+    {
+        String summary = ResyncToDiskTool.orphanSummary(2, 1, 0, 1, false);
+        assertTrue(summary, summary.contains("2 entry(ies) on deleted objects")); //$NON-NLS-1$
+        assertTrue(summary, summary.contains("pass cleanOrphanRoleRights=true")); //$NON-NLS-1$
+        assertTrue(summary, summary.contains("1 unresolved entry(ies) kept")); //$NON-NLS-1$
+        assertTrue(summary, summary.contains("1 RLS field reference(s)")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testOrphanSummaryClaimsARemovalOnlyWhenOneHappened()
+    {
+        assertTrue(ResyncToDiskTool.orphanSummary(2, 0, 2, 0, true).contains("removed 2 entry(ies)")); //$NON-NLS-1$
+        String failed = ResyncToDiskTool.orphanSummary(2, 0, 0, 0, true);
+        assertFalse(failed, failed.contains("removed 2")); //$NON-NLS-1$
+        assertTrue(failed, failed.contains("see orphanRoleRightsWarning")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testOrphanSummaryFromAResultWithoutTheFieldsIsEmpty()
+    {
+        JsonObject json = new JsonObject();
+        assertEquals("", ResyncToDiskTool.orphanSummaryFrom(json)); //$NON-NLS-1$
+        json.addProperty("orphanRoleRightsFound", 1); //$NON-NLS-1$
+        json.addProperty("orphanRoleRightsUndetermined", 0); //$NON-NLS-1$
+        json.addProperty("orphanRoleRightsRemovedCount", 0); //$NON-NLS-1$
+        json.addProperty("orphanRlsFieldsFound", 0); //$NON-NLS-1$
+        json.addProperty("cleanOrphanRoleRights", false); //$NON-NLS-1$
+        assertEquals(ResyncToDiskTool.orphanSummary(1, 0, 0, 0, false), ResyncToDiskTool.orphanSummaryFrom(json));
+    }
+
+    @Test
+    public void testOrphanSummaryFromCountsTheTotalNotTheCappedList()
+    {
+        // The listed array stops at 500; the summary must restate the uncapped total.
+        JsonObject json = new JsonObject();
+        json.addProperty("orphanRoleRightsFound", 0); //$NON-NLS-1$
+        json.addProperty("orphanRoleRightsUndetermined", 0); //$NON-NLS-1$
+        json.addProperty("orphanRoleRightsRemovedCount", 0); //$NON-NLS-1$
+        json.addProperty("orphanRlsFieldsFound", 750); //$NON-NLS-1$
+        JsonArray capped = new JsonArray();
+        capped.add(new JsonObject());
+        json.add("orphanRlsFields", capped); //$NON-NLS-1$
+        json.addProperty("cleanOrphanRoleRights", false); //$NON-NLS-1$
+        String summary = ResyncToDiskTool.orphanSummaryFrom(json);
+        assertTrue(summary, summary.contains("750 RLS field reference(s)")); //$NON-NLS-1$
+    }
+    @Test
+    public void testNewlyMappedModuleOwnersDetectMissingAndPresentMdoFiles() throws IOException
+    {
+        File projectRoot = Files.createTempDirectory("resync-module-owners").toFile();
+        try
+        {
+            for (String type : new String[] {"Bot", "IntegrationService", "WebSocketClient"})
+            {
+                String fqn = type + ".Проба";
+                assertEquals(Arrays.asList(fqn),
+                    ResyncToDiskTool.findMissingMdoFiles(projectRoot, Arrays.asList(fqn)));
+                touch(new File(projectRoot, "src/" + type + "s/Проба/Проба.mdo"));
+                assertTrue(ResyncToDiskTool.findMissingMdoFiles(projectRoot, Arrays.asList(fqn)).isEmpty());
+            }
+            String nested = "Subsystem.Parent.Subsystem.Child";
+            assertEquals(Arrays.asList(nested),
+                ResyncToDiskTool.findMissingMdoFiles(projectRoot, Arrays.asList(nested)));
+            touch(new File(projectRoot, "src/Subsystems/Parent/Subsystems/Child/Child.mdo"));
+            assertTrue(ResyncToDiskTool.findMissingMdoFiles(projectRoot, Arrays.asList(nested)).isEmpty());
+        }
+        finally
+        {
+            deleteRecursively(projectRoot);
+        }
+    }
+
 }

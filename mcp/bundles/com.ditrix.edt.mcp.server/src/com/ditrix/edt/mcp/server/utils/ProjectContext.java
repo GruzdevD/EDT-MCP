@@ -6,6 +6,7 @@
 
 package com.ditrix.edt.mcp.server.utils;
 
+import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashSet;
@@ -16,9 +17,11 @@ import org.eclipse.core.resources.IProjectDescription;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IPath;
+import org.eclipse.core.runtime.Path;
 
 import com._1c.g5.v8.dt.core.platform.IConfigurationProvider;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.platform.version.Version;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 
@@ -26,7 +29,7 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
  * Resolves an MCP {@code projectName} argument to a workspace {@link IProject}
  * and exposes the existence/open predicates that the project tools previously
  * inlined as
- * {@code ResourcesPlugin.getWorkspace().getRoot().getProject(name)} followed by
+ * {@code workspaceRoot().getProject(name)} followed by
  * {@code exists()} / {@code isOpen()} checks.
  * <p>
  * Besides resolution, this class owns the <b>standard "project not found"
@@ -72,14 +75,60 @@ public final class ProjectContext
     {
         IProject resolved = (projectName == null || projectName.isEmpty())
             ? null
-            : ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
+            : workspaceRoot().getProject(projectName);
         return new ProjectContext(projectName, resolved);
+    }
+
+    /**
+     * Observes a project-relative file directly, without waiting for a workspace rule.
+     *
+     * @return whether the file exists on disk, or {@code null} when it cannot be observed
+     */
+    public static Boolean fileOnDisk(String projectName, String path)
+    {
+        if (projectName == null || path == null)
+        {
+            return null;
+        }
+        try
+        {
+            ProjectContext context = of(projectName);
+            IPath location = context.exists() ? context.project().getFile(new Path(path)).getLocation() : null;
+            if (location == null)
+            {
+                return null;
+            }
+            var file = location.toFile().toPath();
+            return Files.exists(file) ? Boolean.TRUE : Files.notExists(file) ? Boolean.FALSE : null;
+        }
+        catch (RuntimeException e)
+        {
+            Activator.logError("Could not check '" + path + "' in '" + projectName + "'", e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return null;
+        }
+    }
+
+    private static org.eclipse.core.resources.IWorkspaceRoot workspaceRoot()
+    {
+        return ResourcesPlugin.getWorkspace().getRoot();
+    }
+
+    /** Returns the workspace's local location, when one is available. */
+    public static IPath workspaceLocation()
+    {
+        return workspaceRoot().getLocation();
+    }
+
+    /** Resolves a workspace-absolute file path without checking its existence. */
+    public static org.eclipse.core.resources.IFile workspaceFile(IPath path)
+    {
+        return workspaceRoot().getFile(path);
     }
 
     /**
      * Returns a handle to every project in the workspace (open or closed). This is
      * the shared replacement for an inlined
-     * {@code ResourcesPlugin.getWorkspace().getRoot().getProjects()} used by tools
+     * {@code workspaceRoot().getProjects()} used by tools
      * that scan across all projects (e.g. a workspace-wide marker scan) rather than
      * one named project. The caller applies its own {@link IProject#isOpen()} /
      * existence filtering, exactly as the inlined form required.
@@ -92,7 +141,7 @@ public final class ProjectContext
      */
     public static IProject[] allProjects()
     {
-        return ResourcesPlugin.getWorkspace().getRoot().getProjects();
+        return workspaceRoot().getProjects();
     }
 
     /**
@@ -200,6 +249,22 @@ public final class ProjectContext
         }
     }
 
+    /** Returns the platform version, or null while the EDT project is unavailable. */
+    public static Version platformVersion(IProject project)
+    {
+        if (project == null) return null;
+        var plugin = Activator.getDefault();
+        var manager = plugin == null ? null : plugin.getV8ProjectManager();
+        var v8Project = manager == null ? null : manager.getProject(project);
+        return v8Project == null ? null : v8Project.getVersion();
+    }
+
+    /** Returns this project's platform version, or null while unavailable. */
+    public Version platformVersion()
+    {
+        return platformVersion(project);
+    }
+
     /**
      * @return the resolved project handle; may be {@code null} (empty name) or a
      *         handle to a project that does not exist in the workspace
@@ -283,7 +348,19 @@ public final class ProjectContext
         return resolveRoot(true);
     }
 
+    /** Re-fetch the root in the caller's active BM read/write transaction; starts no nested read. */
+    public ConfigurationResult resolveMetadataRootInTransaction()
+    {
+        return resolveRootInBoundary(true);
+    }
+
     private ConfigurationResult resolveRoot(boolean allowNoConfiguration)
+    {
+        return ReadToolExecution.readOnHost(project, "Resolve metadata root",
+            () -> resolveRootInBoundary(allowNoConfiguration));
+    }
+
+    private ConfigurationResult resolveRootInBoundary(boolean allowNoConfiguration)
     {
         IConfigurationProvider configProvider = Activator.getDefault().getConfigurationProvider();
         if (configProvider == null)
@@ -306,8 +383,7 @@ public final class ProjectContext
         if (config == null && !(allowNoConfiguration && scope.isExternalObjects()))
         {
             return new ConfigurationResult(project, null, null,
-                ToolResult.error(noConfigurationMessage(projectName, scope.isExternalObjects()))
-                    .toJson());
+                ToolResult.error(noConfigurationMessage(projectName, project, scope)).toJson());
         }
 
         return new ConfigurationResult(project, config, scope, null);
@@ -347,6 +423,19 @@ public final class ProjectContext
 
     public static String noConfigurationMessage(String projectName, boolean externalObjects)
     {
+        return noConfigurationMessage(projectName, externalObjects, null);
+    }
+
+    /** Resolves context advice only for a configuration project, never for external objects. */
+    public static String noConfigurationMessage(String projectName, IProject project, MetadataScope scope)
+    {
+        return noConfigurationMessage(projectName, scope.isExternalObjects(),
+            scope.isExternalObjects() ? null : ProjectStateChecker.unstartedContextReasonOrNull(project));
+    }
+
+    /** Adds a context recovery sentence only to the generic configuration refusal. */
+    public static String noConfigurationMessage(String projectName, boolean externalObjects, String reasonOrNull)
+    {
         if (externalObjects)
         {
             return "Project '" + projectName + "' is an EXTERNAL-OBJECTS project with no base " //$NON-NLS-1$ //$NON-NLS-2$
@@ -355,7 +444,8 @@ public final class ProjectContext
                 + "create_metadata / modify_metadata / delete_metadata; link the project to a " //$NON-NLS-1$
                 + "configuration project to use the rest."; //$NON-NLS-1$
         }
-        return "Could not get configuration for project: " + projectName; //$NON-NLS-1$
+        String message = "Could not get configuration for project: " + projectName; //$NON-NLS-1$
+        return reasonOrNull == null ? message : message + ". " + reasonOrNull; //$NON-NLS-1$
     }
 
     /**

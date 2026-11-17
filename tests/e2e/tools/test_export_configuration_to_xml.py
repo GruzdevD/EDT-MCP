@@ -39,9 +39,10 @@ WHAT THE TOOL DOES (from ExportConfigurationToXmlTool.java):
       - CLI API plugin com._1c.g5.v8.dt.cli.api absent (Activator returns null) =>
             "IExportConfigurationFilesApi is not available. Required EDT plugin
              com._1c.g5.v8.dt.cli.api is not installed."
-      - exportProject throws (e.g. unknown/closed project — there is NO early
-        project-existence guard; it falls through to the reflective invoke) =>
-            "Export failed: <cause message>"
+      - unknown project => refused BEFORE the CLI API and before outputPath is
+        created: "Project not found: <name>. Use list_projects ..." (#683); a
+        closed project is not refused - the CLI API opens it itself
+      - exportProject throws => "Export failed: <cause message>"
       - signature drift => "CLI API mismatch: <msg>"
 
 ACTION-TOOL SAFETY (why the happy path is safe here):
@@ -133,7 +134,7 @@ def test_export_to_temp_dir_succeeds_or_clear_api_sentinel():
     """Export TestConfiguration to a fresh OS-temp directory (outside the repo).
 
     API present  -> assert the real success contract: FrontMatter status: success,
-                    the export heading, the echoed project, AND real .xml files on
+                    the export heading, the echoed project, AND Configuration.xml on
                     disk in the temp dir.
     API absent   -> assert the clear, actionable not-installed sentinel.
     Either way TestConfiguration must stay byte-for-byte unchanged.
@@ -177,8 +178,7 @@ def test_export_to_temp_dir_succeeds_or_clear_api_sentinel():
         else:
             # API present: assert the REAL success document, not just 'not error'.
             assert_ok(r, "export TestConfiguration to temp dir")
-            # FrontMatter (MARKDOWN tool -> r.text). status: success proves the tool
-            # reached the post-invoke success branch, not a half-finished path.
+            # Check both the success document and the root file already present on return.
             assert_contains(r.text, "tool: export_configuration_to_xml",
                             "FrontMatter must tag the producing tool")
             assert_contains(r.text, "status: success",
@@ -190,10 +190,17 @@ def test_export_to_temp_dir_succeeds_or_clear_api_sentinel():
                             "body must carry the export heading")
             assert_contains(r.text, "- Project: " + PROJECT,
                             "body must echo the exported project")
-            # GROUND TRUTH: the export must have written real .xml files into the
-            # temp dir. This is what fails if exportProject silently wrote nothing.
-            assert _has_xml_output(out_dir), \
-                "export reported success but wrote no .xml files under outputPath"
+            root_xml = os.path.join(out_dir, "Configuration.xml")
+            assert os.path.isfile(root_xml), \
+                "export reported success without Configuration.xml directly under outputPath"
+            # Make a pre-existing dump observably old, beyond filesystem timestamp granularity.
+            old_time_ns = 1_700_000_000_000_000_000
+            os.utime(root_xml, ns=(old_time_ns, old_time_ns))
+            before = os.stat(root_xml)
+            repeated = call("export_configuration_to_xml", args)
+            assert_ok(repeated, "re-export must rewrite a pre-existing root")
+            assert os.stat(root_xml).st_mtime_ns > before.st_mtime_ns, \
+                "success must reflect this export's write, not the pre-existing root"
         # In BOTH branches: exporting the model to an EXTERNAL dir must never mutate
         # the source project on disk.
         assert_no_diff("export writes to an external dir, never into TestConfiguration")
@@ -283,47 +290,31 @@ def test_output_path_is_a_file_errors_clearly():
 
 
 @e2e_test(tool="export_configuration_to_xml", kind="action")
-def test_nonexistent_project_errors_or_clear_api_sentinel():
-    """A well-formed call but a project that does NOT exist. There is NO early
-    project-existence guard in execute(): with the CLI API present the bad name
-    flows to exportProject(...) which throws -> 'Export failed: <cause>'. With the
-    API absent the call short-circuits at the not-installed sentinel BEFORE the
-    project is ever looked at. Both are correct; assert the observed branch.
+def test_nonexistent_project_is_named_before_cli_api():
+    """A well-formed call but a project that does NOT exist. execute() resolves the
+    project before the CLI API (#683), so the refusal is the standard value-naming
+    'Project not found: <name>. Use list_projects ...' whether or not the API is
+    installed - never the CLI API's 'Export failed: <CliApiException>', which the
+    tool logs at ERROR with a stack.
 
-    Either way the call must fail (a non-existent project must NOT silently
-    'succeed'), name something specific, and leave TestConfiguration untouched."""
+    The refusal comes before outputPath is created, so a not-yet-existing outputPath
+    stays absent, and TestConfiguration is untouched."""
     bad = "NoSuchProject_ZZZ_e2e"
-    out_dir = tempfile.mkdtemp(prefix="edt_export_e2e_")
+    parent = tempfile.mkdtemp(prefix="edt_export_e2e_")
+    out_dir = os.path.join(parent, "out")
     try:
         r = call("export_configuration_to_xml", {
             "projectName": bad,
             "outputPath": out_dir,
         })
         e = assert_error(r, "non-existent project")
-        if _API_ABSENT_MARKER in e:
-            # API not installed -> short-circuit sentinel (project never inspected).
-            assert_error_quality(
-                e,
-                names=["IExportConfigurationFilesApi"],
-                suggests=["not installed"],
-                ctx="API-unavailable sentinel is clear and actionable")
-        else:
-            # API present -> the reflective invoke threw and surfaced as 'Export failed'.
-            # AUDIT: the tool does NOT pre-validate project existence; the failure is
-            # the generic 'Export failed: <cause from the CLI API>'. The cause text is
-            # produced by EDT and is NOT guaranteed to name the bad project or point
-            # at list_projects, so we pin only the stable 'Export failed' prefix that
-            # the tool itself controls. Fix-card: add an early project-existence guard
-            # ('Project not found: <name> — use list_projects') instead of letting a
-            # bad name fall through to a generic CLI-API failure.
-            assert_error_quality(e, names=["Export failed"], suggests=[],
-                                 ctx="bad project surfaces as a generic Export failed")
-        # Whichever branch: nothing should have been exported for a bad project.
-        assert not _has_xml_output(out_dir), \
-            "a failed export (bad project) must not have written XML files"
+        assert "Export failed" not in e,             f"an unknown project must be refused before the CLI API, got: {e}"
+        assert_error_quality(e, names=[bad], suggests=["list_projects"],
+                             ctx="unknown project is named and points at list_projects")
+        assert not os.path.exists(out_dir),             "a refused export (bad project) must not create outputPath"
         assert_no_diff("a failed export must not touch the source project on disk")
     finally:
-        shutil.rmtree(out_dir, ignore_errors=True)
+        shutil.rmtree(parent, ignore_errors=True)
 
 
 @e2e_test(tool="export_configuration_to_xml", kind="action")

@@ -7,24 +7,31 @@
 package com.ditrix.edt.mcp.server;
 
 import java.io.IOException;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
+import com.ditrix.edt.mcp.server.history.McpCallHistory.CallCapture;
+import com.ditrix.edt.mcp.server.transport.ToolCallResponder;
 
 import com.sun.net.httpserver.HttpExchange;
 
-/**
- * Represents an active MCP tool call that can be interrupted by user.
- * When user sends a signal (Cancel, Retry, etc.), the response is sent immediately
- * and the HTTP exchange is closed, while the EDT operation may continue in background.
- */
+/** Selects one transport response while an interrupted EDT operation may continue in the background. */
 public class ActiveToolCall
 {
-    private final HttpExchange exchange;
+    private final ToolCallResponder responder;
     private final String toolName;
     private final Object requestId;
     private final long startTime;
     private final AtomicBoolean responded = new AtomicBoolean(false);
+    private final CallCapture historyCapture;
+    private final AtomicReference<UserSignal> userSignal = new AtomicReference<>();
+
+    /** Queues a signal only for this invocation. */
+    public void setUserSignal(UserSignal signal) { userSignal.set(signal); }
+
+    /** Consumes this invocation's signal exactly once. */
+    public UserSignal consumeUserSignal() { return userSignal.getAndSet(null); }
+
     
     /**
      * Creates a new active tool call.
@@ -35,10 +42,38 @@ public class ActiveToolCall
      */
     public ActiveToolCall(HttpExchange exchange, String toolName, Object requestId)
     {
-        this.exchange = exchange;
+        this(exchange, toolName, requestId, null);
+    }
+
+    public ActiveToolCall(HttpExchange exchange, String toolName, Object requestId, CallCapture historyCapture)
+    { this(new ToolCallResponder.Http(exchange), toolName, requestId, historyCapture); }
+
+    public ActiveToolCall(ToolCallResponder responder, String toolName, Object requestId, CallCapture historyCapture)
+    {
+        this.responder = responder;
         this.toolName = toolName;
         this.requestId = requestId;
         this.startTime = System.currentTimeMillis();
+        this.historyCapture = historyCapture;
+    }
+
+    /** Reserves the normal response against a concurrent signal before transport writes it. */
+    public synchronized boolean selectNormalResponse(String response)
+    {
+        if (responded.getAndSet(true))
+        {
+            return false;
+        }
+        recordResponse(response, false);
+        return true;
+    }
+
+    private void recordResponse(String response, boolean interrupted)
+    {
+        if (historyCapture != null)
+        {
+            historyCapture.recordResponse(response, interrupted);
+        }
     }
     
     /**
@@ -76,18 +111,12 @@ public class ActiveToolCall
      * 
      * @return true if responded
      */
-    public boolean hasResponded()
+    public synchronized boolean hasResponded()
     {
         return responded.get();
     }
     
-    /**
-     * Sends a user signal response and closes the exchange.
-     * This interrupts the MCP call and returns control to the agent.
-     * 
-     * @param signal the user signal to send
-     * @return true if response was sent successfully
-     */
+    /** Sends the signal immediately if no response has been selected, returning control to the agent. */
     public synchronized boolean sendSignalResponse(UserSignal signal)
     {
         if (responded.getAndSet(true))
@@ -100,14 +129,9 @@ public class ActiveToolCall
         {
             String jsonResponse = buildSignalResponse(signal);
             
-            exchange.getResponseHeaders().add("Content-Type", "application/json"); //$NON-NLS-1$ //$NON-NLS-2$
-            byte[] responseBytes = jsonResponse.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, responseBytes.length);
-            
-            try (OutputStream os = exchange.getResponseBody())
-            {
-                os.write(responseBytes);
-            }
+            responder.send(jsonResponse);
+
+            recordResponse(jsonResponse, true);
             
             Activator.logInfo("User signal response sent for tool: " + toolName); //$NON-NLS-1$
             return true;
@@ -119,8 +143,7 @@ public class ActiveToolCall
         }
         finally
         {
-            // Always close exchange to prevent resource leak
-            exchange.close();
+            responder.close();
         }
     }
     
@@ -140,14 +163,8 @@ public class ActiveToolCall
         
         try
         {
-            exchange.getResponseHeaders().add("Content-Type", "application/json"); //$NON-NLS-1$ //$NON-NLS-2$
-            byte[] responseBytes = response.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, responseBytes.length);
-            
-            try (OutputStream os = exchange.getResponseBody())
-            {
-                os.write(responseBytes);
-            }
+            responder.send(response);
+            recordResponse(response, false);
             return true;
         }
         catch (IOException e)
@@ -157,8 +174,7 @@ public class ActiveToolCall
         }
         finally
         {
-            // Always close exchange to prevent resource leak
-            exchange.close();
+            responder.close();
         }
     }
     

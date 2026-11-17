@@ -8,17 +8,17 @@ package com.ditrix.edt.mcp.server.history;
 
 /**
  * One immutable record of a single MCP JSON-RPC request/response exchange, as
- * captured at the transport choke point ({@code McpProtocolHandler.processRequest}).
+ * captured by the protocol handler or the interruptible transport.
  *
  * <p>Instances are value objects: every field is {@code final}, there are no
- * setters, and the only stored references are {@link String}s (themselves
- * immutable) and primitives. A record can therefore be handed to the UI reader
+ * setters, and stored references are immutable values. A record can therefore be handed to the UI reader
  * thread and to file-log consumers without any copying or synchronization.</p>
  *
  * <p>The {@code requestJson} / {@code responseJson} payloads may already have been
  * truncated (with a trailing truncation marker) by {@link McpCallHistory} to keep
  * the in-memory ring bounded; this class stores whatever text it is given verbatim
- * and never inspects or mutates it. Because a stored body may be capped, the record
+ * without mutating it. The recorder supplies the error classification before capping.
+ * Because a stored body may be capped, the record
  * ALSO carries {@link #getOriginalRequestChars()} / {@link #getOriginalResponseChars()}
  * &mdash; the true character counts of the payloads <em>before</em> truncation &mdash;
  * so the context-usage statistics measure the real size a large response contributed
@@ -56,6 +56,10 @@ public final class McpCallRecord
     /** Character count of the response payload BEFORE any truncation (0 when null). */
     private final int originalResponseChars;
 
+    private final boolean interrupted;
+    private final boolean error;
+    private final BackgroundOutcome backgroundOutcome;
+
     /**
      * Creates an immutable call record. The {@code requestJson} / {@code responseJson}
      * bodies are stored verbatim (the caller caps them for the bounded ring); the
@@ -74,6 +78,14 @@ public final class McpCallRecord
     public McpCallRecord(long timestampMs, String method, String toolName, String requestJson,
         String responseJson, long durationMs, int originalRequestChars, int originalResponseChars)
     {
+        this(timestampMs, method, toolName, requestJson, responseJson, durationMs,
+            originalRequestChars, originalResponseChars, false, StatsAggregator.isErrorResponse(responseJson), null);
+    }
+
+    McpCallRecord(long timestampMs, String method, String toolName, String requestJson,
+        String responseJson, long durationMs, int originalRequestChars, int originalResponseChars,
+        boolean interrupted, boolean error, BackgroundOutcome backgroundOutcome)
+    {
         this.timestampMs = timestampMs;
         this.method = method;
         this.toolName = toolName;
@@ -82,6 +94,31 @@ public final class McpCallRecord
         this.durationMs = durationMs;
         this.originalRequestChars = originalRequestChars;
         this.originalResponseChars = originalResponseChars;
+        this.interrupted = interrupted;
+        this.error = interrupted || error;
+        this.backgroundOutcome = backgroundOutcome;
+    }
+
+    public boolean isInterrupted()
+    {
+        return interrupted;
+    }
+
+    /** Whether the delivered response failed, classified before its body was capped. */
+    public boolean isError()
+    {
+        return error;
+    }
+
+    public BackgroundOutcome getBackgroundOutcome()
+    {
+        return backgroundOutcome;
+    }
+
+    McpCallRecord withBackgroundOutcome(BackgroundOutcome outcome)
+    {
+        return new McpCallRecord(timestampMs, method, toolName, requestJson, responseJson,
+            durationMs, originalRequestChars, originalResponseChars, interrupted, error, outcome);
     }
 
     /**

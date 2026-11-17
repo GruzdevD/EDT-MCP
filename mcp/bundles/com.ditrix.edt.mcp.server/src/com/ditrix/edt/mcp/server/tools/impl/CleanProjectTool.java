@@ -7,15 +7,27 @@
 package com.ditrix.edt.mcp.server.tools.impl;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
+import java.util.function.Function;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.resources.IncrementalProjectBuilder;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
 
+import com._1c.g5.v8.dt.core.lifecycle.ProjectStartType;
+import com._1c.g5.v8.dt.core.lifecycle.WorkspaceProjectStartRequest;
+import com._1c.g5.v8.dt.core.platform.IWorkspaceOrchestrator;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com.ditrix.edt.mcp.server.Activator;
@@ -30,6 +42,7 @@ import com.ditrix.edt.mcp.server.utils.LifecycleWaiter;
 import com.ditrix.edt.mcp.server.utils.LifecycleWaiter.ProjectRestartWaiter;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
+import com.ditrix.edt.mcp.server.utils.RestartJobFailureSignal;
 
 /**
  * Tool to clean EDT project and trigger full revalidation.
@@ -42,6 +55,9 @@ public class CleanProjectTool implements IMcpTool
     /** Default timeout for waiting project lifecycle restart (3 minutes) */
     private static final long DEFAULT_LIFECYCLE_TIMEOUT_MS = 3L * 60 * 1000;
 
+    /** Shared by all calls; held by the recovery worker until its platform work actually ends. */
+    private static final ReentrantLock RECOVERY_LOCK = new ReentrantLock();
+
     /** Input key: bound on the clean-build phase, in seconds. */
     static final String KEY_TIMEOUT = "timeout"; //$NON-NLS-1$
 
@@ -52,6 +68,20 @@ public class CleanProjectTool implements IMcpTool
      * Raise it (parameter or preference) for very large configurations.
      */
     static final int DEFAULT_CLEAN_TIMEOUT_SECONDS = 120;
+
+    /**
+     * How long to wait for a DT project to (re)appear before refusing a named project as one EDT
+     * never started.
+     *
+     * <p>{@code DtProjectManager} REMOVES its entry while a project context is being disposed, so
+     * a project whose context is restarting - the state {@code clean_project} itself leaves a
+     * project in, and therefore the state a second call lands on - answers {@code null} for a
+     * moment. Refusing on that instant would turn a transient into a hard "not an EDT project".
+     */
+    private static final long DT_PROJECT_SETTLE_TIMEOUT_MS = 10_000;
+
+    /** How often the settle re-asks {@code IDtProjectManager}. */
+    private static final long DT_PROJECT_SETTLE_POLL_MS = 250;
 
     /** Smallest accepted clean-build bound, in seconds. */
     private static final int MIN_CLEAN_TIMEOUT_SECONDS = 10;
@@ -95,6 +125,10 @@ public class CleanProjectTool implements IMcpTool
             .booleanProperty("success", "Whether the operation succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
             .integerProperty("projectsCleaned", "Number of projects that were cleaned") //$NON-NLS-1$ //$NON-NLS-2$
             .stringArrayProperty("projects", "Names of the projects that were cleaned") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringArrayProperty("notRestarted", "Projects still stopped after a failed EDT restart and recovery.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringArrayProperty("recovered", "Dependent projects started after this call's recovery attempt following an incomplete EDT restart.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringArrayProperty("dependentsStillBuilding", "Dependent projects restarted by this clean whose derived data had not settled when the wait ended.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("restartFailure", "Platform restart status and exception messages.") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("message", "Human-readable completion message") //$NON-NLS-1$ //$NON-NLS-2$
             .build();
     }
@@ -180,65 +214,117 @@ public class CleanProjectTool implements IMcpTool
      */
     public static String cleanProject(String projectName, long cleanTimeoutMs)
     {
-        boolean cleanCommitted = false;
         try
         {
-            IDtProjectManager dtProjectManager = Activator.getDefault().getDtProjectManager();
-
-            // Resolve the set of projects to clean (read-only: validates state and
-            // builds the work lists; performs no clean build itself).
-            CleanCollection collection = collectProjectsToClean(projectName, dtProjectManager);
+            IDtProjectManager manager = Activator.getDefault().getDtProjectManager();
+            CleanCollection collection = collectProjectsToClean(projectName, manager);
             if (collection.error != null)
             {
                 return collection.error;
             }
-            List<ProjectCleanInfo> projectsToClean = collection.projectsToClean;
-            List<String> projectNamesList = collection.projectNamesList;
+            return runCleanLifecycle(collection, cleanTimeoutMs, DEFAULT_LIFECYCLE_TIMEOUT_MS,
+                (info, monitor) -> cleanSingleProject(info.project, monitor),
+                new RestartSupport(manager, Activator.getDefault().getWorkspaceOrchestrator()));
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error during project clean", e); //$NON-NLS-1$
+            return ToolResult.error(e.getMessage()).toJson();
+        }
+    }
 
-            // Phase 1: Register lifecycle listeners BEFORE triggering clean builds
-            // This avoids race condition where STOPPED event could be missed
-            List<ProjectRestartWaiter> waiters = registerRestartWaiters(projectsToClean);
-
+    /** Runs the production clean phases with injectable platform operations for headless tests. */
+    static String runCleanLifecycle(CleanCollection collection, long cleanTimeoutMs, long lifecycleTimeoutMs,
+        ICleanAction action, RestartSupport support)
+    {
+        boolean cleanCommitted = false;
+        long restartDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(lifecycleTimeoutMs);
+        try (RestartJobFailureSignal failure = support.watchFailures())
+        {
+            RestartScope scope = registerRestartWaiters(collection.projectsToClean,
+                support::dependents, support::prepare);
             try
             {
-                // Phase 2: Trigger clean build for all projects, under a hard deadline. Without it
-                // a single wedged platform call holds the MCP request open forever (#349): the
-                // caller eventually dies on its own transport timeout with no answer, no cleanup.
-                String cleanError = runCleanPhase(projectsToClean, cleanTimeoutMs,
-                    (info, monitor) -> cleanSingleProject(info.project, monitor));
+                String cleanError = runCleanPhase(collection.projectsToClean, cleanTimeoutMs, action);
                 if (cleanError != null)
                 {
                     return cleanError;
                 }
-                cleanCommitted = !projectsToClean.isEmpty();
+                cleanCommitted = !collection.projectsToClean.isEmpty();
 
-                // Phase 3: Wait for lifecycle restarts (STOPPED -> STARTED)
-                for (ProjectRestartWaiter waiter : waiters)
+                for (RestartProject project : scope.all())
                 {
-                    waiter.await(DEFAULT_LIFECYCLE_TIMEOUT_MS);
+                    if (project.waiter != null)
+                    {
+                        project.waiter.await(lifecycleTimeoutMs, failure);
+                    }
                 }
 
-                // Phase 4: Wait for derived data computations
-                for (ProjectCleanInfo info : projectsToClean)
+                // A failure can abort all project waiters while a different restart still owns them.
+                // Drain those jobs within the SAME restart allowance before deciding what is stranded.
+                // A failure can arrive during settlement, so drain even before one has been observed.
+                boolean restartJobsFinished = LifecycleWaiter.waitForRestartJobs(failure,
+                    Math.max(0L, TimeUnit.NANOSECONDS.toMillis(restartDeadline - System.nanoTime())));
+
+                // Always ask the state as well as observing events (#706). Only an observed job
+                // failure changes the verdict; a plain wait expiry remains logged-only (#349).
+                List<RestartProject> stranded = notStarted(scope.all(), support);
+                if (failure.hasFailed() && !stranded.isEmpty())
                 {
-                    BuildUtils.waitForDerivedData(info.project);
+                    List<ProjectCleanInfo> recoverable = new ArrayList<>();
+                    for (RestartProject sibling : scope.siblings)
+                    {
+                        IProject project = sibling.info.project;
+                        if (restartJobsFinished && stranded.contains(sibling)
+                            && project != null && project.exists() && project.isOpen())
+                        {
+                            recoverable.add(sibling.info);
+                        }
+                    }
+                    String recoveryNote;
+                    if (restartJobsFinished)
+                    {
+                        recoveryNote = recover(recoverable, cleanTimeoutMs, support, failure);
+                    }
+                    else
+                    {
+                        recoveryNote = " Recovery was not attempted because EDT restart jobs are still pending " //$NON-NLS-1$
+                            + "after the restart wait allowance. Check list_projects before retrying."; //$NON-NLS-1$
+                        Activator.logWarning(recoveryNote);
+                    }
+                    // Never wait for derived data on a target that failed to start.
+                    for (RestartProject target : scope.targets)
+                    {
+                        if (target.info.dtProject == null || support.isStarted(target.info.dtProject))
+                        {
+                            support.awaitDerivedData(target.info.project);
+                        }
+                    }
+                    List<String> dependentsStillBuilding = awaitStartedDependents(scope, support);
+                    List<RestartProject> stillStopped = notStarted(scope.all(), support);
+                    List<String> recovered = new ArrayList<>();
+                    for (ProjectCleanInfo candidate : recoverable)
+                    {
+                        if (support.isStarted(candidate.dtProject))
+                        {
+                            recovered.add(candidate.name);
+                        }
+                    }
+                    return restartResult(collection, failure, names(stillStopped), recovered,
+                        recoveryNote, dependentsStillBuilding);
                 }
 
-                return ToolResult.success()
-                    .put("projectsCleaned", projectNamesList.size()) //$NON-NLS-1$
-                    .put("projects", projectNamesList) //$NON-NLS-1$
-                    .put("message", "Clean and revalidation completed.") //$NON-NLS-1$ //$NON-NLS-2$
-                    .toJson();
+                for (ProjectCleanInfo info : collection.projectsToClean)
+                {
+                    support.awaitDerivedData(info.project);
+                }
+                List<String> dependentsStillBuilding = awaitStartedDependents(scope, support);
+                return cleanCompletedResult(collection.projectNamesList, collection.skippedUnstarted,
+                    dependentsStillBuilding);
             }
             finally
             {
-                // A path that never reaches await() (clean timeout, clean failure, an early return
-                // added later) would otherwise leave the lifecycle listener registered for the rest
-                // of the session. cleanup() is idempotent, so the normal await() path is unaffected.
-                for (ProjectRestartWaiter waiter : waiters)
-                {
-                    waiter.cleanup();
-                }
+                scope.cleanup();
             }
         }
         catch (Exception e)
@@ -248,7 +334,184 @@ public class CleanProjectTool implements IMcpTool
                 : ToolResult.error(e.getMessage())).toJson();
         }
     }
-    
+
+    /** Waits only for dependents that actually restarted; targets retain the #349 verdict policy. */
+    private static List<String> awaitStartedDependents(RestartScope scope, RestartSupport support)
+    {
+        List<String> dependentsStillBuilding = new ArrayList<>();
+        for (RestartProject sibling : scope.siblings)
+        {
+            if (sibling.info.dtProject != null && support.isStarted(sibling.info.dtProject))
+            {
+                support.awaitDerivedData(sibling.info.project);
+                ProjectStateChecker.ProjectStateResult state = support.stateOf(sibling.info.project);
+                if (!state.isReady())
+                {
+                    dependentsStillBuilding.add(sibling.info.name + " (" + state.getStateValue() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+        }
+        return dependentsStillBuilding;
+    }
+
+    private static String dependentSettleNote(List<String> dependentsStillBuilding)
+    {
+        if (dependentsStillBuilding.isEmpty())
+        {
+            return ""; //$NON-NLS-1$
+        }
+        return " Dependent project(s) restarted by this clean had not settled when the wait ended: " //$NON-NLS-1$
+            + String.join(", ", dependentsStillBuilding) //$NON-NLS-1$
+            + ". Wait for list_projects to report them 'ready' before relying on their model."; //$NON-NLS-1$
+    }
+
+    /** ONE bounded recovery pass; a broken sibling must not prevent the others being started. */
+    private static String recover(List<ProjectCleanInfo> projects, long timeoutMs, RestartSupport support,
+        RestartJobFailureSignal failure)
+    {
+        if (projects.isEmpty())
+        {
+            return ""; //$NON-NLS-1$
+        }
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        AtomicReference<String> admissionNote = new AtomicReference<>(""); //$NON-NLS-1$
+        BoundedJob.Result result = BoundedJob.run(NAME + ": recover dependent projects", timeoutMs, //$NON-NLS-1$
+            monitor -> admissionNote.set(recoverWithAdmission(projects, deadline, monitor, support, failure)));
+        if (result.getOutcome() == BoundedJob.Outcome.COMPLETED && result.getFailure() == null)
+        {
+            if (!admissionNote.get().isEmpty())
+            {
+                Activator.logWarning(admissionNote.get());
+            }
+            return admissionNote.get();
+        }
+        boolean mayStillRun = result.getOutcome() == BoundedJob.Outcome.TIMED_OUT
+            || result.getOutcome() == BoundedJob.Outcome.INTERRUPTED;
+        String note = " Recovery attempt ended with " + result.getOutcome() //$NON-NLS-1$
+            + (result.getFailure() == null ? "" : ": " + result.getFailure().getMessage()) //$NON-NLS-1$ //$NON-NLS-2$
+            + (mayStillRun ? "; it may still be running in EDT." : ".") //$NON-NLS-1$ //$NON-NLS-2$
+            + " Check list_projects before retrying."; //$NON-NLS-1$
+        Activator.logWarning(note);
+        return note;
+    }
+
+    /**
+     * Admit each single-project start using live state under our process-wide recovery lock.
+     * EDT's restart jobs have no scheduling rule to share with recovery, so a platform restart
+     * can still be scheduled after the final pending-job check.
+     */
+    private static String recoverWithAdmission(List<ProjectCleanInfo> projects, long deadline,
+        IProgressMonitor monitor, RestartSupport support, RestartJobFailureSignal failure) throws InterruptedException
+    {
+        if (!RECOVERY_LOCK.tryLock(Math.max(0L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS))
+        {
+            return " Recovery was not attempted because another clean_project recovery is still running. " //$NON-NLS-1$
+                + "Check list_projects before retrying."; //$NON-NLS-1$
+        }
+        try
+        {
+            for (ProjectCleanInfo info : projects)
+            {
+                if (monitor.isCanceled() || System.nanoTime() >= deadline)
+                {
+                    break;
+                }
+                IProject project = info.project;
+                // Both the candidate snapshot and the earlier restart-job drain can be stale.
+                if (project == null || !project.exists() || !project.isOpen() || support.isStarted(info.dtProject))
+                {
+                    continue;
+                }
+                if (failure.hasPendingRestartJobs())
+                {
+                    return " Recovery was not attempted for remaining dependent projects because EDT restart " //$NON-NLS-1$
+                        + "jobs became pending before a recovery start. Check list_projects before retrying."; //$NON-NLS-1$
+                }
+                if (monitor.isCanceled() || System.nanoTime() >= deadline)
+                {
+                    break;
+                }
+                for (IDtProject issued : support.recover(Collections.singletonList(info), monitor))
+                {
+                    long remaining = Math.max(0L, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()));
+                    if (!support.isStarted(issued))
+                    {
+                        support.awaitStarted(issued, remaining);
+                    }
+                }
+            }
+            return ""; //$NON-NLS-1$
+        }
+        finally
+        {
+            // A timed-out caller cannot release a lock owned by work still running in EDT.
+            RECOVERY_LOCK.unlock();
+        }
+    }
+
+    private static List<RestartProject> notStarted(List<RestartProject> projects, RestartSupport support)
+    {
+        List<RestartProject> stopped = new ArrayList<>();
+        for (RestartProject project : projects)
+        {
+            if (project.info.dtProject != null && !support.isStarted(project.info.dtProject))
+            {
+                stopped.add(project);
+            }
+        }
+        return stopped;
+    }
+
+    private static List<String> names(List<RestartProject> projects)
+    {
+        List<String> names = new ArrayList<>();
+        for (RestartProject project : projects)
+        {
+            names.add(project.info.name);
+        }
+        return names;
+    }
+
+    private static String restartResult(CleanCollection collection, RestartJobFailureSignal failure,
+        List<String> notRestarted,
+        List<String> recovered, String recoveryNote, List<String> dependentsStillBuilding)
+    {
+        String outcome = failure.getSeverity() == IStatus.CANCEL ? "was cancelled" //$NON-NLS-1$
+            : failure.getSeverity() == IStatus.WARNING || failure.getSeverity() == IStatus.INFO
+                ? "did not complete" : "failed"; //$NON-NLS-1$ //$NON-NLS-2$
+        String message = "Clean build completed for " + String.join(", ", collection.projectNamesList) //$NON-NLS-1$ //$NON-NLS-2$
+            + ", but EDT's 'Project services restart' " + outcome + ": " + failure.getFailure() //$NON-NLS-1$ //$NON-NLS-2$
+            + ". Back after this call's recovery attempt: " //$NON-NLS-1$
+            + (recovered.isEmpty() ? "none" : String.join(", ", recovered)) + ". "; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (!collection.skippedUnstarted.isEmpty())
+        {
+            message += "Skipped projects EDT has not started (no DtProject): " //$NON-NLS-1$
+                + String.join(", ", collection.skippedUnstarted) + ". "; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        recoveryNote += dependentSettleNote(dependentsStillBuilding);
+        ToolResult result;
+        if (notRestarted.isEmpty())
+        {
+            message += "All projects in the restart scope are started again."; //$NON-NLS-1$
+            result = ToolResult.success().put("message", message + recoveryNote); //$NON-NLS-1$
+        }
+        else
+        {
+            message += "Still not started: " + String.join(", ", notRestarted) //$NON-NLS-1$ //$NON-NLS-2$
+                + " - EDT stopped these projects during the restart and they are not started at the final state check. " //$NON-NLS-1$
+                + "Close and reopen existing projects in EDT, or delete_project an existing broken project " //$NON-NLS-1$
+                + "and clean again; recreate or re-import deleted projects. " //$NON-NLS-1$
+                + "Check list_projects for current workspace project states."; //$NON-NLS-1$
+            result = ToolResult.errorAfterMutation(message + recoveryNote).put("notRestarted", notRestarted); //$NON-NLS-1$
+        }
+        return result.put("projectsCleaned", collection.projectNamesList.size()) //$NON-NLS-1$
+            .put("projects", collection.projectNamesList) //$NON-NLS-1$
+            .put("recovered", recovered) //$NON-NLS-1$
+            .put("dependentsStillBuilding", dependentsStillBuilding) //$NON-NLS-1$
+            .put("restartFailure", failure.getFailure()) //$NON-NLS-1$
+            .toJson();
+    }
+
     /**
      * Resolves the projects to clean (read-only): for a named project it validates
      * existence/open state, otherwise it collects every open EDT project. Builds the
@@ -291,25 +554,159 @@ public class CleanProjectTool implements IMcpTool
         CleanCollection collection)
     {
         ProjectContext ctx = ProjectContext.of(projectName);
-        if (!ctx.exists())
+        collectResolvedNamedProject(projectName, ctx.project(), ctx.exists(), ctx.isOpen(),
+            dtProjectManager, platformSettle(dtProjectManager), collection);
+    }
+
+    /**
+     * Validates and records one RESOLVED named project, or refuses it.
+     *
+     * <p>Split from {@link ProjectContext#of} above so every verdict below it - closed, missing,
+     * un-started, cleanable - is exercisable headless. Only the three lines that turn a NAME into
+     * a handle are outside this seam.
+     *
+     * @param projectName      the requested project name (non-empty)
+     * @param project          the resolved project handle (may be {@code null})
+     * @param exists           whether the workspace holds it
+     * @param isOpen           whether it is open
+     * @param dtProjectManager the DT project manager (may be {@code null})
+     * @param settle           waits out a context that is restarting before a refusal
+     * @param collection       the accumulator to populate (mutated)
+     */
+    static void collectResolvedNamedProject(String projectName, IProject project, boolean exists,
+        boolean isOpen, IDtProjectManager dtProjectManager, IDtProjectSettle settle,
+        CleanCollection collection)
+    {
+        if (!exists)
         {
             collection.error = ToolResult.error(ProjectContext.notFoundMessage(projectName)).toJson();
             return;
         }
 
-        if (!ctx.isOpen())
+        if (!isOpen)
         {
             collection.error = ToolResult.error("Project is closed: " + projectName).toJson(); //$NON-NLS-1$
             return;
         }
 
-        IProject project = ctx.project();
-
         IDtProject dtProject = dtProjectManager != null ?
             dtProjectManager.getDtProject(project) : null;
 
-        collection.projectsToClean.add(new ProjectCleanInfo(project, dtProject, projectName));
+        collectNamedObservation(projectName, project, dtProject, dtProjectManager != null,
+            ProjectStateChecker.hasBmModelProjectNature(project), settle, collection);
+    }
+
+    /**
+     * Records one RESOLVED named project into {@code collection}, or refuses it because EDT never
+     * started it.
+     *
+     * @param projectName      the requested project name (non-empty)
+     * @param project          the resolved project handle
+     * @param dtProject        the DT project EDT reports for it, or {@code null}
+     * @param managerAvailable whether {@code IDtProjectManager} answered at all
+     * @param hasV8Nature      whether the project carries a BM-model nature ({@code null} when the
+     *                         natures could not be read)
+     * @param settle           waits out a context that is restarting before a refusal
+     * @param collection       the accumulator to populate (mutated)
+     */
+    static void collectNamedObservation(String projectName, IProject project, IDtProject dtProject,
+        boolean managerAvailable, Boolean hasV8Nature, IDtProjectSettle settle,
+        CleanCollection collection)
+    {
+        IDtProject resolved = dtProject;
+        if (resolved == null && managerAvailable && Boolean.TRUE.equals(hasV8Nature))
+        {
+            // Asked again over a short window before refusing: a context being disposed and
+            // restarted has no DT project for a moment, and that transient is not the permanent
+            // "EDT never started this project" the refusal below describes. The settle is paid
+            // ONLY on the path that would otherwise refuse - so gated on the same three facts as
+            // the refusal itself: a plain Eclipse project, or one whose natures could not be
+            // read, is never refused and must not pay ten seconds for a verdict it cannot get.
+            resolved = settle.awaitDtProject(project);
+        }
+
+        String refusal = unstartedProjectRefusalOrNull(projectName, managerAvailable,
+            resolved != null, hasV8Nature);
+        if (refusal != null)
+        {
+            collection.error = ToolResult.error(refusal).toJson();
+            return;
+        }
+
+        collection.projectsToClean.add(new ProjectCleanInfo(project, resolved, projectName));
         collection.projectNamesList.add(projectName);
+    }
+
+    /**
+     * The production settle: re-asks {@code IDtProjectManager} until it answers or the bound
+     * elapses.
+     *
+     * @param dtProjectManager the DT project manager (may be {@code null})
+     * @return the settle to use
+     */
+    private static IDtProjectSettle platformSettle(IDtProjectManager dtProjectManager)
+    {
+        return project -> {
+            if (dtProjectManager == null || project == null)
+            {
+                return null;
+            }
+            long deadline = System.currentTimeMillis() + DT_PROJECT_SETTLE_TIMEOUT_MS;
+            while (System.currentTimeMillis() < deadline)
+            {
+                try
+                {
+                    Thread.sleep(DT_PROJECT_SETTLE_POLL_MS);
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+                IDtProject dtProject = dtProjectManager.getDtProject(project);
+                if (dtProject != null)
+                {
+                    return dtProject;
+                }
+            }
+            return null;
+        };
+    }
+
+    /**
+     * The refusal for a project EDT never started, or {@code null} when the clean may proceed.
+     *
+     * <p>A clean of such a project does refresh its files and schedule an Eclipse CLEAN_BUILD, but
+     * both the lifecycle-restart wait and the derived-data wait are SKIPPED - not exhausted,
+     * skipped, because the object they wait on does not exist - so "Clean and revalidation
+     * completed" would describe work that never happened (issue #647). The sibling tools already
+     * refuse on exactly this predicate ({@code revalidate_objects},
+     * {@code translate_configuration}).
+     *
+     * <p>Refused only when all three hold: the manager ANSWERED (a manager we could not ask is not
+     * evidence of anything), it reported no DT project, and the project carries a BM-model nature
+     * (a plain Eclipse project never had a DT project and stays out of scope exactly as before).
+     *
+     * @param projectName      the project the caller named
+     * @param managerAvailable whether {@code IDtProjectManager} answered at all
+     * @param dtProjectPresent whether it reported a DT project
+     * @param hasV8Nature      whether the project carries a BM-model nature ({@code null} when the
+     *                         natures could not be read)
+     * @return the refusal text, or {@code null} when the clean may proceed
+     */
+    static String unstartedProjectRefusalOrNull(String projectName, boolean managerAvailable,
+        boolean dtProjectPresent, Boolean hasV8Nature)
+    {
+        if (!ProjectStateChecker.isUnstartedEdtProject(managerAvailable, dtProjectPresent, hasV8Nature))
+        {
+            return null;
+        }
+        return "Not an EDT project: " + projectName //$NON-NLS-1$
+            + ". EDT has not started this project right now (no DtProject), so there is nothing " //$NON-NLS-1$
+            + "to rebuild " //$NON-NLS-1$
+            + "and a clean would report success over work that never happened. If it was just " //$NON-NLS-1$
+            + "imported, wait for list_projects to report it 'ready'; otherwise close and reopen " //$NON-NLS-1$
+            + "the project in EDT, or import it again."; //$NON-NLS-1$
     }
 
     /**
@@ -321,6 +718,20 @@ public class CleanProjectTool implements IMcpTool
      * @param collection        the accumulator to populate (mutated)
      */
     private static void collectAllEdtProjects(IDtProjectManager dtProjectManager, CleanCollection collection)
+    {
+        collectAllEdtProjects(dtProjectManager, collection, ProjectContext::allProjects);
+    }
+
+    /**
+     * The "clean all" collection with the workspace enumeration supplied rather than read, so the
+     * skipped-project scan is exercisable headless.
+     *
+     * @param dtProjectManager   the DT project manager (may be {@code null})
+     * @param collection         the accumulator to populate (mutated)
+     * @param workspaceProjects  every project in the workspace, open or closed
+     */
+    static void collectAllEdtProjects(IDtProjectManager dtProjectManager, CleanCollection collection,
+        Supplier<IProject[]> workspaceProjects)
     {
         if (dtProjectManager == null)
         {
@@ -335,32 +746,267 @@ public class CleanProjectTool implements IMcpTool
                 collection.projectNamesList.add(project.getName());
             }
         }
+
+        // The enumeration above is over DT projects, so an EDT project EDT never started is not in
+        // it at all - and 'clean all' used to answer "completed" without ever mentioning it. Name
+        // the ones it skipped instead of leaving them out of the account (issue #647).
+        List<String> openV8Projects = new ArrayList<>();
+        for (IProject project : workspaceProjects.get())
+        {
+            if (project != null && project.isOpen()
+                && Boolean.TRUE.equals(ProjectStateChecker.hasBmModelProjectNature(project)))
+            {
+                openV8Projects.add(project.getName());
+            }
+        }
+        collection.skippedUnstarted.addAll(
+            unstartedProjectNames(collection.projectNamesList, openV8Projects));
     }
 
     /**
-     * Phase 1 helper: registers a lifecycle restart listener for every project that has
-     * a DT project, BEFORE any clean build is triggered, so the STOPPED event cannot be
-     * missed. Returns the waiters to {@code await} after the clean builds are scheduled.
+     * The open BM-model projects EDT has NOT started: present in the workspace, absent from the
+     * DT-project enumeration the clean-all path works from.
      *
-     * @param projectsToClean the projects being cleaned
-     * @return the registered restart waiters (one per DT project that produced a waiter)
+     * <p>Clean-all does not settle the way the named path does, so a project whose context is
+     * mid-restart at the instant of the scan is listed as skipped although it would have answered
+     * a moment later; that is accepted, because the listing is a report and not a refusal, and
+     * the project can be cleaned by name once it has settled.
+     *
+     * @param startedProjectNames the names EDT reports a DT project for (the clean work list)
+     * @param openV8ProjectNames  the names of every OPEN workspace project with a BM-model nature
+     * @return the names to report as skipped, in workspace order (never {@code null})
      */
-    private static List<ProjectRestartWaiter> registerRestartWaiters(
-        List<ProjectCleanInfo> projectsToClean)
+    static List<String> unstartedProjectNames(Collection<String> startedProjectNames,
+        Collection<String> openV8ProjectNames)
     {
-        List<ProjectRestartWaiter> waiters = new ArrayList<>();
-        for (ProjectCleanInfo info : projectsToClean)
+        List<String> skipped = new ArrayList<>();
+        for (String name : openV8ProjectNames)
+        {
+            if (!startedProjectNames.contains(name))
+            {
+                skipped.add(name);
+            }
+        }
+        return skipped;
+    }
+
+    /**
+     * Convenience overload of {@link #cleanCompletedResult(List, List, List)} for a clean whose
+     * restarted dependents all settled (an empty {@code dependentsStillBuilding}).
+     *
+     * @param cleanedProjects  the projects the clean phases ran for
+     * @param skippedUnstarted the open BM-model projects skipped because EDT never started them
+     * @return the success JSON
+     */
+    static String cleanCompletedResult(List<String> cleanedProjects, List<String> skippedUnstarted)
+    {
+        return cleanCompletedResult(cleanedProjects, skippedUnstarted, Collections.emptyList());
+    }
+
+    /**
+     * Builds the completion payload.
+     *
+     * <p>{@code projectsCleaned} counts the projects that were actually cleaned, and nothing else:
+     * a project EDT never started is named in the {@code message} as skipped rather than counted,
+     * because counting it would restate the very claim issue #647 is about.
+     *
+     * <p>{@code dependentsStillBuilding} is always present: an empty list says every restarted
+     * dependent settled, a non-empty one names each unsettled dependent with its state and adds the
+     * matching sentence to the {@code message}. It does not change the success verdict (#349).
+     *
+     * @param cleanedProjects         the projects the clean phases ran for
+     * @param skippedUnstarted        the open BM-model projects skipped because EDT never started them
+     * @param dependentsStillBuilding the restarted dependents that had not settled, as
+     *     {@code "Name (state)"}
+     * @return the success JSON
+     */
+    static String cleanCompletedResult(List<String> cleanedProjects, List<String> skippedUnstarted,
+        List<String> dependentsStillBuilding)
+    {
+        StringBuilder message = new StringBuilder("Clean and revalidation completed."); //$NON-NLS-1$
+        if (!skippedUnstarted.isEmpty())
+        {
+            message.append(" Skipped ").append(skippedUnstarted.size()) //$NON-NLS-1$
+                .append(skippedUnstarted.size() == 1 ? " project that EDT has not started " //$NON-NLS-1$
+                    : " projects that EDT has not started ") //$NON-NLS-1$
+                .append("(no DtProject), so nothing was rebuilt for them: ") //$NON-NLS-1$
+                .append(String.join(", ", skippedUnstarted)) //$NON-NLS-1$
+                .append(". Wait for list_projects to report them 'ready', or close and reopen " //$NON-NLS-1$
+                    + "them in EDT."); //$NON-NLS-1$
+        }
+        message.append(dependentSettleNote(dependentsStillBuilding));
+        return ToolResult.success()
+            .put("projectsCleaned", cleanedProjects.size()) //$NON-NLS-1$
+            .put("projects", cleanedProjects) //$NON-NLS-1$
+            .put("dependentsStillBuilding", dependentsStillBuilding) //$NON-NLS-1$
+            .put("message", message.toString()) //$NON-NLS-1$
+            .toJson();
+    }
+
+    /** Captures the same direct-dependent scope EDT will stop, before any clean build runs. */
+    static RestartScope registerRestartWaiters(List<ProjectCleanInfo> projects,
+        Function<IDtProject, Collection<IDtProject>> restartScope,
+        Function<IDtProject, ProjectRestartWaiter> prepare)
+    {
+        RestartScope scope = new RestartScope();
+        Map<String, ProjectCleanInfo> targets = new LinkedHashMap<>();
+        Map<String, ProjectCleanInfo> siblings = new LinkedHashMap<>();
+        for (ProjectCleanInfo info : projects)
+        {
+            targets.putIfAbsent(info.name, info);
+        }
+        for (ProjectCleanInfo info : targets.values())
         {
             if (info.dtProject != null)
             {
-                ProjectRestartWaiter waiter = LifecycleWaiter.prepareForRestart(info.dtProject);
-                if (waiter != null)
+                for (IDtProject dependent : restartScope.apply(info.dtProject))
                 {
-                    waiters.add(waiter);
+                    if (!targets.containsKey(dependent.getName()))
+                    {
+                        siblings.putIfAbsent(dependent.getName(), new ProjectCleanInfo(
+                            dependent.getWorkspaceProject(), dependent, dependent.getName()));
+                    }
                 }
             }
         }
-        return waiters;
+        try
+        {
+            for (ProjectCleanInfo info : targets.values())
+            {
+                scope.targets.add(new RestartProject(info, info.dtProject == null ? null : prepare.apply(info.dtProject)));
+            }
+            for (ProjectCleanInfo info : siblings.values())
+            {
+                scope.siblings.add(new RestartProject(info, prepare.apply(info.dtProject)));
+            }
+            return scope;
+        }
+        catch (RuntimeException e)
+        {
+            scope.cleanup();
+            throw e;
+        }
+    }
+
+    static final class RestartProject
+    {
+        final ProjectCleanInfo info;
+        final ProjectRestartWaiter waiter;
+
+        RestartProject(ProjectCleanInfo info, ProjectRestartWaiter waiter)
+        {
+            this.info = info;
+            this.waiter = waiter;
+        }
+    }
+
+    static final class RestartScope
+    {
+        final List<RestartProject> targets = new ArrayList<>();
+        final List<RestartProject> siblings = new ArrayList<>();
+
+        List<RestartProject> all()
+        {
+            List<RestartProject> all = new ArrayList<>(targets);
+            all.addAll(siblings);
+            return all;
+        }
+
+        void cleanup()
+        {
+            for (RestartProject project : all())
+            {
+                if (project.waiter != null)
+                {
+                    project.waiter.cleanup();
+                }
+            }
+        }
+    }
+
+    /** Platform adapter: the same operations are substituted by the lifecycle integration tests. */
+    static class RestartSupport
+    {
+        private final IDtProjectManager manager;
+        private final IWorkspaceOrchestrator workspace;
+
+        RestartSupport(IDtProjectManager manager, IWorkspaceOrchestrator workspace)
+        {
+            this.manager = manager;
+            this.workspace = workspace;
+        }
+
+        Collection<IDtProject> dependents(IDtProject project)
+        {
+            return manager == null ? Collections.emptyList() : manager.getDependentProjects(project);
+        }
+
+        ProjectRestartWaiter prepare(IDtProject project)
+        {
+            return LifecycleWaiter.prepareForRestart(project);
+        }
+
+        RestartJobFailureSignal watchFailures()
+        {
+            return new RestartJobFailureSignal();
+        }
+
+        boolean isStarted(IDtProject project)
+        {
+            try
+            {
+                return workspace != null && workspace.isStarted(project);
+            }
+            catch (RuntimeException e)
+            {
+                Activator.logWarning("Could not verify restart of '" + project.getName() + "': " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+        }
+
+        Collection<IDtProject> recover(List<ProjectCleanInfo> projects, IProgressMonitor monitor)
+        {
+            List<IDtProject> issued = new ArrayList<>();
+            if (workspace == null)
+            {
+                return issued;
+            }
+            for (ProjectCleanInfo info : projects)
+            {
+                if (monitor.isCanceled())
+                {
+                    break;
+                }
+                try
+                {
+                    workspace.startWorkspaceProjects(Collections.singletonList(
+                        new WorkspaceProjectStartRequest(info.project, ProjectStartType.CLEAN_IMPORT)), monitor);
+                    issued.add(info.dtProject);
+                }
+                catch (RuntimeException e)
+                {
+                    Activator.logWarning("Could not recover dependent project '" + info.name + "': " //$NON-NLS-1$ //$NON-NLS-2$
+                        + e.getMessage());
+                }
+            }
+            return issued;
+        }
+
+        boolean awaitStarted(IDtProject project, long timeoutMs)
+        {
+            return LifecycleWaiter.waitForProjectStarted(project, timeoutMs);
+        }
+
+        void awaitDerivedData(IProject project)
+        {
+            BuildUtils.waitForDerivedData(project);
+        }
+
+        /** The project's current EDT readiness, read after its derived-data wait has returned. */
+        ProjectStateChecker.ProjectStateResult stateOf(IProject project)
+        {
+            return ProjectStateChecker.checkProjectState(project);
+        }
     }
 
     /**
@@ -508,6 +1154,23 @@ public class CleanProjectTool implements IMcpTool
     }
 
     /**
+     * Waits out a project context that is being restarted before the caller concludes EDT never
+     * started the project. Production polls {@code IDtProjectManager}; tests substitute an
+     * immediate answer so no test ever sleeps.
+     */
+    @FunctionalInterface
+    interface IDtProjectSettle
+    {
+        /**
+         * Re-asks for the project's DT project over a short window.
+         *
+         * @param project the workspace project
+         * @return the DT project once EDT registers one, or {@code null} when it never did
+         */
+        IDtProject awaitDtProject(IProject project);
+    }
+
+    /**
      * The per-project clean action. Production passes {@link #cleanSingleProject}; tests
      * substitute a controllable action to exercise the deadline without a live workspace.
      */
@@ -553,10 +1216,12 @@ public class CleanProjectTool implements IMcpTool
      * Holder for the result of {@link #collectProjectsToClean}: the parallel work lists,
      * or an {@code error} JSON payload that the caller should return as-is.
      */
-    private static class CleanCollection
+    static class CleanCollection
     {
         final List<ProjectCleanInfo> projectsToClean = new ArrayList<>();
         final List<String> projectNamesList = new ArrayList<>();
+        /** Open BM-model projects skipped because EDT never started them (clean-all only). */
+        final List<String> skippedUnstarted = new ArrayList<>();
         String error;
     }
 

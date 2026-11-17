@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.gson.JsonObject;
 
@@ -57,6 +58,14 @@ public final class Backend
     private final int timeoutSeconds;
     private final URI mcpUri;
     private final URI healthUri;
+    private final String authToken;
+    private final AtomicLong authenticationRequestSequence = new AtomicLong();
+    private final AtomicReference<AuthenticationObservation> authentication =
+        new AtomicReference<>(new AuthenticationObservation(0, 0));
+
+    private record AuthenticationObservation(long sequence, int failureStatus)
+    {
+    }
     private final AtomicLong requestId = new AtomicLong(0);
 
     /** Guarded by {@code this}: whether the lazy MCP handshake has been performed. */
@@ -74,11 +83,18 @@ public final class Backend
      */
     public Backend(int port, HttpClient client, int timeoutSeconds)
     {
+        this(port, client, timeoutSeconds, null);
+    }
+
+    /** The configured token belongs only to this local backend port. */
+    Backend(int port, HttpClient client, int timeoutSeconds, String authToken)
+    {
         this.port = port;
         this.client = client;
         this.timeoutSeconds = timeoutSeconds;
         this.mcpUri = URI.create("http://127.0.0.1:" + port + "/mcp"); //$NON-NLS-1$ //$NON-NLS-2$
         this.healthUri = URI.create("http://127.0.0.1:" + port + "/health"); //$NON-NLS-1$ //$NON-NLS-2$
+        this.authToken = authToken;
     }
 
     /**
@@ -164,7 +180,7 @@ public final class Backend
 
         HttpRequest initialize =
             newPostRequest(buildJsonRpcRequest("initialize", params), null, HANDSHAKE_TIMEOUT_SECONDS); //$NON-NLS-1$
-        HttpResponse<String> response = client.send(initialize, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = sendMcpRequest(initialize, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() != 200)
         {
             throw new IOException("initialize against backend :" + port + " failed with HTTP " //$NON-NLS-1$ //$NON-NLS-2$
@@ -193,7 +209,7 @@ public final class Backend
         }
 
         String initialized = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}"; //$NON-NLS-1$
-        client.send(newPostRequest(initialized, issued, HANDSHAKE_TIMEOUT_SECONDS),
+        sendMcpRequest(newPostRequest(initialized, issued, HANDSHAKE_TIMEOUT_SECONDS),
             HttpResponse.BodyHandlers.discarding());
 
         sessionId = issued;
@@ -271,29 +287,149 @@ public final class Backend
         return sendWithStaleSessionRetry(rawBody, acceptHeader, timeoutSeconds);
     }
 
+    /** Verifies explicit workspace selection in the same backend session as the forwarded call. */
+    HttpResponse<InputStream> forward(String rawBody, String acceptHeader, String workspacePath)
+        throws IOException, InterruptedException
+    {
+        return sendWithStaleSessionRetry(rawBody, acceptHeader, timeoutSeconds, workspacePath);
+    }
+
     private HttpResponse<InputStream> sendWithStaleSessionRetry(String rawBody, String acceptHeader,
         int requestTimeoutSeconds) throws IOException, InterruptedException
     {
+        return sendWithStaleSessionRetry(rawBody, acceptHeader, requestTimeoutSeconds, null);
+    }
+
+    private HttpResponse<InputStream> sendWithStaleSessionRetry(String rawBody, String acceptHeader,
+        int requestTimeoutSeconds, String workspacePath) throws IOException, InterruptedException
+    {
         String accept = acceptHeader == null || acceptHeader.isBlank() ? ACCEPT_JSON_AND_SSE : acceptHeader;
-        String session = ensureSession();
-        HttpResponse<InputStream> response = client.send(
-            newPostRequest(rawBody, session, requestTimeoutSeconds, accept), HttpResponse.BodyHandlers.ofInputStream());
-        // 404 means the session we presented is gone. 400 with NO session presented means the
-        // same thing one step earlier: this handshake was made with a plugin that issued no
-        // session id, that plugin has since been upgraded to one that requires it, and the
-        // cached handshake is now unusable. A Backend outlives a rescan by design, so without
-        // this the proxy would answer 400 to every routed call until someone restarted it.
-        // Narrow on purpose: a 400 for a request that DID carry a session is a real bad request
-        // and is returned as-is rather than retried.
-        if (response.statusCode() == 404 || (response.statusCode() == 400 && session == null))
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            String session = ensureSession();
+            if (workspacePath != null && !verifyWorkspace(session, workspacePath))
+            {
+                invalidateSessionIfCurrent(session);
+                continue;
+            }
+            HttpResponse<InputStream> response = sendMcpRequest(
+                newPostRequest(rawBody, session, requestTimeoutSeconds, accept),
+                HttpResponse.BodyHandlers.ofInputStream());
+            if (attempt == 0 && isStaleSession(response, session))
+            {
+                closeQuietly(response.body());
+                invalidateSessionIfCurrent(session);
+                continue;
+            }
+            return response;
+        }
+        throw new WorkspaceMismatchException("Backend :" + port //$NON-NLS-1$
+            + " kept changing sessions while verifying workspacePath '" + workspacePath //$NON-NLS-1$
+            + "'; call router_refresh and retry."); //$NON-NLS-1$
+    }
+
+    private static boolean isStaleSession(HttpResponse<?> response, String session)
+    {
+        return response.statusCode() == 404 || (response.statusCode() == 400 && session == null);
+    }
+
+    private boolean verifyWorkspace(String session, String expected) throws IOException, InterruptedException
+    {
+        if (session == null)
+        {
+            throw new WorkspaceMismatchException("Cannot verify workspacePath '" + expected //$NON-NLS-1$
+                + "' on session-less backend :" + port + "; update its EDT-MCP plugin and call router_refresh."); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        JsonObject arguments = new JsonObject();
+        arguments.addProperty("format", "json"); //$NON-NLS-1$ //$NON-NLS-2$
+        JsonObject params = new JsonObject();
+        params.addProperty("name", "list_projects"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.add("arguments", arguments); //$NON-NLS-1$
+        HttpResponse<InputStream> response = sendMcpRequest(newPostRequest(
+            buildJsonRpcRequest("tools/call", params), session, HANDSHAKE_TIMEOUT_SECONDS), //$NON-NLS-1$
+            HttpResponse.BodyHandlers.ofInputStream());
+        if (isStaleSession(response, session))
         {
             closeQuietly(response.body());
-            invalidateSessionIfCurrent(session);
-            session = ensureSession();
-            response = client.send(newPostRequest(rawBody, session, requestTimeoutSeconds, accept),
-                HttpResponse.BodyHandlers.ofInputStream());
+            return false;
         }
+        String raw = readToolResponse(response, "list_projects"); //$NON-NLS-1$
+        JsonObject result = Json.obj(Json.parseObject(raw), "result"); //$NON-NLS-1$
+        String actual = WorkspaceRouting.workspacePath(BackendRegistry.machinePayload(result));
+        if (response.statusCode() != 200 || BackendRegistry.isToolError(raw) || !expected.equals(actual))
+        {
+            throw new WorkspaceMismatchException("Backend :" + port + " no longer confirms workspacePath '" //$NON-NLS-1$ //$NON-NLS-2$
+                + expected + "' (reported: " + actual + "). Call router_refresh and select the workspace again."); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return true;
+    }
+
+    static final class WorkspaceMismatchException extends IOException
+    {
+        private static final long serialVersionUID = 1L;
+
+        WorkspaceMismatchException(String message)
+        {
+            super(message);
+        }
+    }
+
+    /** No backend response body or token is included in authentication diagnostics. */
+    static final class AuthenticationException extends IOException
+    {
+        private static final long serialVersionUID = 1L;
+
+        AuthenticationException(String message)
+        {
+            super(message);
+        }
+    }
+
+    String authenticationError()
+    {
+        int status = authentication.get().failureStatus();
+        return status == 0 ? null : authenticationError(status);
+    }
+
+    private String authenticationError(int status)
+    {
+        return "EDT backend :" + port + " rejected authentication (HTTP " + status
+            + "). Check backend." + port + ".token or backend." + port
+            + ".tokenEnv and restart the proxy after changing credentials.";
+    }
+
+    private <T> HttpResponse<T> sendMcpRequest(HttpRequest request, HttpResponse.BodyHandler<T> handler)
+        throws IOException, InterruptedException
+    {
+        long sequence = authenticationRequestSequence.incrementAndGet();
+        HttpResponse<T> response = client.send(request, handler);
+        checkAuthentication(response, sequence);
         return response;
+    }
+
+    private void checkAuthentication(HttpResponse<?> response, long sequence) throws AuthenticationException
+    {
+        if (response.statusCode() == 401 || response.statusCode() == 403)
+        {
+            recordAuthentication(sequence, response.statusCode());
+            if (response.body() instanceof InputStream body)
+            {
+                closeQuietly(body);
+            }
+            throw new AuthenticationException(authenticationError(response.statusCode()));
+        }
+        if (response.statusCode() >= 200 && response.statusCode() < 300)
+        {
+            recordAuthentication(sequence, 0);
+        }
+    }
+
+    private void recordAuthentication(long sequence, int failureStatus)
+    {
+        // Atomic ordering covers both late successes and late failures. Health probes never
+        // participate: a public 200 from /health proves nothing about the backend credential.
+        authentication.updateAndGet(previous -> sequence > previous.sequence()
+            ? new AuthenticationObservation(sequence, failureStatus) : previous);
     }
 
     /**
@@ -335,13 +471,25 @@ public final class Backend
     public String callToolBlocking(String toolName, JsonObject arguments, int timeoutSecondsOverride)
         throws IOException, InterruptedException
     {
+        return callToolBlocking(toolName, arguments, timeoutSecondsOverride, null);
+    }
+
+    String callToolBlocking(String toolName, JsonObject arguments, int timeoutSecondsOverride, String workspacePath)
+        throws IOException, InterruptedException
+    {
         JsonObject params = new JsonObject();
         params.addProperty("name", toolName); //$NON-NLS-1$
         params.add("arguments", arguments == null ? new JsonObject() : arguments); //$NON-NLS-1$
 
         int effectiveTimeoutSeconds = timeoutSecondsOverride > 0 ? timeoutSecondsOverride : timeoutSeconds;
         HttpResponse<InputStream> response =
-            sendWithStaleSessionRetry(buildJsonRpcRequest("tools/call", params), null, effectiveTimeoutSeconds); //$NON-NLS-1$
+            sendWithStaleSessionRetry(buildJsonRpcRequest("tools/call", params), null, effectiveTimeoutSeconds, //$NON-NLS-1$
+                workspacePath);
+        return readToolResponse(response, toolName);
+    }
+
+    private String readToolResponse(HttpResponse<InputStream> response, String toolName) throws IOException
+    {
         String body;
         try (InputStream in = response.body())
         {
@@ -436,7 +584,7 @@ public final class Backend
         {
             builder.header(HEADER_SESSION_ID, session);
         }
-        return builder.build();
+        return BearerAuthentication.addHeader(builder, authToken).build();
     }
 
     private static void closeQuietly(InputStream in)

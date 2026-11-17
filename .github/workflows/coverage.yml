@@ -30,7 +30,7 @@ jobs:
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_repository.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
     steps:
@@ -39,6 +39,14 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
+
+      # The analyzed commit may predate the local actions, so they come from this workflow's revision.
+      - name: Checkout (the workflow's local actions)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .workflow-actions
+          sparse-checkout: .github/actions
 
       # The MCP plugin is BUILT on 25: Tycho 5 needs Maven on JDK 21+, and tycho-surefire runs
       # the EDT 2026.2 platform bundles, which are Java 25. The bundle itself still compiles to
@@ -49,6 +57,10 @@ jobs:
           distribution: temurin
           java-version: 25
           cache: maven
+
+      # Maven is pinned, not the runner image's: see the action for why 3.10 breaks Tycho.
+      - name: Set up Maven
+        uses: ./.workflow-actions/.github/actions/setup-maven
 
       - name: Cache Tycho P2 repositories
         uses: actions/cache@v6
@@ -114,21 +126,36 @@ jobs:
           EVENT='${{ github.event.workflow_run.event }}'
           HEAD='${{ github.event.workflow_run.head_branch }}'
           PRS='${{ toJson(github.event.workflow_run.pull_requests) }}'
+          # workflow_run runs with GITHUB_SHA = the default branch head; pin the analysed commit so the
+          # scanner does not attribute a PR analysis to master (#766).
+          REV='${{ github.event.workflow_run.head_sha }}'
           if [ "$EVENT" = "pull_request" ]; then
             PRNUM=$(echo "$PRS" | jq -r '.[0].number // empty')
             BASE=$(echo "$PRS" | jq -r '.[0].base.ref // "master"')
             if [ -n "$PRNUM" ]; then
-              echo "args=-Dsonar.pullRequest.key=$PRNUM -Dsonar.pullRequest.branch=$HEAD -Dsonar.pullRequest.base=$BASE" >> "$GITHUB_OUTPUT"
+              echo "args=-Dsonar.pullRequest.key=$PRNUM -Dsonar.pullRequest.branch=$HEAD -Dsonar.pullRequest.base=$BASE -Dsonar.scm.revision=$REV" >> "$GITHUB_OUTPUT"
             else
-              echo "args=-Dsonar.branch.name=$HEAD" >> "$GITHUB_OUTPUT"
+              echo "args=-Dsonar.branch.name=$HEAD -Dsonar.scm.revision=$REV" >> "$GITHUB_OUTPUT"
             fi
           else
-            echo "args=-Dsonar.branch.name=$HEAD" >> "$GITHUB_OUTPUT"
+            echo "args=-Dsonar.branch.name=$HEAD -Dsonar.scm.revision=$REV" >> "$GITHUB_OUTPUT"
           fi
 
       - name: SonarQube Cloud analysis (unit + e2e)
         if: env.SONAR_TOKEN != ''
         working-directory: mcp
+        shell: bash
         env:
           MAVEN_OPTS: -Xmx2g -XX:+UseParallelGC
-        run: mvn --batch-mode --no-transfer-progress -T 1C sonar:sonar ${{ steps.sonarargs.outputs.args }}
+          SONAR_ARGS: ${{ steps.sonarargs.outputs.args }}
+        run: |
+          set -o pipefail
+          mvn --batch-mode --no-transfer-progress -T 1C sonar:sonar $SONAR_ARGS | tee sonar.log
+          # A PR analysis must land in the PR, not on the main branch dashboard (#766).
+          case "$SONAR_ARGS" in *sonar.pullRequest.key=*)
+            if ! grep -q 'ANALYSIS SUCCESSFUL.*pullRequest=' sonar.log; then
+              echo "::error::Sonar reported a PR analysis without a pullRequest dashboard URL - it landed on the main branch"
+              grep 'ANALYSIS SUCCESSFUL' sonar.log || true
+              exit 1
+            fi;;
+          esac

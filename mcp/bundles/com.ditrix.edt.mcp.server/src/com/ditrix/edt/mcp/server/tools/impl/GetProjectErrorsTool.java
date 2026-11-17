@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -19,27 +20,28 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.BiConsumer;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.CoreException;
-import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EClass;
+import org.eclipse.emf.ecore.EReference;
 
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.PredefinedItem;
-import com._1c.g5.v8.dt.validation.marker.IExtraInfoMap;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com._1c.g5.v8.dt.validation.marker.Marker;
 import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
-import com._1c.g5.v8.dt.validation.marker.StandardExtraInfo;
 import com.e1c.g5.v8.dt.check.qfix.IFixRepository;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
-import com.e1c.g5.v8.dt.check.settings.CheckUid;
 
+import com.ditrix.edt.mcp.server.utils.BmModelResolver;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.preferences.ToolParameterSettings;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
@@ -48,17 +50,20 @@ import com.ditrix.edt.mcp.server.protocol.McpKeys;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.BmTransactions;
-import com.ditrix.edt.mcp.server.utils.BslModuleUtils;
 import com.ditrix.edt.mcp.server.utils.MarkdownUtils;
+import com.ditrix.edt.mcp.server.utils.MarkerRows;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter;
 import com.ditrix.edt.mcp.server.utils.FormStructureReader;
 import com.ditrix.edt.mcp.server.utils.FormValidationException;
 import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
+import com.ditrix.edt.mcp.server.utils.MetadataScope;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
+import com.ditrix.edt.mcp.server.utils.OutputSizeGuard;
 import com.ditrix.edt.mcp.server.utils.Pagination;
 import com.ditrix.edt.mcp.server.utils.PredefinedWriter;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
+import com.ditrix.edt.mcp.server.utils.ReferencedTopObjects;
 import com.ditrix.edt.mcp.server.utils.SubsystemUtils;
 import com.ditrix.edt.mcp.server.utils.XdtoWriter;
 
@@ -88,6 +93,9 @@ public class GetProjectErrorsTool implements IMcpTool
     /** The EXACT, resolver-backed model-address filter (mutually exclusive with {@link #PARAM_OBJECTS}). */
     static final String PARAM_OBJECT_FQNS = "objectFqns"; //$NON-NLS-1$
 
+    /** The EXACT (normalised) module-path filter, AND-ed with every other filter. */
+    static final String PARAM_MODULE_PATHS = "modulePaths"; //$NON-NLS-1$
+
     /** structuredContent field: the addresses that resolved to a real model node. */
     static final String KEY_OBJECTS_RESOLVED = "objectsResolved"; //$NON-NLS-1$
 
@@ -102,6 +110,35 @@ public class GetProjectErrorsTool implements IMcpTool
 
     /** structuredContent field: how many problem rows the report carries. */
     static final String KEY_PROBLEMS_FOUND = "problemsFound"; //$NON-NLS-1$
+
+    /** Paging: how many matching problems to skip before the first row of this page. */
+    static final String PARAM_OFFSET = "offset"; //$NON-NLS-1$
+
+    /** structuredContent field: how many problems match the filters in total, across every page. */
+    static final String KEY_PROBLEMS_TOTAL = "problemsTotal"; //$NON-NLS-1$
+
+    /** structuredContent field: whether problems beyond this page remain. */
+    static final String KEY_HAS_MORE = "hasMore"; //$NON-NLS-1$
+
+    /** structuredContent field: the {@code offset} of the next page (offset + rows on this page). */
+    static final String KEY_NEXT_OFFSET = "nextOffset"; //$NON-NLS-1$
+
+    /**
+     * Character budget of the problem TABLE of a Markdown report. The whole content text is capped
+     * at {@link OutputSizeGuard#MAX_CONTENT_CHARS}, and that cap cuts wherever it lands - mid-row,
+     * dropping every later row without saying which. The rows are therefore stopped at a ROW
+     * boundary below it, with room left for the header and the trailing notes, and the report
+     * names the offset to continue from. {@code limit} stays the count the caller asked for; this
+     * only keeps the page that is sent intact.
+     */
+    static final int REPORT_TABLE_BUDGET_CHARS = OutputSizeGuard.MAX_CONTENT_CHARS - 10_000;
+
+    /**
+     * The same budget for an {@code objectFqns} call, whose text channel carries the JSON payload:
+     * the Markdown report AND every row again as a {@code problems} object, so a row costs about
+     * three times its table line there.
+     */
+    static final int ADDRESS_TABLE_BUDGET_CHARS = OutputSizeGuard.MAX_CONTENT_CHARS / 3;
 
     @Override
     public String getName()
@@ -121,7 +158,8 @@ public class GetProjectErrorsTool implements IMcpTool
     {
         return JsonSchemaBuilder.object()
             .stringProperty("projectName", "Filter by EDT project name; omit to scan all projects (optional)") //$NON-NLS-1$ //$NON-NLS-2$
-            .enumProperty("severity", "Filter by severity (optional)", //$NON-NLS-1$ //$NON-NLS-2$
+            .enumProperty("severity", "Filter by one exact severity (optional); NONE is the level of a marker " //$NON-NLS-1$ //$NON-NLS-2$
+                + "EDT stores without a severity, not 'all levels' - omit severity for every level", //$NON-NLS-1$
                 "ERRORS", "BLOCKER", "CRITICAL", "MAJOR", "MINOR", "TRIVIAL", "NONE") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
             .stringProperty("checkId", "Filter by check-id substring; matches the symbolic id (e.g. 'ql-temp-table-index') or short UID (e.g. 'SU23') (optional)") //$NON-NLS-1$ //$NON-NLS-2$
             .stringArrayProperty(PARAM_OBJECTS, "Loose case-insensitive SUBSTRING match against the reported location; mutually exclusive " //$NON-NLS-1$
@@ -131,18 +169,23 @@ public class GetProjectErrorsTool implements IMcpTool
                     + "(Catalog.Products.Attribute.Weight) widens the scan to its OWNING object - " //$NON-NLS-1$
                     + "EDT indexes the marker there - so the result can carry problems from " //$NON-NLS-1$
                     + "elsewhere in that object. Returns objectsNotFound / objectsUnsupported." ) //$NON-NLS-1$
-            .integerProperty(McpKeys.LIMIT, "Max results; default 100, max 1000 (optional)") //$NON-NLS-1$
+            .stringArrayProperty(PARAM_MODULE_PATHS,
+                "Exact module paths as shown in the Module path column, e.g. 'CommonModules/X/Module.bsl'; " //$NON-NLS-1$
+                    + "AND-ed with the other filters.") //$NON-NLS-1$
+            .integerProperty(McpKeys.LIMIT, "Max problems per page; default 100, max 1000 (optional)") //$NON-NLS-1$
+            .integerProperty(PARAM_OFFSET, "Skip this many matching problems - the next page; default 0 (optional)") //$NON-NLS-1$
             .enumProperty("responseFormat", //$NON-NLS-1$
-                "Output verbosity (optional): concise (default) = leaner table without the secondary 'Has docs' column; detailed = full table including 'Has docs'", //$NON-NLS-1$
+                "Output verbosity (optional): concise (default) = leaner table; detailed = adds stored Offset/Length and 'Has docs'", //$NON-NLS-1$
                 "concise", "detailed") //$NON-NLS-1$ //$NON-NLS-2$
             .build();
     }
 
     /**
-     * The exact-address call returns a machine-readable payload (the Markdown report plus the
-     * {@code objectsResolved} / {@code objectsNotFound} / {@code objectsUnsupported} verdicts) in
-     * {@code structuredContent}; every other call keeps the historical Markdown response byte for
-     * byte. Mirrors {@code list_projects}' per-call format switch.
+     * A successful exact-address call returns a machine-readable payload (rows, the Markdown report and
+     * the {@code objectsResolved} / {@code objectsNotFound} / {@code objectsUnsupported} verdicts)
+     * in {@code structuredContent}; an all-miss exact call is refused, and other calls keep
+     * the Markdown response format. Mirrors {@code list_projects}' per-call
+     * format switch.
      */
     @Override
     public ResponseType getResponseType(Map<String, String> params)
@@ -191,18 +234,25 @@ public class GetProjectErrorsTool implements IMcpTool
         String severity = JsonUtils.extractStringArgument(params, "severity"); //$NON-NLS-1$
         String checkId = JsonUtils.extractStringArgument(params, "checkId"); //$NON-NLS-1$
 
-        // Output verbosity: concise (default) trims the secondary 'Has docs' column; // NOSONAR explanatory comment, not commented-out code
-        // detailed renders the full historical table. Any absent/blank/unrecognized value
-        // falls back to concise (the lean default), never an error.
+        // Detailed adds saved text ranges and documentation availability to the compact table.
+        // An absent/blank/unrecognized value falls back to concise.
         String responseFormat = JsonUtils.extractStringArgument(params, "responseFormat"); //$NON-NLS-1$
         boolean detailed = responseFormat != null && responseFormat.equalsIgnoreCase("detailed"); //$NON-NLS-1$
 
         // Reject an out-of-set severity instead of silently widening the filter to "all".
         if (severity != null && !severity.isEmpty()
-            && !SEVERITY_VALUES.contains(severity.toUpperCase()))
+            && !SEVERITY_VALUES.contains(severity.toUpperCase(Locale.ROOT)))
         {
             return ToolResult.error("Invalid severity: '" + severity + "'. Must be one of: " //$NON-NLS-1$ //$NON-NLS-2$
                 + String.join(", ", SEVERITY_VALUES)).toJson(); //$NON-NLS-1$
+        }
+
+        // A non-blank modulePaths entry that normalises to nothing would silently widen the scope.
+        String unusablePaths = MarkerRows.unusableModulePathsError(
+            JsonUtils.extractArrayArgument(params, PARAM_MODULE_PATHS));
+        if (unusablePaths != null)
+        {
+            return ToolResult.error(unusablePaths).toJson();
         }
 
         // Refuse only the transient BUILDING state (buildingErrorOrNull skips a
@@ -238,13 +288,50 @@ public class GetProjectErrorsTool implements IMcpTool
 
         int limit = JsonUtils.extractIntArgument(params, McpKeys.LIMIT, defaultLimit);
         limit = Pagination.clampLimit(limit, 1000);
+        int offset = Math.max(0, JsonUtils.extractIntArgument(params, PARAM_OFFSET, 0));
+
+        List<String> modulePaths = modulePathsOf(params);
 
         if (!objectFqns.isEmpty())
         {
             return getProjectErrorsByAddress(projectName, severity, checkId, objectFqns, limit,
-                detailed);
+                detailed, modulePaths, offset);
         }
-        return getProjectErrors(projectName, severity, checkId, objects, limit, detailed);
+        return getProjectErrors(projectName, severity, checkId, objects, limit, detailed, false, modulePaths,
+            offset);
+    }
+
+    /** The normalised, non-blank {@code modulePaths} entries of a call, in request order (never {@code null}). */
+    static List<String> modulePathsOf(Map<String, String> params)
+    {
+        List<String> paths = new ArrayList<>();
+        for (String entry : cleanedEntries(JsonUtils.extractArrayArgument(params, PARAM_MODULE_PATHS)))
+        {
+            String normalized = MarkerRows.normalizeModulePath(entry);
+            if (normalized != null)
+            {
+                paths.add(normalized);
+            }
+        }
+        return paths;
+    }
+
+    /**
+     * Appends the not-found note for {@code modulePaths} entries that name no module file - only when
+     * {@code projectName} is given (with no project there is no single place to look the path up).
+     */
+    private static void appendModulePathsNotFound(StringBuilder md, String projectName, List<String> modulePaths)
+    {
+        if (projectName == null || projectName.isEmpty() || modulePaths == null || modulePaths.isEmpty())
+        {
+            return;
+        }
+        ProjectContext ctx = ProjectContext.of(projectName);
+        if (ctx.exists())
+        {
+            MarkerRows.appendModulePathsNotFoundWarning(md, projectName,
+                MarkerRows.missingModulePaths(ctx.project(), modulePaths));
+        }
     }
     
     /**
@@ -260,7 +347,7 @@ public class GetProjectErrorsTool implements IMcpTool
         {
             try
             {
-                return MarkerSeverity.valueOf(severity.toUpperCase());
+                return MarkerSeverity.valueOf(severity.toUpperCase(Locale.ROOT));
             }
             catch (IllegalArgumentException e)
             {
@@ -277,10 +364,10 @@ public class GetProjectErrorsTool implements IMcpTool
      * @param severity filter by severity (ERRORS, BLOCKER, CRITICAL, MAJOR, MINOR, TRIVIAL)
      * @param checkId filter by check ID substring
      * @param objects filter by object FQNs (empty list for all objects)
-     * @param limit maximum number of results
-     * @param detailed when {@code true} render the full table (incl. the secondary
-     *        {@code Has docs} column); when {@code false} (the default) render a leaner
-     *        table that omits {@code Has docs}. Only the table presentation changes — the
+     * @param limit maximum number of rows on the page (the total is still counted)
+     * @param detailed when {@code true} include saved text ranges and {@code Has docs};
+     *        when {@code false} (the default) render the existing compact table.
+     *        Only the table presentation changes — the
      *        marker collection, model reads and transaction boundaries are identical.
      * @return Markdown formatted string with error details
      */
@@ -298,6 +385,31 @@ public class GetProjectErrorsTool implements IMcpTool
      */
     static String getProjectErrors(String projectName, String severity, String checkId,
         List<String> objects, int limit, boolean detailed, boolean exactScope)
+    {
+        return getProjectErrors(projectName, severity, checkId, objects, limit, detailed, exactScope,
+            Collections.<String> emptyList());
+    }
+
+    /**
+     * As {@link #getProjectErrors(String, String, String, List, int, boolean, boolean)} plus the
+     * {@code modulePaths} filter (normalised paths; empty = no module filter). The filter is applied to
+     * each marker BEFORE the limit, so {@code limit} counts only the rows of the requested modules.
+     */
+    static String getProjectErrors(String projectName, String severity, String checkId,
+        List<String> objects, int limit, boolean detailed, boolean exactScope, List<String> modulePaths)
+    {
+        return getProjectErrors(projectName, severity, checkId, objects, limit, detailed, exactScope, modulePaths, 0);
+    }
+
+    /**
+     * As {@link #getProjectErrors(String, String, String, List, int, boolean, boolean, List)} for one PAGE:
+     * the first {@code offset} matching problems are skipped and at most {@code limit} rows follow. Every
+     * matching problem is still counted, so the report states the total and the offset of the next page
+     * instead of ending silently at the limit.
+     */
+    static String getProjectErrors(String projectName, String severity, String checkId,
+        List<String> objects, int limit, boolean detailed, boolean exactScope, List<String> modulePaths,
+        int offset)
     {
         try
         {
@@ -328,7 +440,8 @@ public class GetProjectErrorsTool implements IMcpTool
 
             final Set<String> finalObjects = scanFilterVariants(objects, exactScope);
 
-            Map<IProject, List<Marker>> markersByProject = groupMarkersByProject(markerManager, projectName);
+            Map<IProject, List<Marker>> markersByProject =
+                MarkerRows.groupMarkersByProject(markerManager, projectName);
 
             // Markers whose presentation could not be resolved even inside a transaction.
             // They are NOT dropped, but they are surfaced differently depending on context,
@@ -341,20 +454,22 @@ public class GetProjectErrorsTool implements IMcpTool
 
             final CollectContext collectContext = new CollectContext(finalSeverityFilter,
                 finalCheckId, finalObjects, checkRepository, fixRepository, limit, unresolvedShown,
-                unresolvedFilteredOut, exactScope);
+                unresolvedFilteredOut, exactScope, null, MarkerRows.modulePathKeys(modulePaths), offset);
             final List<ErrorInfo> errors = collectErrors(markersByProject, bmModelManager,
                 collectContext);
 
             // Build Markdown response for better readability and context efficiency
             StringBuilder md = new StringBuilder();
 
-            if (errors.isEmpty())
+            if (collectContext.total() == 0)
             {
-                appendNoErrorsSection(md, projectName, severity, objects, PARAM_OBJECTS);
+                appendNoErrorsSection(md, projectName, severity, objects, PARAM_OBJECTS, modulePaths);
+                appendOtherSeverities(md, markersByProject, bmModelManager, collectContext);
             }
             else
             {
-                appendProblemsTable(md, errors, limit, detailed);
+                appendProblemsPage(md, errors, offset, collectContext.total(), detailed,
+                    REPORT_TABLE_BUDGET_CHARS, unresolvedShown);
             }
 
             // NOTE: no objectsNotFound here, on purpose. This filter is a documented SUBSTRING
@@ -362,6 +477,8 @@ public class GetProjectErrorsTool implements IMcpTool
             // entry that matched nothing is indistinguishable from a typo. Only the exact
             // objectFqns input can answer that question - see getProjectErrorsByAddress.
             appendUnresolvedWarnings(md, unresolvedShown, unresolvedFilteredOut);
+            // modulePaths, by contrast, names files: an unknown path is a provable miss.
+            appendModulePathsNotFound(md, projectName, modulePaths);
 
             return md.toString();
         }
@@ -464,14 +581,14 @@ public class GetProjectErrorsTool implements IMcpTool
          * a partial answer must not read as a full one.
          */
         final Map<String, Set<String>> incompleteFor = new LinkedHashMap<>();
-        /** A ready JSON error payload when no verdict could be reached at all; {@code null} otherwise. */
+        /** A ready JSON refusal when resolution or the resulting scan could not support an answer. */
         String error;
     }
 
     /**
      * What ONE project could decide about the requested addresses: the spellings that resolved
-     * HERE, the addresses this project could not decide at all, and whether its resolve pass ran to
-     * the end.
+     * HERE, the addresses this project could not decide at all, and whether it contributed any
+     * completed decision.
      *
      * <p>The undecided set is per ADDRESS on purpose. A single "was anything inspected" flag cannot
      * separate "inspected and absent" from "nobody could look": with no {@code projectName} one
@@ -488,7 +605,7 @@ public class GetProjectErrorsTool implements IMcpTool
         final Map<String, Set<String>> resolved = new LinkedHashMap<>();
         /** Requested addresses this project could not decide (infrastructure failure, never absence). */
         final Set<String> undecided = new LinkedHashSet<>();
-        /** Whether the read pass ran to the end; {@code false} when it threw and decided nothing. */
+        /** Whether this project contributed any completed decision. */
         boolean passCompleted;
 
         ProjectResolution(String projectName)
@@ -512,12 +629,34 @@ public class GetProjectErrorsTool implements IMcpTool
      * @param severity the severity filter, already validated by {@link #execute}
      * @param checkId the check-id substring filter, may be {@code null}
      * @param objectFqns the requested exact addresses (non-empty, already cleaned)
-     * @param limit the result limit
+     * @param limit maximum number of rows on the page
      * @param detailed whether to render the full table
      * @return the JSON payload for {@code structuredContent}
      */
     static String getProjectErrorsByAddress(String projectName, String severity, String checkId,
         List<String> objectFqns, int limit, boolean detailed)
+    {
+        return getProjectErrorsByAddress(projectName, severity, checkId, objectFqns, limit, detailed,
+            Collections.<String> emptyList());
+    }
+
+    /**
+     * As {@link #getProjectErrorsByAddress(String, String, String, List, int, boolean)} plus the
+     * {@code modulePaths} filter, AND-ed with the resolved addresses and applied before the limit.
+     */
+    static String getProjectErrorsByAddress(String projectName, String severity, String checkId,
+        List<String> objectFqns, int limit, boolean detailed, List<String> modulePaths)
+    {
+        return getProjectErrorsByAddress(projectName, severity, checkId, objectFqns, limit, detailed,
+            modulePaths, 0);
+    }
+
+    /**
+     * As {@link #getProjectErrorsByAddress(String, String, String, List, int, boolean, List)} for one PAGE
+     * starting at {@code offset}; the payload carries the total and the next offset next to the rows.
+     */
+    static String getProjectErrorsByAddress(String projectName, String severity, String checkId,
+        List<String> objectFqns, int limit, boolean detailed, List<String> modulePaths, int offset)
     {
         try
         {
@@ -543,6 +682,8 @@ public class GetProjectErrorsTool implements IMcpTool
             final int[] unresolvedShown = {0};
             final int[] unresolvedFilteredOut = {0};
             List<ErrorInfo> errors = Collections.emptyList();
+            int total = 0;
+            StringBuilder otherSeverities = new StringBuilder();
             if (!resolution.resolved.isEmpty())
             {
                 // The SCAN is scoped by the spellings that really resolved, PER PROJECT (see
@@ -553,14 +694,36 @@ public class GetProjectErrorsTool implements IMcpTool
                     checkId, Collections.<String> emptySet(),
                     Activator.getDefault().getCheckRepository(), Activator.getDefault().getFixRepository(),
                     limit, unresolvedShown, unresolvedFilteredOut, true,
-                    filterVariantsByProject(resolution.scopeByProject));
-                errors = collectErrors(groupMarkersByProject(markerManager, projectName),
-                    bmModelManager, collectContext);
+                    filterVariantsByProject(resolution.scopeByProject), MarkerRows.modulePathKeys(modulePaths),
+                    offset);
+                Map<IProject, List<Marker>> markersByProject =
+                    MarkerRows.groupMarkersByProject(markerManager, projectName);
+                errors = collectErrors(markersByProject, bmModelManager, collectContext);
+                total = collectContext.total();
+                if (total == 0)
+                {
+                    appendOtherSeverities(otherSeverities, markersByProject, bmModelManager, collectContext);
+                }
             }
 
-            return addressPayload(assembleAddressReport(errors, projectName, severity, objectFqns,
-                limit, detailed, resolution, unresolvedShown, unresolvedFilteredOut),
-                errors.size(), resolution);
+            StringBuilder table = new StringBuilder();
+            int shown = 0;
+            if (total > 0)
+            {
+                shown = appendProblemsPage(table, errors, offset, total, detailed, ADDRESS_TABLE_BUDGET_CHARS,
+                    unresolvedShown);
+            }
+            String report = assembleAddressReport(table.length() > 0 ? table.toString() : null, projectName,
+                severity, objectFqns, resolution, unresolvedShown, unresolvedFilteredOut, modulePaths);
+            if (resolution.error != null)
+            {
+                return resolution.error;
+            }
+            StringBuilder withModuleNote = new StringBuilder(report).append(otherSeverities);
+            appendModulePathsNotFound(withModuleNote, projectName, modulePaths);
+            // The machine rows are the rows the report shows: a row cut by the size budget is on the next page.
+            return addressPayload(withModuleNote.toString(), errors.subList(0, Math.min(shown, errors.size())),
+                resolution, total, offset);
         }
         catch (Exception e)
         {
@@ -589,37 +752,75 @@ public class GetProjectErrorsTool implements IMcpTool
 
 
     /**
-     * Assembles the Markdown an {@code objectFqns} call returns: the table or the empty-report
-     * banner, then EVERY caveat that applies.
+     * Assembles the result body an {@code objectFqns} call returns: a refusal when nothing resolved,
+     * or the Markdown table / empty-report banner followed by EVERY applicable caveat.
      *
      * <p>Extracted so a test can pin that each warning is really EMITTED, not merely that its
      * renderer works when called by hand. A revert sweep found this gap the hard way: dropping the
      * partial-answer warning from the report reddened nothing, because the only test called
      * {@link #appendIncompleteScopeWarning} directly.</p>
      *
-     * @param errors the collected problem rows
+     * @param errors every matching problem row (the first {@code limit} are rendered as the page)
      * @param projectName the project filter, may be {@code null}/empty
      * @param severity the severity filter, may be {@code null}/empty
      * @param objectFqns the requested addresses, echoed in the banner
-     * @param limit the result limit
+     * @param limit the page size
      * @param detailed whether to render the full table
      * @param resolution the per-address verdicts, including the partial-answer map
      * @param unresolvedShown out-counter of markers shown with a placeholder location
      * @param unresolvedFilteredOut out-counter of markers excluded because their location was unknown
-     * @return the assembled Markdown
+     * @return the assembled Markdown, or a {@link ToolResult#error(String)} JSON refusal
      */
     static String assembleAddressReport(List<ErrorInfo> errors, String projectName, String severity,
         List<String> objectFqns, int limit, boolean detailed, AddressResolution resolution,
         int[] unresolvedShown, int[] unresolvedFilteredOut)
     {
-        StringBuilder md = new StringBuilder();
-        if (errors.isEmpty())
+        return assembleAddressReport(errors, projectName, severity, objectFqns, limit, detailed, resolution,
+            unresolvedShown, unresolvedFilteredOut, Collections.<String> emptyList());
+    }
+
+    /** As the overload without {@code modulePaths}, echoing that filter in the empty-report banner. */
+    static String assembleAddressReport(List<ErrorInfo> errors, String projectName, String severity,
+        List<String> objectFqns, int limit, boolean detailed, AddressResolution resolution,
+        int[] unresolvedShown, int[] unresolvedFilteredOut, List<String> modulePaths)
+    {
+        // Here the rows are the WHOLE match set and limit the page size: the first page is rendered, with
+        // the total and the next offset when the set is longer than one page.
+        String table = null;
+        if (!errors.isEmpty())
         {
-            appendNoErrorsSection(md, projectName, severity, objectFqns, PARAM_OBJECT_FQNS);
+            StringBuilder rendered = new StringBuilder();
+            appendProblemsPage(rendered, errors.subList(0, Math.min(Math.max(1, limit), errors.size())), 0,
+                errors.size(), detailed, ADDRESS_TABLE_BUDGET_CHARS);
+            table = rendered.toString();
+        }
+        return assembleAddressReport(table, projectName, severity, objectFqns, resolution, unresolvedShown,
+            unresolvedFilteredOut, modulePaths);
+    }
+
+    /**
+     * As the overloads taking the rows, with the problem table already rendered as one page
+     * ({@link #appendProblemsPage}); {@code null} when nothing matched, which gives the empty-report banner.
+     */
+    static String assembleAddressReport(String table, String projectName, String severity,
+        List<String> objectFqns, AddressResolution resolution, int[] unresolvedShown,
+        int[] unresolvedFilteredOut, List<String> modulePaths)
+    {
+        if (resolution.resolved.isEmpty()
+            && (!resolution.notFound.isEmpty() || !resolution.unsupported.isEmpty()))
+        {
+            // No resolved scope means no marker was scanned, so an all-clear would be invented.
+            resolution.error = ToolResult.error(unscannableRefusal(resolution)).toJson();
+            return resolution.error;
+        }
+        StringBuilder md = new StringBuilder();
+        if (table == null)
+        {
+            appendNoErrorsSection(md, projectName, severity, objectFqns, PARAM_OBJECT_FQNS, modulePaths);
         }
         else
         {
-            appendProblemsTable(md, errors, limit, detailed);
+            md.append(table);
         }
         // Appended AFTER either branch on purpose: a PARTIAL miss (some addresses resolved, some did
         // not) must be visible next to the results too, not only on an empty report.
@@ -631,21 +832,71 @@ public class GetProjectErrorsTool implements IMcpTool
     }
 
     /**
+     * The refusal for a request in which NOTHING could be scanned, worded per address.
+     *
+     * <p>The two verdicts have different remedies and must not share one sentence: a MISS is
+     * fixed by another spelling or the loose filter, while an UNSUPPORTED family is not a
+     * misspelling at all - its reason already names the tool that owns it. Collapsing both into
+     * "nothing resolved" sent half the callers to look up an FQN that was never wrong.</p>
+     *
+     * @param resolution the per-address verdicts, none of which resolved
+     * @return the refusal message
+     */
+    private static String unscannableRefusal(AddressResolution resolution)
+    {
+        StringBuilder message = new StringBuilder("Cannot scan ").append(PARAM_OBJECT_FQNS) //$NON-NLS-1$
+            .append(" because no requested address could be scanned."); //$NON-NLS-1$
+        if (!resolution.notFound.isEmpty())
+        {
+            message.append(" Not found: ").append(String.join(", ", resolution.notFound)) //$NON-NLS-1$ //$NON-NLS-2$
+                .append(". Use the loose '").append(PARAM_OBJECTS) //$NON-NLS-1$
+                .append("' filter to match reported locations, or call get_metadata_objects to ") //$NON-NLS-1$
+                .append("find valid FQNs."); //$NON-NLS-1$
+        }
+        for (Map<String, String> entry : resolution.unsupported)
+        {
+            message.append(' ').append(entry.get("fqn")).append(": ") //$NON-NLS-1$ //$NON-NLS-2$
+                .append(entry.get("reason")); //$NON-NLS-1$
+        }
+        return message.toString();
+    }
+
+    /**
      * Assembles the {@code structuredContent} payload of an {@code objectFqns} call: the Markdown
-     * report a human reads, plus the three address verdicts a machine consumes. All three verdict
+     * report a human reads, the detached problem rows and the three address verdicts a machine consumes. All three verdict
      * lists are ALWAYS emitted (empty when there is nothing to report), so a consumer never has to
      * distinguish "absent" from "none" - the consistency rule the response contract requires.
      *
      * @param report the rendered Markdown report
-     * @param problemsFound how many problem rows the report carries
+     * @param problems the detached marker rows, already filtered and limited
      * @param resolution the per-address verdicts
      * @return the JSON payload
      */
-    static String addressPayload(String report, int problemsFound, AddressResolution resolution)
+    static String addressPayload(String report, List<ErrorInfo> problems, AddressResolution resolution)
     {
+        return addressPayload(report, problems, resolution, problems.size(), 0);
+    }
+
+    /**
+     * As {@link #addressPayload(String, List, AddressResolution)} for one page of a longer result: next to
+     * the rows of this page ({@code problemsFound}) it carries how many problems match in total
+     * ({@code problemsTotal}), whether more remain ({@code hasMore}) and the {@code offset} that fetches
+     * them ({@code nextOffset}). All four are always emitted.
+     *
+     * @param total how many problems match the filters across every page
+     * @param offset the offset this page starts at
+     */
+    static String addressPayload(String report, List<ErrorInfo> problems, AddressResolution resolution,
+        int total, int offset)
+    {
+        int nextOffset = offset + problems.size();
         return ToolResult.success()
             .put(KEY_REPORT, report)
-            .put(KEY_PROBLEMS_FOUND, problemsFound)
+            .put(KEY_PROBLEMS_FOUND, problems.size())
+            .put(KEY_PROBLEMS_TOTAL, total)
+            .put(KEY_HAS_MORE, nextOffset < total)
+            .put(KEY_NEXT_OFFSET, nextOffset)
+            .put("problems", problems) //$NON-NLS-1$
             .put(KEY_OBJECTS_RESOLVED, resolution.resolved)
             .put(KEY_OBJECTS_NOT_FOUND, resolution.notFound)
             .put(KEY_OBJECTS_UNSUPPORTED, resolution.unsupported)
@@ -728,17 +979,23 @@ public class GetProjectErrorsTool implements IMcpTool
         for (IProject project : scope)
         {
             IBmModel bmModel = null;
-            Configuration config = null;
+            MetadataScope metadataScope = null;
             if (project.isOpen())
             {
                 // Only an OPEN project can be asked; a closed one goes straight to the unreadable
                 // branch instead of being probed (and instead of being silently dropped).
-                bmModel = bmModelManager != null ? bmModelManager.getModel(project) : null;
-                ProjectContext.ConfigurationResult configResult =
-                    ProjectContext.of(project.getName()).resolveConfiguration();
-                config = configResult.ok() ? configResult.configuration() : null;
+                bmModel = bmModelManager != null ? BmModelResolver.resolve(project, bmModelManager).getModel() : null;
+                ProjectContext.ConfigurationResult rootResult =
+                    ProjectContext.of(project.getName()).resolveMetadataRoot();
+                metadataScope = rootResult.scope();
+                if (metadataScope == null)
+                {
+                    // Preserve the project kind when root resolution failed, because it decides
+                    // whether an external-object address is absent or merely unreadable.
+                    metadataScope = MetadataScope.of(project, rootResult.configuration());
+                }
             }
-            ProjectResolution decided = projectDecision(project, bmModel, config, resolvable);
+            ProjectResolution decided = projectDecision(project, bmModel, metadataScope, resolvable);
             if (decided != null)
             {
                 perProject.add(decided);
@@ -818,11 +1075,9 @@ public class GetProjectErrorsTool implements IMcpTool
     /**
      * The EDT nature of a project that holds EXTERNAL objects (external reports / data processors).
      *
-     * <p>It is a 1C:EDT project, but it has no {@link Configuration} BY DESIGN - not "not yet". So a
-     * missing configuration here is knowledge, not a failure to look: such a project can never own an
-     * mdclass / form / Subsystem / Predefined address, which is exactly what {@code objectFqns}
-     * addresses. Classifying it as unreadable (its nature IS a V8 one) turned ordinary misses into
-     * {@code Cannot decide} across a workspace-wide scan.</p>
+     * <p>It is a 1C:EDT project, but its addressable roots are standalone external data processors
+     * and reports rather than a {@link Configuration}. Configuration-only families are absent there;
+     * its own external-object families require the project's root set to be readable.</p>
      */
     private static final List<String> V8_EXTERNAL_OBJECTS_NATURE = Collections.singletonList(
         "com._1c.g5.v8.dt.core.V8ExternalObjectsNature"); //$NON-NLS-1$
@@ -837,23 +1092,24 @@ public class GetProjectErrorsTool implements IMcpTool
      *
      * @param project the project in scope
      * @param bmModel its BM model, or {@code null} when it could not be obtained
-     * @param config its configuration, or {@code null} when it could not be resolved
+     * @param metadataScope its metadata root, or {@code null} when it could not be resolved
      * @param candidates the addresses this request is asking about
      * @return this project's decision, or {@code null} when it contributes nothing at all
      */
-    static ProjectResolution projectDecision(IProject project, IBmModel bmModel, Configuration config,
-        List<String> candidates)
+    static ProjectResolution projectDecision(IProject project, IBmModel bmModel,
+        MetadataScope metadataScope, List<String> candidates)
     {
-        if (bmModel == null || config == null)
+        if (bmModel == null || metadataScope == null || metadataScope.externalRootUnavailable()
+            || (!metadataScope.isExternalObjects() && metadataScope.configuration() == null))
         {
             // It cannot answer - but WHY decides everything (see unreadableProjectDecision).
-            return unreadableProjectDecision(project, candidates);
+            return unreadableProjectDecision(project, metadataScope, candidates);
         }
-        return resolveInProject(project, bmModel, config, candidates);
+        return resolveInProject(project, bmModel, metadataScope, candidates);
     }
 
     /**
-     * What a project whose configuration could NOT be read contributes to the request.
+     * What a project whose metadata root could NOT be read contributes to the request.
      *
      * <p>"No configuration" has THREE causes and they are three different facts. Collapsing any two
      * of them is what produced this defect twice:</p>
@@ -862,46 +1118,94 @@ public class GetProjectErrorsTool implements IMcpTool
      *       DEFINITION and cannot hold 1C metadata. It leaves the universe ({@code null}) - treating
      *       it as undecidable would let ONE such project mute the missing-address report for the
      *       whole workspace.</li>
-     *   <li><b>An EDT project that holds NO configuration by design</b> - an EXTERNAL OBJECTS
-     *       project. Its nature is a V8 one, but it structurally cannot own an mdclass / form /
-     *       Subsystem / Predefined address, and that is KNOWLEDGE, not a failure to look. It answers
-     *       ABSENT: a completed pass that resolves nothing. Calling it unreadable (its nature is
-     *       V8!) turned ordinary misses into {@code Cannot decide} on every workspace-wide scan.</li>
-     *   <li><b>An EDT project that DOES hold a configuration but is not readable now</b> - still
-     *       indexing, or closed. It could perfectly well hold the address, so it answers UNDECIDED:
-     *       skipping it lets another project's completed pass stand in as the inspection, and the
-     *       address is then reported in {@code objectsNotFound} - absence "proved" by a project
-     *       nobody looked at.</li>
+     *   <li><b>An EXTERNAL OBJECTS project whose root cannot be read</b>. Configuration-only
+     *       families are structurally ABSENT there, while addresses rooted in a standalone external
+     *       object stay UNDECIDED because the project's own roots were never inspected.</li>
+     *   <li><b>A configuration / extension project that is not readable now</b> - still indexing,
+     *       or closed. Its configuration families stay UNDECIDED, while standalone external-object
+     *       families are structurally ABSENT there.</li>
      * </ul>
      *
      * <p>Natures that cannot be determined at all fall into the LAST bucket: unknowable is never
-     * evidence that a project holds nothing.</p>
+     * evidence that a project holds nothing. Nor does the nature list overrule the scope: a
+     * project whose Configuration was read IS a 1C:EDT project, and only a project with no such
+     * evidence is judged by its descriptor.</p>
      *
      * @param project the in-scope project whose configuration could not be read
+     * @param metadataScope the project's metadata scope, when its kind could be resolved
      * @param candidates the addresses this request is asking about
      * @return an UNDECIDED resolution, an ABSENT (completed, empty) one, or {@code null} to leave
      *     the universe entirely
      */
-    static ProjectResolution unreadableProjectDecision(IProject project, List<String> candidates)
+    static ProjectResolution unreadableProjectDecision(IProject project, MetadataScope metadataScope,
+        List<String> candidates)
     {
         Set<String> natures = ProjectContext.naturesOf(project);
-        if (natures != null && !containsAny(natures, V8_CONFIGURATION_NATURES))
+        boolean externalObjects = metadataScope != null && metadataScope.isExternalObjects();
+        if (!externalObjects && natures != null)
         {
-            if (!containsAny(natures, V8_EXTERNAL_OBJECTS_NATURE))
-            {
-                // Not a 1C:EDT project at all.
-                return null;
-            }
-            // An external-objects project: KNOWN to hold no addressable metadata, so this is a
-            // decided ABSENCE - a completed pass that resolves nothing - not an inability to look.
-            ProjectResolution absent = new ProjectResolution(project.getName());
-            absent.passCompleted = true;
-            return absent;
+            externalObjects = containsAny(natures, V8_EXTERNAL_OBJECTS_NATURE);
         }
-        // Holds a configuration but could not be read now, or its natures are unknowable.
+        if (externalObjects)
+        {
+            return unreadableKnownProjectKindDecision(project, candidates, true);
+        }
+        // A project that HANDED OVER a Configuration is a 1C:EDT project by evidence, whatever
+        // its .project descriptor lists: the nature allowlist is the fallback for a root that
+        // could not be read, never a veto over a root that was.
+        boolean holdsConfiguration = metadataScope != null && metadataScope.configuration() != null;
+        if (holdsConfiguration || (natures != null && containsAny(natures, V8_CONFIGURATION_NATURES)))
+        {
+            return unreadableKnownProjectKindDecision(project, candidates, false);
+        }
+        if (natures != null)
+        {
+            // Not a 1C:EDT project at all.
+            return null;
+        }
+        // Its project kind is unknowable, so no family can be excluded safely.
         ProjectResolution unreadable = new ProjectResolution(project.getName());
         unreadable.undecided.addAll(candidates);
         return unreadable;
+    }
+
+    /** Whether the address is rooted in a standalone external-object family. */
+    private static boolean isStandaloneAddress(String fqn)
+    {
+        String canonical = canonicalAddress(fqn);
+        if (canonical == null)
+        {
+            return false;
+        }
+        int dot = canonical.indexOf('.');
+        String typeToken = dot < 0 ? canonical : canonical.substring(0, dot);
+        MetadataTypeUtils.MetadataTypeInfo info = MetadataTypeUtils.resolve(typeToken);
+        return info != null && info.isStandalone();
+    }
+
+    /** Decides incompatible families before an unreadable project root can obscure them. */
+    private static ProjectResolution unreadableKnownProjectKindDecision(IProject project,
+        List<String> candidates, boolean externalObjects)
+    {
+        ProjectResolution decided = new ProjectResolution(project.getName());
+        for (String candidate : candidates)
+        {
+            if (isStandaloneAddress(candidate) == externalObjects)
+            {
+                decided.undecided.add(candidate);
+            }
+            else
+            {
+                decided.passCompleted = true;
+            }
+        }
+        return decided;
+    }
+
+    /** Whether this project kind can own the address family. */
+    private static boolean belongsToProjectKind(MetadataScope metadataScope, String fqn)
+    {
+        return metadataScope.isExternalObjects() == isStandaloneAddress(fqn);
     }
 
     /** Whether {@code natures} carries any of {@code wanted}. */
@@ -1025,9 +1329,7 @@ public class GetProjectErrorsTool implements IMcpTool
         boolean inspectedAny = false;
         for (ProjectResolution decided : perProject)
         {
-            // Counted as inspected only when the pass really COMPLETED: a pass that threw decided
-            // nothing, so treating it as an inspection would turn its undecided addresses into
-            // "not found" (see resolveInProject).
+            // Structural absence is completed before a model read; a total read failure is not.
             inspectedAny |= decided.passCompleted;
             for (String fqn : candidates)
             {
@@ -1075,7 +1377,7 @@ public class GetProjectErrorsTool implements IMcpTool
      * @param resolution the resolution being filled
      * @param candidates the addresses that need resolution, in request order
      * @param knowledge what is known about each address across the whole universe
-     * @param inspectedAny whether ANY project completed a resolve pass
+     * @param inspectedAny whether ANY project contributed a completed decision
      */
     private static void applyWireContract(AddressResolution resolution, List<String> candidates,
         Map<String, AddressKnowledge> knowledge, boolean inspectedAny)
@@ -1165,43 +1467,58 @@ public class GetProjectErrorsTool implements IMcpTool
      *
      * @param project the project being inspected
      * @param bmModel its BM model
-     * @param config its configuration
+     * @param metadataScope its metadata resolution root
      * @param candidates the addresses to decide
      * @return what this project decided: the spellings that resolved HERE, the addresses it could
      *     not decide at all (the pass threw, or a form's content model could not be read - never a
-     *     "does not exist"), and whether the pass ran to the end
+     *     "does not exist"), and whether any decision completed
      */
     static ProjectResolution resolveInProject(IProject project, IBmModel bmModel,
-        Configuration config, List<String> candidates)
+        MetadataScope metadataScope, List<String> candidates)
     {
         ProjectResolution decided = new ProjectResolution(project.getName());
+        List<String> ownedCandidates = new ArrayList<>();
+        for (String candidate : candidates)
+        {
+            if (belongsToProjectKind(metadataScope, candidate))
+            {
+                ownedCandidates.add(candidate);
+            }
+            else
+            {
+                // This absence is structural, so a later model failure cannot erase it.
+                decided.passCompleted = true;
+            }
+        }
+        if (ownedCandidates.isEmpty())
+        {
+            return decided;
+        }
         List<DeferredMember> deferred = new ArrayList<>();
         try
         {
             BmTransactions.<Void>read(bmModel, "ResolveErrorObjectAddresses", (tx, pm) -> { //$NON-NLS-1$
-                for (String fqn : candidates)
+                for (String fqn : ownedCandidates)
                 {
-                    resolveCandidate(config, fqn, decided.resolved, deferred);
+                    resolveCandidate(metadataScope, fqn, decided.resolved, deferred);
                 }
                 return null;
             });
         }
         catch (Exception e)
         {
-            // A failure here is a failure to DECIDE, never a "does not exist": every address this
-            // project was asked about stays undecided, so another project in scope can still answer
-            // for it and a lone failure refuses the call instead of answering it.
+            // Only families this project can own become unknown; the others are already absent.
             Activator.logError("Failed to resolve " + PARAM_OBJECT_FQNS + " in project " //$NON-NLS-1$ //$NON-NLS-2$
                 + project.getName(), e);
             decided.resolved.clear();
-            decided.undecided.addAll(candidates);
+            decided.undecided.addAll(ownedCandidates);
             return decided;
         }
 
         // Addresses whose ONLY attempt failed to read the form content model. They are undecided,
         // exactly like the addresses of a pass that threw - never "not found".
         resolveDeferredMembers(deferred, decided,
-            member -> formMemberScopeSpellings(project, config, member));
+            member -> formMemberScopeSpellings(project, metadataScope, member));
         decided.passCompleted = true;
         return decided;
     }
@@ -1289,12 +1606,12 @@ public class GetProjectErrorsTool implements IMcpTool
      * resolves wins, and a form-MEMBER probe is deferred out of the transaction instead (see
      * {@link #resolveInProject}).
      *
-     * @param config the configuration to resolve against
+     * @param metadataScope the metadata root to resolve against
      * @param fqn the requested address, as the caller wrote it
      * @param found this project's accumulator: requested address -&gt; the spellings that resolved
      * @param deferred the accumulator of form-member probes to decide after the transaction
      */
-    private static void resolveCandidate(Configuration config, String fqn,
+    private static void resolveCandidate(MetadataScope metadataScope, String fqn,
         Map<String, Set<String>> found, List<DeferredMember> deferred)
     {
         if (found.containsKey(fqn))
@@ -1324,7 +1641,7 @@ public class GetProjectErrorsTool implements IMcpTool
             }
             else
             {
-                Set<String> storedSet = resolvedSpellings(config, probe);
+                Set<String> storedSet = resolvedSpellings(metadataScope, probe);
                 if (!storedSet.isEmpty())
                 {
                     if (asTyped)
@@ -1393,6 +1710,9 @@ public class GetProjectErrorsTool implements IMcpTool
      * prevent. Scoping by the owning node instead widens the answer to that node's problems, which
      * is visible in every row's Location and never hides one.</p>
      *
+     * <p>Referenced top objects are marker roots too: their contained members use the file owner
+     * declared by the shared metadata grammar, while a Table/Cube address itself stays exact.</p>
+     *
      * @param normFqn the type-normalized address that resolved
      * @return the owning node's address, or {@code null} when {@code normFqn} is already it
      */
@@ -1408,13 +1728,14 @@ public class GetProjectErrorsTool implements IMcpTool
         {
             return null;
         }
-        String[] parts = normFqn.split("\\."); //$NON-NLS-1$
+        String[] parts = Objects.requireNonNull(normFqn).split("\\."); //$NON-NLS-1$
         if (parts.length <= 2)
         {
             // Type.Name is the object itself, and a one-segment address names nothing narrower.
             return null;
         }
-        return parts[0] + "." + parts[1]; //$NON-NLS-1$
+        String owner = ReferencedTopObjects.fileOwnerFqn(normFqn);
+        return normFqn.equals(owner) ? null : owner;
     }
 
     /**
@@ -1680,28 +2001,19 @@ public class GetProjectErrorsTool implements IMcpTool
         {
             return false;
         }
+        EClass ownerType = (EClass)MdClassPackage.eINSTANCE.getEClassifier(
+            MetadataTypeUtils.toEnglishSingular(parts[0]));
         for (int i = 2; i < parts.length; i += 2)
         {
-            // The NAVIGABLE-child catalogue, not the segment-alias one. The alias catalogue also
-            // holds kinds that exist only INSIDE a form (Field, Group, Button, ...), so asking it
-            // let 'Catalog.Products.Field.Code' - a form kind hung directly off a mdclass object -
-            // pass as a shape some configuration might hold. Nothing can: the mdclass metamodel has
-            // no such containment. Form / Handler are absent here on purpose; they lead out of the
-            // mdclass model and the two form grammars above own them.
-            String feature = MetadataNodeResolver.featureNameForKind(parts[i]);
-            if (feature == null)
+            // Tokens alone do not establish a path: Field and Table also name form items.
+            // Check the actual owner EClass at EVERY step, then follow the reference's element
+            // type. This accepts EDS.Table.Field while rejecting Catalog.TabularSection.Field.
+            EReference child = MetadataNodeResolver.childFeature(ownerType, parts[i]);
+            if (child == null || !child.isMany())
             {
                 return false;
             }
-            // ...and, at the FIRST level, whether THIS owner can hold that child at all: 'Column' is
-            // a real kind but a containment of DocumentJournal, so 'Catalog.Products.Column.Number'
-            // names nothing in any configuration. Only the first level is checked because deeper
-            // owners are not named by a type token (the owner of an Attribute under a TabularSection
-            // is the tabular section, which no segment types), and a gap here is the safe direction.
-            if (i == 2 && !ownerTypeCanContain(parts[0], feature))
-            {
-                return false;
-            }
+            ownerType = child.getEReferenceType();
         }
         return true;
     }
@@ -1836,7 +2148,7 @@ public class GetProjectErrorsTool implements IMcpTool
     }
 
     /**
-     * The spelling {@code normFqn} really resolved to in {@code config}, dispatching to the
+     * The spelling {@code normFqn} really resolved to in {@code metadataScope}, dispatching to the
      * specialized resolver of the address family it belongs to, or {@code null} when it resolves to
      * nothing. Form MEMBERS are NOT decided here (see {@link #formMemberScopeSpellings}); every
      * other supported family is.
@@ -1851,20 +2163,30 @@ public class GetProjectErrorsTool implements IMcpTool
      * differently spelled node; the caller would stop enumerating on that hit, scope the scan by a
      * name the model does not store, and never look for the other nodes the address can mean.</p>
      *
-     * <p>Call inside a BM read transaction bound to this configuration's model.</p>
+     * <p>Call inside a BM read transaction bound to this project's model.</p>
      *
-     * @param config the configuration to resolve against
+     * @param metadataScope the metadata root to resolve against
      * @param normFqn the type-normalized address
      * @return the resolved (stored) spelling, or {@code null} when the address resolves to nothing
      */
-    static Set<String> resolvedSpellings(Configuration config, String normFqn)
+    static Set<String> resolvedSpellings(MetadataScope metadataScope, String normFqn)
     {
+        if (!belongsToProjectKind(metadataScope, normFqn))
+        {
+            // A linked base configuration belongs to another project, never to this scope.
+            return Collections.emptySet();
+        }
         // A Subsystem chain nests the same kind token repeatedly, which the generic child-feature
         // navigation does not model - SubsystemUtils owns that grammar. It is also the only family
         // whose depth is UNBOUNDED, so its yo fallback is applied level by level (linear, and it
         // never builds a combination) rather than by probing whole-address spellings.
         if (SubsystemUtils.parseSubsystemPath(normFqn) != null)
         {
+            Configuration config = metadataScope.configuration();
+            if (config == null)
+            {
+                return Collections.emptySet();
+            }
             Set<String> chains = new LinkedHashSet<>();
             for (String[] stored : SubsystemUtils.resolveStoredChain(config, normFqn))
             {
@@ -1877,6 +2199,11 @@ public class GetProjectErrorsTool implements IMcpTool
         PredefinedWriter.PredefinedRef predefined = PredefinedWriter.parseRef(normFqn);
         if (predefined != null)
         {
+            Configuration config = metadataScope.configuration();
+            if (config == null)
+            {
+                return Collections.emptySet();
+            }
             MetadataNodeResolver.MetadataNode owner =
                 MetadataNodeResolver.resolveExisting(config, predefined.ownerFqn());
             if (owner == null)
@@ -1895,10 +2222,10 @@ public class GetProjectErrorsTool implements IMcpTool
         String formPath = FormElementWriter.parseFormPath(normFqn);
         if (formPath != null)
         {
-            return FormStructureReader.resolveMdForm(config, formPath) != null
+            return FormStructureReader.resolveMdForm(metadataScope, formPath) != null
                 ? Collections.singleton(normFqn) : Collections.<String> emptySet();
         }
-        return MetadataNodeResolver.resolveExisting(config, normFqn) != null
+        return MetadataNodeResolver.resolveExisting(metadataScope, normFqn) != null
             ? Collections.singleton(normFqn) : Collections.<String> emptySet();
     }
 
@@ -1940,27 +2267,26 @@ public class GetProjectErrorsTool implements IMcpTool
      * <p>Call OUTSIDE a BM transaction: {@link FormElementWriter#readEditableForm} opens its own.</p>
      *
      * @param project the project owning the form
-     * @param config the project configuration
+     * @param metadataScope the project's metadata resolution root
      * @param member the deferred member probe (its ref and the spelling being probed)
      * @return the scan-scoping spellings (never empty) when the form AND the addressed leaf exist;
      *     an EMPTY list when the address is PROVEN absent; and {@code null} when the form content
      *     model could not be read at all - an infrastructure failure decides nothing and must never
      *     be reported as "this address does not exist"
      */
-    private static List<String> formMemberScopeSpellings(IProject project, Configuration config,
+    private static List<String> formMemberScopeSpellings(IProject project, MetadataScope metadataScope,
         DeferredMember member)
     {
         FormElementWriter.FormMemberRef ref = member.ref;
         FormElementWriter.FormEditContext ctx;
         try
         {
-            MdObject mdForm = FormStructureReader.resolveMdForm(config, ref.formPath);
-            if (mdForm == null)
+            ctx = FormElementWriter.resolveForEditOrNull(project, metadataScope, ref.formPath);
+            if (ctx == null)
             {
-                // The form itself is absent from this configuration: a decided "not here".
+                // The form itself is absent from this project's root: a decided "not here".
                 return Collections.emptyList();
             }
-            ctx = FormElementWriter.editContextFor(project, mdForm);
         }
         catch (Exception e)
         {
@@ -2149,38 +2475,6 @@ public class GetProjectErrorsTool implements IMcpTool
     }
 
     /**
-     * Groups all markers by their owning project in a single pass, honoring an optional
-     * {@code projectName} filter. {@link Marker#getProject()} does not touch
-     * {@code resolvedDataCache}, so this is safe outside a BM transaction. Grouping once avoids
-     * re-streaming all markers per project (previously O(markers x projects)). Marker
-     * presentation must still be resolved inside a BM read transaction bound to a single
-     * project's model, so the subsequent processing stays project by project.
-     *
-     * @param markerManager the marker manager supplying the markers
-     * @param projectName the project name filter, may be {@code null}/empty for all projects
-     * @return markers grouped by project, in encounter order
-     */
-    private static Map<IProject, List<Marker>> groupMarkersByProject(IMarkerManager markerManager,
-        String projectName)
-    {
-        Map<IProject, List<Marker>> markersByProject = new LinkedHashMap<>();
-        markerManager.markers().forEach(marker -> {
-            IProject markerProject = marker.getProject();
-            if (markerProject == null || !markerProject.exists())
-            {
-                return;
-            }
-            if (projectName != null && !projectName.isEmpty()
-                && !projectName.equals(markerProject.getName()))
-            {
-                return;
-            }
-            markersByProject.computeIfAbsent(markerProject, k -> new ArrayList<>()).add(marker);
-        });
-        return markersByProject;
-    }
-
-    /**
      * Collects matching {@link ErrorInfo} entries from the per-project markers, applying the
      * severity/checkId/objects filters and respecting {@code limit}. Each project's markers are
      * processed inside a BM read transaction (when a model is available) so that
@@ -2194,17 +2488,56 @@ public class GetProjectErrorsTool implements IMcpTool
      *     two unresolved-marker out-counters)
      * @return the collected errors, capped at {@code context.limit}
      */
-    private static List<ErrorInfo> collectErrors(Map<IProject, List<Marker>> markersByProject,
+    static List<ErrorInfo> collectErrors(Map<IProject, List<Marker>> markersByProject,
         IBmModelManager bmModelManager, CollectContext context)
     {
         final List<ErrorInfo> errors = new ArrayList<>();
+        // EVERY marker is tested, also past the page: the total is what tells the caller the answer is
+        // partial, and stopping at the limit is how a long answer used to end without saying so (#917).
+        // Past the page a marker is only MATCHED (no row is built, and the object presentation - the one
+        // model read - is read only when an objects filter needs it), so counting stays cheap.
+        forEachScopedProject(markersByProject, bmModelManager, context, (projectObjects, projectMarkers) -> {
+            for (Marker marker : projectMarkers)
+            {
+                // The modulePaths filter is part of the match, so it narrows the stream BEFORE the page.
+                MarkerRows.Match match = MarkerRows.matchOf(marker, context.severityFilter, context.checkId,
+                    projectObjects, context.modulePathKeys, context.checkRepository, context.unresolvedFilteredOut,
+                    context.exactScope);
+                if (match == null)
+                {
+                    continue;
+                }
+                int index = context.total[0]++;
+                if (index < context.offset || errors.size() >= context.limit)
+                {
+                    continue;
+                }
+                // The row is built from THIS decision, never from a second filter pass: the presentation and
+                // the check-repository lookup are best-effort, so a rerun could reject the marker that was just
+                // counted and given this page position, and the next marker would take its place.
+                // A placeholder location is only COUNTED once the row is really rendered: the size budget may move
+                // the tail of this page to the next one (see appendProblemsPage), so the row carries the flag.
+                int[] placeholder = new int[1];
+                ErrorInfo row = MarkerRows.buildRow(marker, match, context.checkRepository, context.fixRepository,
+                    placeholder, true, ErrorInfo::new);
+                row.presentationUnresolved = placeholder[0] > 0;
+                errors.add(row);
+            }
+        });
+        return errors;
+    }
+
+    /**
+     * Runs {@code scan} over each project's markers inside that project's BM read boundary (when a model
+     * is available), with the object filter that applies to THAT project. A project that must contribute
+     * nothing ({@link CollectContext#objectsFor} returns {@code null}) is skipped.
+     */
+    private static void forEachScopedProject(Map<IProject, List<Marker>> markersByProject,
+        IBmModelManager bmModelManager, CollectContext context,
+        BiConsumer<Set<String>, List<Marker>> scan)
+    {
         for (Map.Entry<IProject, List<Marker>> entry : markersByProject.entrySet())
         {
-            if (errors.size() >= context.limit)
-            {
-                break;
-            }
-
             // The objects filter of THIS project. An exact-address call scopes each project by the
             // spellings that resolved THERE, so a project that resolved nothing contributes no
             // marker: an exact address is a claim about one node, and a project the node does not
@@ -2216,28 +2549,17 @@ public class GetProjectErrorsTool implements IMcpTool
             {
                 continue;
             }
-
             final List<Marker> projectMarkers = entry.getValue();
-            final int remaining = context.limit - errors.size();
 
             // Resolve the project's BM model so getObjectPresentation() can lazily
             // resolve the marker target inside a read transaction. The getModel(IProject)
             // overload is the idiomatic path used across the plugin (FindReferencesTool,
             // CreateMetadataTool, tag tools), so no IDtProjectManager is needed.
-            IBmModel bmModel = bmModelManager != null ? bmModelManager.getModel(entry.getKey()) : null;
-
-            Runnable collector = () -> projectMarkers.stream()
-                .map(marker -> buildIfMatches(marker, context.severityFilter, context.checkId,
-                    projectObjects, context.checkRepository, context.fixRepository,
-                    context.unresolvedShown, context.unresolvedFilteredOut, context.exactScope))
-                .filter(Objects::nonNull)
-                .limit(remaining)
-                .forEach(errors::add);
-
+            IBmModel bmModel = bmModelManager != null ? BmModelResolver.resolve(entry.getKey(), bmModelManager).getModel() : null;
             if (bmModel != null)
             {
                 BmTransactions.<Void>read(bmModel, "CollectProjectErrors", (tx, pm) -> { //$NON-NLS-1$
-                    collector.run();
+                    scan.accept(projectObjects, projectMarkers);
                     return null;
                 });
             }
@@ -2245,10 +2567,53 @@ public class GetProjectErrorsTool implements IMcpTool
             {
                 // Not an EDT project (no BM model): best effort. Per-marker access is
                 // still guarded, so an unresolved marker is reported, never dropped.
-                collector.run();
+                scan.accept(projectObjects, projectMarkers);
             }
         }
-        return errors;
+    }
+
+    /**
+     * Counts, per severity, the markers that pass every filter of {@code context} EXCEPT the severity one.
+     * Run only when a severity filter left nothing: it is what turns that empty answer into "nothing at this
+     * level, but N problems at these levels" instead of a report that reads like a clean scope (#918).
+     *
+     * @return severity -&gt; count, in severity order; empty when no severity filter is set or nothing else
+     *     matches either
+     */
+    static Map<MarkerSeverity, Integer> countOtherSeverities(Map<IProject, List<Marker>> markersByProject,
+        IBmModelManager bmModelManager, CollectContext context)
+    {
+        Map<MarkerSeverity, Integer> counts = new EnumMap<>(MarkerSeverity.class);
+        if (context.severityFilter == null)
+        {
+            return counts;
+        }
+        // Scratch counter: this second look must not double the unresolved-location warning of the scan.
+        int[] scratch = new int[1];
+        forEachScopedProject(markersByProject, bmModelManager, context, (projectObjects, projectMarkers) -> {
+            for (Marker marker : projectMarkers)
+            {
+                MarkerSeverity severity = marker.getSeverity() != null ? marker.getSeverity() : MarkerSeverity.NONE;
+                if (severity != context.severityFilter
+                    && MarkerRows.matches(marker, null, context.checkId, projectObjects, context.modulePathKeys,
+                        context.checkRepository, scratch, context.exactScope))
+                {
+                    counts.merge(severity, 1, Integer::sum);
+                }
+            }
+        });
+        return counts;
+    }
+
+    /** Appends the note of {@link MarkerRows#appendOtherSeveritiesNote} for a severity filter that left nothing. */
+    private static void appendOtherSeverities(StringBuilder md, Map<IProject, List<Marker>> markersByProject,
+        IBmModelManager bmModelManager, CollectContext context)
+    {
+        if (context.severityFilter != null)
+        {
+            MarkerRows.appendOtherSeveritiesNote(md, context.severityFilter,
+                countOtherSeverities(markersByProject, bmModelManager, context));
+        }
     }
 
     /**
@@ -2257,7 +2622,7 @@ public class GetProjectErrorsTool implements IMcpTool
      * the two unresolved-marker out-counters. The {@code int[]} counters are shared references whose
      * contents are advanced exactly as before. Bundles the parameters without changing any value.
      */
-    private static final class CollectContext
+    static final class CollectContext
     {
         final MarkerSeverity severityFilter;
         final String checkId;
@@ -2275,20 +2640,29 @@ public class GetProjectErrorsTool implements IMcpTool
          * marker at all.
          */
         final Map<String, Set<String>> objectsByProject;
+        /** The {@code modulePaths} keys ({@link MarkerRows#modulePathKeys}); empty = no module filter. */
+        final Set<String> modulePathKeys;
+        /** How many matching problems precede the page ({@code offset}). */
+        final int offset;
+        /** Out-counter: how many problems match the filters, over every page. */
+        final int[] total = new int[1];
 
         CollectContext(MarkerSeverity severityFilter, String checkId, Set<String> objects,
             ICheckRepository checkRepository, IFixRepository fixRepository, int limit,
-            int[] unresolvedShown, int[] unresolvedFilteredOut, boolean exactScope)
+            int[] unresolvedShown, int[] unresolvedFilteredOut, boolean exactScope,
+            Map<String, Set<String>> objectsByProject, Set<String> modulePathKeys)
         {
-            this(severityFilter, checkId, objects, checkRepository, fixRepository, limit,
-                unresolvedShown, unresolvedFilteredOut, exactScope, null);
+            this(severityFilter, checkId, objects, checkRepository, fixRepository, limit, unresolvedShown,
+                unresolvedFilteredOut, exactScope, objectsByProject, modulePathKeys, 0);
         }
 
         CollectContext(MarkerSeverity severityFilter, String checkId, Set<String> objects,
             ICheckRepository checkRepository, IFixRepository fixRepository, int limit,
             int[] unresolvedShown, int[] unresolvedFilteredOut, boolean exactScope,
-            Map<String, Set<String>> objectsByProject)
+            Map<String, Set<String>> objectsByProject, Set<String> modulePathKeys, int offset)
         {
+            this.offset = Math.max(0, offset);
+            this.modulePathKeys = modulePathKeys != null ? modulePathKeys : Collections.<String> emptySet();
             this.severityFilter = severityFilter;
             this.checkId = checkId;
             this.objects = objects;
@@ -2312,6 +2686,12 @@ public class GetProjectErrorsTool implements IMcpTool
         Set<String> objectsFor(IProject project)
         {
             return objectsForProject(objectsByProject, objects, project.getName());
+        }
+
+        /** How many problems matched the filters in the last {@link #collectErrors} run, over every page. */
+        int total()
+        {
+            return total[0];
         }
     }
 
@@ -2350,6 +2730,18 @@ public class GetProjectErrorsTool implements IMcpTool
     static void appendNoErrorsSection(StringBuilder md, String projectName, String severity,
         List<String> objects, String objectsParam)
     {
+        appendNoErrorsSection(md, projectName, severity, objects, objectsParam, null);
+    }
+
+    /**
+     * As {@link #appendNoErrorsSection(StringBuilder, String, String, List, String)}, also echoing the
+     * {@code modulePaths} filter when one was applied.
+     *
+     * @param modulePaths the normalised module-path filter, may be {@code null}/empty
+     */
+    static void appendNoErrorsSection(StringBuilder md, String projectName, String severity,
+        List<String> objects, String objectsParam, List<String> modulePaths)
+    {
         md.append("# No Errors Found\n\n"); //$NON-NLS-1$
         if (projectName != null && !projectName.isEmpty())
         {
@@ -2366,52 +2758,127 @@ public class GetProjectErrorsTool implements IMcpTool
             String label = PARAM_OBJECT_FQNS.equals(objectsParam) ? "objectFqns filter" : "Objects filter"; //$NON-NLS-1$ //$NON-NLS-2$
             md.append(label).append(": ").append(String.join(", ", objects)).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
+        if (modulePaths != null && !modulePaths.isEmpty())
+        {
+            md.append("Module paths filter: ").append(String.join(", ", modulePaths)).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
         md.append("\nNo configuration problems match the specified criteria."); //$NON-NLS-1$
     }
 
     /**
-     * Appends the "Configuration Problems" Markdown section — the found-count header, the
-     * table header and one row per error — to {@code md}.
+     * Appends the "Configuration Problems" Markdown section for ONE page of a result: the found line with
+     * the total and the page window, the table, and - when problems remain beyond the page - how to get
+     * them.
+     *
+     * <p>The rows stop at a ROW boundary once the table would pass {@code budgetChars}, so the output cap
+     * ({@link OutputSizeGuard}) never cuts the table mid-list; the rows that did not fit start the next
+     * page, and the report says so and names its offset. At least one row is always rendered; that is safe
+     * because every free-text cell is bounded ({@link #boundedCell}), so one row is always far below the budget.</p>
+     *
+     * <p>Never reads like a clean scope when problems exist: an {@code offset} past the last problem is
+     * reported as such, with the total.</p>
      *
      * @param md the Markdown builder to append to
-     * @param errors the collected errors (must be non-empty)
-     * @param limit the result limit (drives the "limit reached" notice)
-     * @param detailed when {@code true} include the secondary {@code Has docs} column
+     * @param errors the rows of this page, in order
+     * @param offset how many matching problems precede this page
+     * @param total how many problems match, over every page (at least 1)
+     * @param detailed when {@code true} include saved ranges and {@code Has docs}
+     * @param budgetChars the character budget of the table rows
+     * @return how many of {@code errors} were rendered
      */
-    private static void appendProblemsTable(StringBuilder md, List<ErrorInfo> errors, int limit,
-        boolean detailed)
+    static int appendProblemsPage(StringBuilder md, List<ErrorInfo> errors, int offset, int total,
+        boolean detailed, int budgetChars)
+    {
+        return appendProblemsPage(md, errors, offset, total, detailed, budgetChars, null);
+    }
+
+    /**
+     * As {@link #appendProblemsPage(StringBuilder, List, int, int, boolean, int)}, also setting
+     * {@code unresolvedShown[0]} to the number of RENDERED rows that carry the unresolved-location
+     * placeholder - not the rows the size budget moved to the next page, which are not shown here.
+     *
+     * @param unresolvedShown out-counter for the "shown with a placeholder location" warning, may be {@code null}
+     */
+    static int appendProblemsPage(StringBuilder md, List<ErrorInfo> errors, int offset, int total,
+        boolean detailed, int budgetChars, int[] unresolvedShown)
+    {
+        int shown = renderProblemsPage(md, errors, offset, total, detailed, budgetChars);
+        if (unresolvedShown != null)
+        {
+            int placeholders = 0;
+            for (ErrorInfo row : errors.subList(0, shown))
+            {
+                if (row.presentationUnresolved)
+                {
+                    placeholders++;
+                }
+            }
+            unresolvedShown[0] = placeholders;
+        }
+        return shown;
+    }
+
+    private static int renderProblemsPage(StringBuilder md, List<ErrorInfo> errors, int offset, int total,
+        boolean detailed, int budgetChars)
     {
         md.append("# Configuration Problems\n\n"); //$NON-NLS-1$
-        md.append("**Found:** ").append(errors.size()); //$NON-NLS-1$
-        if (errors.size() >= limit)
+        if (errors.isEmpty())
         {
-            md.append(Pagination.limitReachedNotice(limit));
+            md.append("**Found:** ").append(total).append(" (offset ").append(offset) //$NON-NLS-1$ //$NON-NLS-2$
+                .append(" is past the last problem; pass an offset below ").append(total).append(")\n"); //$NON-NLS-1$ //$NON-NLS-2$
+            return 0;
         }
-        md.append("\n\n"); //$NON-NLS-1$
 
-        appendProblemsTableHeader(md, detailed);
+        StringBuilder rows = new StringBuilder();
+        appendProblemsTableHeader(rows, detailed);
+        int shown = 0;
         for (ErrorInfo error : errors)
         {
-            appendProblemRow(md, error, detailed);
+            int before = rows.length();
+            appendProblemRow(rows, error, detailed);
+            if (shown > 0 && rows.length() > budgetChars)
+            {
+                rows.setLength(before);
+                break;
+            }
+            shown++;
         }
+
+        md.append("**Found:** ").append(total).append(Pagination.pageNotice(offset, shown, total)).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+        md.append(rows);
+        if (shown < errors.size())
+        {
+            md.append("\n> ⚠️ Only ").append(shown).append(" of the ").append(errors.size()) //$NON-NLS-1$ //$NON-NLS-2$
+                .append(" rows of this page fit the response size limit; the rest start the next page") //$NON-NLS-1$
+                .append(" (offset=").append(offset + shown).append(").\n"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (offset + shown < total)
+        {
+            md.append("\n> More problems match than this page shows: call again with offset=") //$NON-NLS-1$
+                .append(offset + shown)
+                .append(", or narrow the call. For the overview first - which checks fire and in which modules,") //$NON-NLS-1$
+                .append(" with counts - call get_problem_summary with groupBy check or module and the same") //$NON-NLS-1$
+                .append(" projectName / severity / checkId / modulePaths.\n"); //$NON-NLS-1$
+        }
+        return shown;
     }
 
     /**
      * Appends the Configuration Problems table header to {@code md}. Built via the shared
      * {@link MarkdownUtils} table builder so every cell is escaped. concise (default) drops the
-     * secondary 'Has docs' column to save tokens; detailed keeps the full historical set of
-     * columns. Every essential / actionable column (Description, Location, Module path, Line,
+     * range and 'Has docs' columns to save tokens; detailed includes saved Offset/Length.
+     * Every essential / actionable column (Description, Location, Module path, Line,
      * Check code) is present in BOTH modes.
      *
      * @param md the Markdown builder to append to
-     * @param detailed when {@code true} include the secondary {@code Has docs} column
+     * @param detailed when {@code true} include saved ranges and {@code Has docs}
      */
     private static void appendProblemsTableHeader(StringBuilder md, boolean detailed)
     {
         if (detailed)
         {
             md.append(MarkdownUtils.tableHeader("Description", "Location", //$NON-NLS-1$ //$NON-NLS-2$
-                "Module path", "Line", "Check code", "Fix registered", "Has docs")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+                "Module path", "Line", "Offset", "Length", "Check code", "Fix registered", "Has docs")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
         }
         else
         {
@@ -2426,7 +2893,7 @@ public class GetProjectErrorsTool implements IMcpTool
      *
      * @param md the Markdown builder to append to
      * @param error the error to render
-     * @param detailed when {@code true} include the secondary {@code Has docs} cell
+     * @param detailed when {@code true} include saved range cells and {@code Has docs}
      */
     private static void appendProblemRow(StringBuilder md, ErrorInfo error, boolean detailed)
     {
@@ -2450,17 +2917,45 @@ public class GetProjectErrorsTool implements IMcpTool
 
         if (detailed)
         {
-            md.append(MarkdownUtils.tableRow(error.message, error.objectPresentation,
-                modulePathCell, lineCell, checkCell, fixCell,
+            md.append(MarkdownUtils.tableRow(boundedCell(error.message), boundedCell(error.objectPresentation),
+                modulePathCell, lineCell,
+                error.offset != null ? error.offset.toString() : "", //$NON-NLS-1$
+                error.length != null ? error.length.toString() : "", //$NON-NLS-1$
+                checkCell, fixCell,
                 error.hasDocumentation ? "true" : "false")); //$NON-NLS-1$ //$NON-NLS-2$
         }
         else
         {
-            md.append(MarkdownUtils.tableRow(error.message, error.objectPresentation,
+            md.append(MarkdownUtils.tableRow(boundedCell(error.message), boundedCell(error.objectPresentation),
                 modulePathCell, lineCell, checkCell, fixCell));
         }
     }
 
+    /**
+     * How many characters of one free-text cell (message, location) a problem row shows. A validation
+     * message can be arbitrarily long, and the page always renders its first row whole, so without a
+     * bound one huge message would pass the output cap and be cut mid-row - and stay the first row of
+     * every continuation page. The machine payload of an {@code objectFqns} call keeps the full text.
+     */
+    static final int MAX_CELL_CHARS = 2_000;
+
+    /**
+     * {@code text} bounded at {@link #MAX_CELL_CHARS}, with a visible note of how much was left out;
+     * {@code null} stays {@code null}. A surrogate pair is never split.
+     */
+    static String boundedCell(String text)
+    {
+        if (text == null || text.length() <= MAX_CELL_CHARS)
+        {
+            return text;
+        }
+        int keep = MAX_CELL_CHARS;
+        if (Character.isHighSurrogate(text.charAt(keep - 1)))
+        {
+            keep--;
+        }
+        return text.substring(0, keep) + " ... [cut: " + keep + " of " + text.length() + " characters shown]"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
     /**
      * Appends the human-readable {@code objectsNotFound} block to {@code md} when at least one
      * requested {@code objectFqns} address was PROVEN to resolve to nothing (see
@@ -2566,15 +3061,9 @@ public class GetProjectErrorsTool implements IMcpTool
     }
     
     /**
-     * Applies the severity/checkId/objects filters to a single marker and, if it passes,
-     * builds its {@link ErrorInfo}. Returns {@code null} when the marker is filtered out.
-     *
-     * <p>Must be called inside a BM read transaction so that
-     * {@link Marker#getObjectPresentation()} can resolve. The symbolic check id is resolved
-     * exactly once here and reused for both the checkId filter and the resulting
-     * {@link ErrorInfo}, avoiding a second {@link ICheckRepository#getUidForShortUid} call.
-     * The filter order (severity -> checkId -> objects) is preserved so the
-     * {@code unresolvedFilteredOut} counter keeps the same semantics.</p>
+     * Applies the severity/checkId/objects filters to a single marker and, if it passes, builds its
+     * {@link ErrorInfo}; {@code null} when filtered out. Must run inside a BM read transaction. The
+     * row building lives in {@link MarkerRows#buildIfMatches}.
      */
     static ErrorInfo buildIfMatches(Marker marker, MarkerSeverity severityFilter, String checkId,
         Set<String> objects, ICheckRepository checkRepository, IFixRepository fixRepository,
@@ -2587,103 +3076,17 @@ public class GetProjectErrorsTool implements IMcpTool
     /**
      * As {@link #buildIfMatches(Marker, MarkerSeverity, String, Set, ICheckRepository, IFixRepository, int[], int[])}
      * but threading {@code exactScope} into the objects filter (segment-boundary vs substring - see
-     * {@link #excludedByObjectsFilter(Set, boolean, String, int[], boolean)}).
+     * {@link MarkerRows#excludedByObjectsFilter(Set, boolean, String, int[], boolean)}).
      */
     static ErrorInfo buildIfMatches(Marker marker, MarkerSeverity severityFilter, String checkId,
         Set<String> objects, ICheckRepository checkRepository, IFixRepository fixRepository,
         int[] unresolvedShown, int[] unresolvedFilteredOut, boolean exactScope)
     {
-        // Severity filter
-        if (severityFilter != null && marker.getSeverity() != severityFilter)
-        {
-            return null;
-        }
-
-        // Resolve the check UID once; reused for the symbolic check id (display + checkId filter)
-        // AND for the hasQuickFix flag (does this check have a registered EDT auto-fix?).
-        String shortUid = marker.getCheckId() != null ? marker.getCheckId() : ""; //$NON-NLS-1$
-        CheckUid checkUid = resolveCheckUid(marker, shortUid, checkRepository);
-        String symbolicCheckId = checkUid != null ? checkUid.getCheckId() : null;
-        // Best-effort, like the object-presentation resolution below: a repository hiccup on ONE
-        // marker (stale registration, transient service state) must not abort the whole listing -
-        // just leave this row's flag unset.
-        boolean hasQuickFix = false;
-        if (checkUid != null && fixRepository != null)
-        {
-            try
-            {
-                hasQuickFix = fixRepository.hasFixes(checkUid);
-            }
-            catch (Exception e)
-            {
-                hasQuickFix = false;
-            }
-        }
-
-        // checkId filter: match either the short UID (e.g. "SU23") or the symbolic id
-        // (e.g. "semicolon-missing"). The short UID alone is rarely what callers type.
-        if (checkId != null && !checkId.isEmpty() && !checkIdMatches(shortUid, symbolicCheckId, checkId))
-        {
-            return null;
-        }
-        
-        // Resolve the object presentation once; reused for the objects filter and the ErrorInfo.
-        // Failure handling differs by context (see below), so we only record the outcome here.
-        String objectPresentation = null;
-        boolean presentationResolved;
-        try
-        {
-            String p = marker.getObjectPresentation();
-            objectPresentation = p != null ? p : ""; //$NON-NLS-1$
-            presentationResolved = true;
-        }
-        catch (Exception e)
-        {
-            presentationResolved = false;
-        }
-        
-        // Objects filter (FQN matching against the resolved object presentation)
-        if (excludedByObjectsFilter(objects, presentationResolved, objectPresentation, unresolvedFilteredOut,
-            exactScope))
-        {
-            return null;
-        }
-
-        // Build the ErrorInfo, reusing the already resolved symbolic check id and presentation.
-        ErrorInfo error = new ErrorInfo();
-        error.checkCode = shortUid;
-        error.checkId = symbolicCheckId;
-        error.hasDocumentation = symbolicCheckId != null && !symbolicCheckId.isEmpty()
-            && GetCheckDescriptionTool.hasCheckDocumentation(symbolicCheckId);
-        error.hasQuickFix = hasQuickFix;
-        error.message = marker.getMessage() != null ? marker.getMessage() : ""; //$NON-NLS-1$
-
-        // Structural locator: for a marker that points at a BSL text position the
-        // module path + 1-based line live in the marker's own extraInfo map (no model
-        // read), so they are safe to read regardless of the transaction boundary. Both
-        // stay null for markers that do not resolve to a BSL module location.
-        populateModuleLocation(marker, error);
-        if (presentationResolved)
-        {
-            error.objectPresentation = objectPresentation;
-        }
-        else
-        {
-            // No objects filter was active (otherwise we would have returned above): keep the
-            // marker with a placeholder location instead of dropping it, and count it.
-            unresolvedShown[0]++;
-            error.objectPresentation = unresolvedPlaceholder(marker);
-        }
-        return error;
+        return MarkerRows.buildIfMatches(marker, severityFilter, checkId, objects, checkRepository,
+            fixRepository, unresolvedShown, unresolvedFilteredOut, exactScope, ErrorInfo::new);
     }
 
-    /**
-     * Decides whether the marker is excluded by an explicit objects filter, matching the
-     * resolved object presentation against the FQN variants. Returns {@code false} when no
-     * objects filter is active. As a side effect, increments {@code unresolvedFilteredOut}
-     * for a marker whose presentation could not be resolved while a filter is active (the
-     * marker is excluded but counted separately so the caller can warn about it).
-     */
+    /** @see MarkerRows#excludedByObjectsFilter(Set, boolean, String, int[], boolean) */
     static boolean excludedByObjectsFilter(Set<String> objects, boolean presentationResolved,
         String objectPresentation, int[] unresolvedFilteredOut)
     {
@@ -2691,230 +3094,41 @@ public class GetProjectErrorsTool implements IMcpTool
             unresolvedFilteredOut, false);
     }
 
-    /**
-     * As {@link #excludedByObjectsFilter(Set, boolean, String, int[])} but with an
-     * {@code exactScope} mode. When {@code false} (the default get_project_errors behavior) a
-     * variant matches by SUBSTRING ({@code contains}) - loose on purpose, so a caller filtering
-     * by {@code Catalog.Order} also sees markers on its members. When {@code true} a variant
-     * matches only at a SEGMENT BOUNDARY: the presentation must EQUAL the variant or start with
-     * {@code variant + "."} (the object itself or a member strictly under it) - so
-     * {@code XDTOPackage.P} no longer matches {@code XDTOPackage.P2}'s markers. Used by
-     * validate_xdto_package, which needs exact per-package scoping (a substring match across
-     * prefix-sharing package names is a false failure).
-     */
+    /** @see MarkerRows#excludedByObjectsFilter(Set, boolean, String, int[], boolean) */
     static boolean excludedByObjectsFilter(Set<String> objects, boolean presentationResolved,
         String objectPresentation, int[] unresolvedFilteredOut, boolean exactScope)
     {
-        if (objects.isEmpty())
-        {
-            return false;
-        }
-        if (!presentationResolved)
-        {
-            // Cannot resolve the location, so we cannot decide membership for an
-            // explicit object filter. The marker is excluded from the result; count it
-            // separately so the caller is warned that it was filtered out, not shown.
-            unresolvedFilteredOut[0]++;
-            return true;
-        }
-        if (objectPresentation.isEmpty())
-        {
-            return true;
-        }
-
-        String presentationLower = objectPresentation.toLowerCase(Locale.ROOT);
-        for (String fqnVariant : objects)
-        {
-            boolean matches = exactScope
-                ? presentationLower.equals(fqnVariant) || presentationLower.startsWith(fqnVariant + ".") //$NON-NLS-1$
-                : presentationLower.contains(fqnVariant);
-            if (matches)
-            {
-                return false;
-            }
-        }
-        return true;
+        return MarkerRows.excludedByObjectsFilter(objects, presentationResolved, objectPresentation,
+            unresolvedFilteredOut, exactScope);
     }
 
-    /**
-     * Resolves the symbolic check id (e.g. "bsl-legacy-check-expression-type") for a marker's
-     * short UID (e.g. "SU23") exactly once. Returns {@code null} when it cannot be resolved.
-     */
-    static String resolveSymbolicCheckId(Marker marker, String shortUid, ICheckRepository checkRepository)
-    {
-        CheckUid uid = resolveCheckUid(marker, shortUid, checkRepository);
-        return uid != null ? uid.getCheckId() : null;
-    }
-
-    /**
-     * Resolves a marker's full {@link CheckUid} (e.g. {@code semicolon-missing}) from its short UID
-     * (e.g. {@code SU23}) via the check repository, or {@code null} when it cannot be resolved. The
-     * UID is the key both for the symbolic check id (display) and for {@code IFixRepository.hasFixes}
-     * (the quick-fix flag), so it is resolved once and reused.
-     */
-    static CheckUid resolveCheckUid(Marker marker, String shortUid, ICheckRepository checkRepository)
-    {
-        if (checkRepository == null || shortUid == null || shortUid.isEmpty() || marker.getProject() == null)
-        {
-            return null;
-        }
-        try
-        {
-            return checkRepository.getUidForShortUid(shortUid, marker.getProject());
-        }
-        catch (Exception e)
-        {
-            // Ignore - caller falls back to the short UID / no fix flag
-            return null;
-        }
-    }
-
-    /**
-     * Returns true when the user supplied checkId substring matches either the marker
-     * short UID or its already resolved symbolic check id.
-     */
-    static boolean checkIdMatches(String shortUid, String symbolicCheckId, String checkId)
-    {
-        String needle = checkId.toLowerCase(Locale.ROOT);
-        if (shortUid != null && shortUid.toLowerCase(Locale.ROOT).contains(needle))
-        {
-            return true;
-        }
-        return symbolicCheckId != null && symbolicCheckId.toLowerCase(Locale.ROOT).contains(needle);
-    }
-
-    /**
-     * Returns true when {@code checkId} is EXACTLY (case-insensitively) either the marker short
-     * UID or its resolved symbolic check id. Unlike {@link #checkIdMatches}, this is NOT a
-     * substring match: a read-only filter (get_project_errors) can afford to over-match and show
-     * extra rows, but a mutation locator (apply_quick_fix) cannot - a loose needle like "doc"
-     * would substring-match several unrelated checks, and if only one marker among them currently
-     * exists the tool would silently auto-fix it without ever surfacing the ambiguity.
-     */
-    static boolean checkIdMatchesExact(String shortUid, String symbolicCheckId, String checkId)
-    {
-        String needle = checkId.toLowerCase(Locale.ROOT);
-        if (shortUid != null && shortUid.toLowerCase(Locale.ROOT).equals(needle))
-        {
-            return true;
-        }
-        return symbolicCheckId != null && symbolicCheckId.toLowerCase(Locale.ROOT).equals(needle);
-    }
-
-    /**
-     * Placeholder location for a marker whose {@link Marker#getObjectPresentation()} could not
-     * be resolved, so the marker is reported instead of being dropped.
-     */
+    /** @see MarkerRows#unresolvedPlaceholder(Marker) */
     static String unresolvedPlaceholder(Marker marker)
     {
-        IProject project = marker.getProject();
-        return "<unresolved: " + (project != null ? project.getName() : "?") + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return MarkerRows.unresolvedPlaceholder(marker);
     }
-    
-    /**
-     * Populates the structural BSL locator ({@code modulePath} + {@code line}) on the
-     * {@link ErrorInfo} when the marker points at a position inside a BSL module, leaving
-     * both {@code null} otherwise.
-     *
-     * <p>The locator is read straight from the marker's {@link Marker#getExtraInfo()} map —
-     * {@link StandardExtraInfo#TEXT_URI_TO_PROBLEM} (the EMF platform URI of the problem) and
-     * {@link StandardExtraInfo#TEXT_LINE} (1-based line). EDT fills these for text/Xtext
-     * issues (e.g. BSL editor markers; see {@code BmAwareResourceValidatorListener}). Because
-     * the values are plain strings already stored on the marker, reading them touches NO
-     * model state and is therefore safe with respect to the BM read-transaction boundary.</p>
-     *
-     * <p>The module path is only set when the URI genuinely resolves to a {@code .bsl} module
-     * under the source folder, so it matches the {@code modulePath} shape accepted by
-     * {@code read_module_source} / {@code set_breakpoint}. The line is only set when the path
-     * is set, so a caller never gets a line without a module to apply it to.</p>
-     */
+
+    /** @see MarkerRows#populateModuleLocation(Marker, MarkerRows.Row) */
     static void populateModuleLocation(Marker marker, ErrorInfo error)
     {
-        IExtraInfoMap extraInfo = marker.getExtraInfo();
-        if (extraInfo == null)
-        {
-            return;
-        }
-
-        String uriToProblem = extraInfo.get(StandardExtraInfo.TEXT_URI_TO_PROBLEM);
-        String modulePath = resolveBslModulePath(uriToProblem);
-        if (modulePath == null)
-        {
-            // No BSL module location: leave both null rather than inventing a path.
-            return;
-        }
-        error.modulePath = modulePath;
-
-        Integer line = extraInfo.get(StandardExtraInfo.TEXT_LINE);
-        if (line != null && line.intValue() >= 1)
-        {
-            error.line = line;
-        }
+        MarkerRows.populateModuleLocation(marker, error);
     }
 
-    /**
-     * Derives a source-folder-relative BSL module path (the shape
-     * {@code read_module_source} / {@code set_breakpoint} accept, e.g.
-     * {@code "CommonModules/MyModule/Module.bsl"}) from an EMF problem URI string, or
-     * {@code null} when the URI is absent, unparseable, or does not point at a {@code .bsl}
-     * module under the source folder.
-     *
-     * <p>The URI is a platform resource URI like
-     * {@code platform:/resource/<Project>/src/<modulePath>.bsl#<fragment>}. The fragment is
-     * trimmed and the {@code <Project>/src/} prefix is stripped via
-     * {@link BslModuleUtils#extractModulePath(String)} (the single source of truth for the
-     * {@code /src/} assumption). A URI whose platform path contains no {@code /src/} segment,
-     * or whose file extension is not {@code bsl}, yields {@code null} — never a guessed path.</p>
-     */
+    /** @see MarkerRows#resolveBslModulePath(String) */
     static String resolveBslModulePath(String uriToProblem)
     {
-        if (uriToProblem == null || uriToProblem.isEmpty())
-        {
-            return null;
-        }
-        try
-        {
-            URI uri = URI.createURI(uriToProblem).trimFragment();
-            // Only BSL module problems carry a path read_module_source/set_breakpoint can use.
-            if (!"bsl".equalsIgnoreCase(uri.fileExtension())) //$NON-NLS-1$
-            {
-                return null;
-            }
-            // platform:/resource/<Project>/src/<modulePath>.bsl -> <Project>/src/<modulePath>.bsl
-            String platformString = uri.isPlatformResource() ? uri.toPlatformString(true) : null;
-            if (platformString == null || platformString.isEmpty())
-            {
-                return null;
-            }
-            // extractModulePath returns the part after "/src/"; require the segment to be
-            // present so we never hand back a project-relative or unrelated path.
-            String marker = "/" + BslModuleUtils.SOURCE_FOLDER + "/"; //$NON-NLS-1$ //$NON-NLS-2$
-            if (!platformString.contains(marker))
-            {
-                return null;
-            }
-            String modulePath = BslModuleUtils.extractModulePath(platformString);
-            return modulePath != null && !modulePath.isEmpty() ? modulePath : null;
-        }
-        catch (Exception e)
-        {
-            // A malformed URI is not actionable as a locator; fall back to no location.
-            return null;
-        }
+        return MarkerRows.resolveBslModulePath(uriToProblem);
     }
 
     /**
-     * Helper class to store error info.
+     * Helper class to store error info; the fields live in {@link MarkerRows.Row}.
      */
-    static class ErrorInfo
+    static class ErrorInfo extends MarkerRows.Row
     {
-        String checkCode;          // Short UID like "SU23"
-        String checkId;            // Symbolic ID like "bsl-legacy-check-expression-type"
-        String message;
-        String objectPresentation;
-        boolean hasDocumentation;  // Whether documentation exists for this check
-        String modulePath;         // Source-folder-relative BSL module path, or null
-        Integer line;              // 1-based line inside the module, or null
-        boolean hasQuickFix;       // Whether this check has an EDT auto-fix (apply via apply_quick_fix)
+        /**
+         * Whether this row carries the unresolved-location placeholder; counted only among the rows a page
+         * really renders. {@code transient}: internal, never part of the structured {@code problems} payload.
+         */
+        transient boolean presentationUnresolved;
     }
 }

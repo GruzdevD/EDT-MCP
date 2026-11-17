@@ -15,21 +15,33 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isA;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.ILogListener;
+import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.runtime.MultiStatus;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.debug.core.ILaunch;
@@ -42,13 +54,29 @@ import org.junit.Test;
 import org.mockito.Mockito;
 
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
+import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.tools.impl.LaunchTool.AlreadyRunningContext;
+import com.ditrix.edt.mcp.server.tools.impl.LaunchTool.StartOutcome;
+import com.ditrix.edt.mcp.server.tools.impl.LaunchTool.StandalonePreparation;
+import com.ditrix.edt.mcp.server.tools.impl.LaunchTool.StandalonePreparationStage;
+import com.ditrix.edt.mcp.server.utils.AttributableCancel;
+import com.ditrix.edt.mcp.server.utils.BackgroundJobs;
+import com.ditrix.edt.mcp.server.utils.clientwindow.ClientWindowLaunch;
+import com.ditrix.edt.mcp.server.utils.clientwindow.WindowRequest;
+import com.ditrix.edt.mcp.server.utils.AsyncLaunchOutcomes;
+import com.ditrix.edt.mcp.server.utils.BoundedJob;
 import com.ditrix.edt.mcp.server.utils.ExternalInfobaseChangesPolicy;
+import com.ditrix.edt.mcp.server.utils.InfobaseAuthDialogSuppressor;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
+import com.ditrix.edt.mcp.server.utils.LaunchOverrides;
 import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils.ExistingClientSession;
+import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils;
+import com.ditrix.edt.mcp.server.utils.LaunchUpdateDialogAutoConfirmer;
+import com.ditrix.edt.mcp.server.utils.StandaloneServerPortConflictPolicy;
+import com.ditrix.edt.mcp.server.utils.StandaloneServerStateRecovery;
+import com.ditrix.edt.mcp.server.utils.StandaloneServerSupport;
+import com.e1c.g5.dt.applications.ApplicationException;
 import com.e1c.g5.dt.applications.ApplicationUpdateState;
-import com.e1c.g5.dt.applications.ApplicationUpdateType;
-import com.e1c.g5.dt.applications.ExecutionContext;
 import com.e1c.g5.dt.applications.IApplication;
 import com.e1c.g5.dt.applications.IApplicationManager;
 import com.google.gson.JsonObject;
@@ -73,6 +101,238 @@ import com.google.gson.JsonParser;
  */
 public class LaunchToolTest
 {
+    private static ILaunchConfiguration lockedLaunchConfig(String project, String application) throws Exception
+    {
+        ILaunchConfiguration config = mock(ILaunchConfiguration.class);
+        when(config.getName()).thenReturn("lock-test");
+        when(config.getAttribute(LaunchConfigUtils.ATTR_PROJECT_NAME, "")).thenReturn(project);
+        when(config.getAttribute(LaunchConfigUtils.ATTR_APPLICATION_ID, "")).thenReturn(application);
+        return config;
+    }
+
+    @Test
+    public void launchRefusesHeldInfobaseBeforeDelegateAndAfterAsyncHandoff() throws Exception
+    {
+        String project = "busy-launch-project";
+        var lock = LaunchLifecycleUtils.lockFor(project, "app");
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            assertTrue(lock.tryAcquire(0, null).acquired());
+            try
+            {
+                held.countDown();
+                try { release.await(); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
+            finally { lock.unlock(); }
+        });
+        holder.start();
+        try
+        {
+            assertTrue(held.await(5, TimeUnit.SECONDS));
+            ILaunchConfiguration config = lockedLaunchConfig(project, "app");
+            String error = new LaunchTool().performLaunch(config, false, ExternalInfobaseChangesPolicy.DEFAULT);
+            assertTrue(error, error.contains("launch lock for application 'app'"));
+            assertTrue(error, error.contains(project));
+            IStatus status = LaunchTool.runLaunchJobBody(config, false,
+                ExternalInfobaseChangesPolicy.DEFAULT, new NullProgressMonitor());
+            assertEquals(IStatus.ERROR, status.getSeverity());
+            assertTrue(status.getMessage(), status.getMessage().contains("launch lock"));
+            verify(config, never()).launch(any(), any());
+        }
+        finally
+        {
+            release.countDown();
+            holder.join(5_000);
+        }
+    }
+
+    @Test
+    public void freeLaunchLocksDelegateAndReleasesWhileClientStillLives() throws Exception
+    {
+        ILaunchConfiguration config = lockedLaunchConfig("free-launch-project", "app");
+        var lock = LaunchLifecycleUtils.lockFor("free-launch-project", "app");
+        ILaunch client = mock(ILaunch.class);
+        when(config.launch(any(), any())).thenAnswer(invocation -> {
+            assertTrue("the delegate must own the infobase lock", lock.isHeldByCurrentThread());
+            return client;
+        });
+        assertNull(new LaunchTool().performLaunch(config, false, ExternalInfobaseChangesPolicy.DEFAULT));
+        assertFalse(client.isTerminated());
+        AtomicReference<Boolean> free = new AtomicReference<>();
+        Thread contender = new Thread(() -> {
+            boolean acquired = lock.tryAcquire(0, null).acquired();
+            free.set(acquired);
+            if (acquired) { lock.unlock(); }
+        });
+        contender.start();
+        contender.join(5_000);
+        assertEquals(Boolean.TRUE, free.get());
+    }
+
+    @Test
+    public void reentrantLaunchDoesNotRefuseOrReleaseCallersAcquisition() throws Exception
+    {
+        ILaunchConfiguration config = lockedLaunchConfig("reentrant-launch-project", "app");
+        var lock = LaunchLifecycleUtils.lockFor("reentrant-launch-project", "app");
+        assertTrue(lock.tryAcquire(0, null).acquired());
+        try
+        {
+            assertNull(new LaunchTool().performLaunch(config, false, ExternalInfobaseChangesPolicy.DEFAULT));
+            assertTrue(lock.isHeldByCurrentThread());
+            assertTrue(LaunchTool.runLaunchJobBody(config, false,
+                ExternalInfobaseChangesPolicy.DEFAULT, new NullProgressMonitor()).isOK());
+            assertTrue(lock.isHeldByCurrentThread());
+        }
+        finally { lock.unlock(); }
+        assertFalse(lock.isHeldByCurrentThread());
+    }
+
+    @Test
+    public void failedDelegateReleasesLaunchLock() throws Exception
+    {
+        ILaunchConfiguration config = lockedLaunchConfig("failed-launch-project", "app");
+        when(config.launch(any(), any())).thenThrow(new CoreException(new Status(IStatus.ERROR, "test", "refused")));
+        assertEquals("refused", new LaunchTool().performLaunch(config, false, ExternalInfobaseChangesPolicy.DEFAULT));
+        assertFalse(LaunchLifecycleUtils.lockFor("failed-launch-project", "app").isHeldByCurrentThread());
+    }
+
+    @Test
+    public void attachWithoutAnInfobaseIdentityStillConnects() throws Exception
+    {
+        ILaunchConfiguration config = lockedLaunchConfig("attach-launch-project", "");
+        ILaunchConfigurationType type = mock(ILaunchConfigurationType.class);
+        when(type.getIdentifier()).thenReturn(LaunchConfigUtils.TYPE_REMOTE_RUNTIME);
+        when(config.getType()).thenReturn(type);
+        assertNull(new LaunchTool().performLaunch(config, false, null));
+        verify(config).launch(eq(ILaunchManager.DEBUG_MODE), any());
+    }
+
+    @Test
+    public void isolatedLaunchRefusesHeldLockAndNamesRunningUpdateBeforePreparation() throws Exception
+    {
+        String project = "isolated-busy-launch-project";
+        var lock = LaunchLifecycleUtils.lockFor(project, "app");
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        String jobId = null;
+        try
+        {
+            String pending = new UpdateDatabaseTool().startUpdateJob(project, "app", 0, () -> {
+                assertTrue(lock.tryAcquire(0, null).acquired());
+                try
+                {
+                    held.countDown();
+                    try { assertTrue(release.await(10, TimeUnit.SECONDS)); }
+                    catch (InterruptedException e) { throw new AssertionError(e); }
+                    return "{}";
+                }
+                finally { lock.unlock(); }
+            });
+            jobId = JsonParser.parseString(pending).getAsJsonObject().get("jobId").getAsString();
+            assertTrue(held.await(5, TimeUnit.SECONDS));
+            var config = lockedLaunchConfig(project, "app");
+            var result = LaunchTool.startClientWindow(LaunchLifecycleUtils.tryLaunchOperation(project, "app"),
+                () -> ClientWindowLaunch.start(config, WindowRequest.parse("isolated", null),
+                    ILaunchManager.RUN_MODE, true, ExternalInfobaseChangesPolicy.DEFAULT,
+                    StandaloneServerPortConflictPolicy.DEFAULT, null,
+                    ignored -> { throw new AssertionError("Isolated launch must not dispatch the delegate"); }));
+            assertTrue(result.error(), result.error().contains("launch lock"));
+            assertTrue(result.error(), result.error().contains("update_database job " + jobId));
+            assertTrue(result.error(), result.error().contains("get_job_status"));
+            verify(config, never()).getAttribute(anyString(), anyString());
+            verify(config, never()).launch(any(), any());
+        }
+        finally
+        {
+            release.countDown();
+            if (jobId != null) { BackgroundJobs.shared().await(jobId, 5_000); }
+        }
+    }
+
+    /** A competing thread distinguishes exclusion from same-thread reentrancy. */
+    private static void assertWindowLaunchLockAvailable(String project, boolean expected) throws Exception
+    {
+        var lock = LaunchLifecycleUtils.lockFor(project, "app");
+        AtomicReference<Boolean> acquired = new AtomicReference<>();
+        Thread contender = new Thread(() -> {
+            boolean free = lock.tryAcquire(0, null).acquired();
+            acquired.set(free);
+            if (free) { lock.unlock(); }
+        });
+        contender.start();
+        contender.join(5_000);
+        assertEquals(Boolean.valueOf(expected), acquired.get());
+    }
+
+    @Test
+    public void isolatedPreparationAndProcessStartHoldLeaseButClientLifetimeDoesNot() throws Exception
+    {
+        String project = "isolated-start-launch-project";
+        var lock = LaunchLifecycleUtils.lockFor(project, "app");
+        List<String> events = new ArrayList<>();
+        var expected = new ClientWindowLaunch.Execution(null, Map.of("windowMode", "isolated", "status", "running"));
+        var result = LaunchTool.startClientWindow(LaunchLifecycleUtils.tryLaunchOperation(project, "app"), () -> {
+            // Synchronous isolated preparation and process start are one dispatch, with no normal callback.
+            assertTrue(lock.isHeldByCurrentThread());
+            try { assertWindowLaunchLockAvailable(project, false); }
+            catch (Exception e) { throw new AssertionError(e); }
+            events.add("prepare/update");
+            assertTrue(lock.isHeldByCurrentThread());
+            events.add("process started");
+            return new ClientWindowLaunch.Started(expected);
+        });
+        assertSame(expected, result);
+        assertEquals(List.of("prepare/update", "process started"), events);
+        assertFalse(lock.isHeldByCurrentThread());
+        // Released once the process is started: the client's lifetime does not hold the lease.
+        assertWindowLaunchLockAvailable(project, true);
+    }
+
+    @Test
+    public void windowAdjustmentRunsAfterDispatchLeaseRelease() throws Exception
+    {
+        String project = "window-adjustment-launch-project";
+        var lock = LaunchLifecycleUtils.lockFor(project, "app");
+        AtomicInteger adjustments = new AtomicInteger();
+        var result = LaunchTool.startClientWindow(LaunchLifecycleUtils.tryLaunchOperation(project, "app"), () -> {
+            assertTrue(lock.isHeldByCurrentThread());
+            return new ClientWindowLaunch.Started(null, () -> {
+                assertFalse(lock.isHeldByCurrentThread());
+                try { assertWindowLaunchLockAvailable(project, true); }
+                catch (Exception e) { throw new AssertionError(e); }
+                adjustments.incrementAndGet();
+                return new ClientWindowLaunch.Execution(null, Map.of("windowModeApplied", true));
+            });
+        });
+        assertNull(result.error());
+        assertEquals(1, adjustments.get());
+    }
+
+    @Test
+    public void windowDispatchFailureReleasesLeaseAndReentrantDispatchPreservesCaller() throws Exception
+    {
+        String project = "window-failure-launch-project";
+        var lock = LaunchLifecycleUtils.lockFor(project, "app");
+        org.junit.Assert.assertThrows(IllegalStateException.class, () ->
+            LaunchTool.startClientWindow(LaunchLifecycleUtils.tryLaunchOperation(project, "app"), () -> {
+                assertTrue(lock.isHeldByCurrentThread());
+                throw new IllegalStateException("preparation failed");
+            }));
+        assertWindowLaunchLockAvailable(project, true);
+        assertTrue(lock.tryAcquire(0, null).acquired());
+        try
+        {
+            var result = LaunchTool.startClientWindow(LaunchLifecycleUtils.tryLaunchOperation(project, "app"),
+                () -> new ClientWindowLaunch.Started(new ClientWindowLaunch.Execution(null, Map.of())));
+            assertNull(result.error());
+            assertTrue(lock.isHeldByCurrentThread());
+        }
+        finally { lock.unlock(); }
+        assertWindowLaunchLockAvailable(project, true);
+    }
+
     private static final String STANDALONE_SERVER_TYPE_ID =
         "com.e1c.g5.v8.dt.platform.standaloneserver.launchConfigurationType"; //$NON-NLS-1$
 
@@ -107,6 +367,196 @@ public class LaunchToolTest
         }
     }
 
+    /** A session whose client exited must not be reported as a running client. */
+    @Test
+    public void alreadyRunningNamesAnExitedClient()
+    {
+        org.eclipse.debug.core.model.IProcess dead = mock(org.eclipse.debug.core.model.IProcess.class);
+        when(dead.isTerminated()).thenReturn(true);
+        ILaunch exited = mock(ILaunch.class);
+        when(exited.getProcesses()).thenReturn(new org.eclipse.debug.core.model.IProcess[] { dead });
+        String message = LaunchTool.alreadyRunningMessage(exited);
+        assertTrue(message, message.contains("client process has exited") && message.contains("restartIfRunning=true"));
+        ILaunch running = mock(ILaunch.class);
+        when(running.getProcesses()).thenReturn(new org.eclipse.debug.core.model.IProcess[] {
+            mock(org.eclipse.debug.core.model.IProcess.class) });
+        assertFalse(LaunchTool.alreadyRunningMessage(running).contains("exited"));
+        // Neither a process nor a target: still starting or cancelled at a dialog, not "already running".
+        ILaunch empty = mock(ILaunch.class);
+        when(empty.getProcesses()).thenReturn(new org.eclipse.debug.core.model.IProcess[0]);
+        when(empty.getDebugTargets()).thenReturn(new org.eclipse.debug.core.model.IDebugTarget[0]);
+        assertEquals(LaunchTool.EMPTY_LAUNCH_MESSAGE, LaunchTool.alreadyRunningMessage(empty));
+    }
+
+    /** An empty launch this tool did not finish may still be starting elsewhere: refused, never removed. */
+    @Test
+    public void restartRefusesAnEmptyLaunchItDidNotStart() throws Exception
+    {
+        ILaunch foreign = mock(ILaunch.class);
+        when(foreign.getProcesses()).thenReturn(new org.eclipse.debug.core.model.IProcess[0]);
+        when(foreign.getDebugTargets()).thenReturn(new org.eclipse.debug.core.model.IDebugTarget[0]);
+        assertEquals(LaunchTool.FOREIGN_STARTING_MESSAGE, LaunchTool.cancelStartingLaunch(foreign, null, 10));
+        verify(foreign, never()).terminate();
+    }
+
+    /** A launch whose delegate returned in this tool's job is dead when empty, and a client it started is terminated. */
+    @Test
+    public void restartEndsAFinishedLaunchAndTerminatesAClientItStarted() throws Exception
+    {
+        ILaunch dead = mock(ILaunch.class);
+        when(dead.getProcesses()).thenReturn(new org.eclipse.debug.core.model.IProcess[0]);
+        when(dead.getDebugTargets()).thenReturn(new org.eclipse.debug.core.model.IDebugTarget[0]);
+        LaunchTool.recordFinishedLaunch(dead);
+        assertNull(LaunchTool.cancelStartingLaunch(dead, null, 10));
+        verify(dead, never()).terminate();
+
+        ILaunch started = mock(ILaunch.class);
+        when(started.getProcesses()).thenReturn(new org.eclipse.debug.core.model.IProcess[] {
+            mock(org.eclipse.debug.core.model.IProcess.class) });
+        when(started.canTerminate()).thenReturn(true);
+        when(started.isTerminated()).thenReturn(true);
+        LaunchTool.recordFinishedLaunch(started);
+        assertNull(LaunchTool.cancelStartingLaunch(started, null, 10));
+        verify(started).terminate();
+    }
+
+    /** A client that does not confirm termination keeps the restart refused; the launch is not dropped. */
+    @Test
+    public void restartRefusesWhenTheStartedClientDoesNotStop() throws Exception
+    {
+        ILaunch stuck = mock(ILaunch.class);
+        when(stuck.getProcesses()).thenReturn(new org.eclipse.debug.core.model.IProcess[] {
+            mock(org.eclipse.debug.core.model.IProcess.class) });
+        when(stuck.canTerminate()).thenReturn(true);
+        when(stuck.isTerminated()).thenReturn(false);
+        LaunchTool.recordFinishedLaunch(stuck);
+        assertEquals(LaunchTool.CLIENT_NOT_STOPPED_MESSAGE, LaunchTool.cancelStartingLaunch(stuck, null, 10));
+        verify(stuck).terminate();
+    }
+
+    /** The launch job terminates a client of a launch Eclipse removed, so no waiter has to be present. */
+    @Test
+    public void launchJobTerminatesTheClientOfARemovedLaunch() throws Exception
+    {
+        ILaunch started = mock(ILaunch.class);
+        when(started.getProcesses()).thenReturn(new org.eclipse.debug.core.model.IProcess[] {
+            mock(org.eclipse.debug.core.model.IProcess.class) });
+        when(started.hasChildren()).thenReturn(true);
+        when(started.canTerminate()).thenReturn(true);
+        when(started.isTerminated()).thenReturn(true);
+        LaunchTool.endOrphanedLaunch(started, true);
+        verify(started, never()).terminate();
+        LaunchTool.endOrphanedLaunch(started, false);
+        verify(started).terminate();
+        ILaunch empty = mock(ILaunch.class);
+        when(empty.getProcesses()).thenReturn(new org.eclipse.debug.core.model.IProcess[0]);
+        when(empty.getDebugTargets()).thenReturn(new org.eclipse.debug.core.model.IDebugTarget[0]);
+        LaunchTool.endOrphanedLaunch(empty, false);
+        verify(empty, never()).terminate();
+    }
+
+    /** A removed launch whose client does not confirm termination is registered again, never dropped. */
+    @Test
+    public void unconfirmedOrphanIsRegisteredAgain() throws Exception
+    {
+        ILaunch stuck = mock(ILaunch.class);
+        when(stuck.hasChildren()).thenReturn(true);
+        when(stuck.canTerminate()).thenReturn(true);
+        when(stuck.isTerminated()).thenReturn(false);
+        List<ILaunch> registered = new ArrayList<>();
+        LaunchTool.endOrphanedLaunch(stuck, false, registered::add);
+        verify(stuck).terminate();
+        assertEquals(List.of(stuck), registered);
+    }
+
+    private static ILaunchConfiguration named(String name)
+    {
+        ILaunchConfiguration config = mock(ILaunchConfiguration.class);
+        when(config.getName()).thenReturn(name);
+        return config;
+    }
+
+    /** An unbound configuration answers its project's default application, and only that one. */
+    @Test
+    public void unboundConfigurationMatchesTheDefaultApplicationOnly()
+    {
+        ILaunchConfiguration thin = named("IRP thin");
+        LaunchTool.UnboundChoice match = LaunchTool.chooseUnboundConfig(List.of(thin), "app-1", "app-1");
+        assertSame(thin, match.config());
+        assertNull(match.error());
+
+        LaunchTool.UnboundChoice other = LaunchTool.chooseUnboundConfig(List.of(thin), "app-2", "app-1");
+        assertNull(other.config());
+        assertNull(other.error());
+        assertTrue(other.hint(), other.hint().contains("[IRP thin]") && other.hint().contains("app-1"));
+
+        LaunchTool.UnboundChoice unknown = LaunchTool.chooseUnboundConfig(List.of(thin), "app-1", null);
+        assertNull(unknown.config());
+        assertTrue(unknown.hint(), unknown.hint().contains("launchConfigurationName"));
+
+        LaunchTool.UnboundChoice several =
+            LaunchTool.chooseUnboundConfig(List.of(thin, named("IRP thick")), "app-1", "app-1");
+        assertNull(several.config());
+        assertTrue(several.error(), several.error().contains("[IRP thin, IRP thick]")
+            && several.error().contains("launchConfigurationName"));
+    }
+
+    /** restartIfRunning never cancels a start in progress: that interrupts EDT's infobase load. */
+    @Test
+    public void restartRefusesALaunchEdtIsStillStarting() throws Exception
+    {
+        ILaunchConfiguration config = named("IRP thin");
+        ILaunch starting = mock(ILaunch.class);
+        when(starting.getProcesses()).thenReturn(new org.eclipse.debug.core.model.IProcess[0]);
+        when(starting.getDebugTargets()).thenReturn(new org.eclipse.debug.core.model.IDebugTarget[0]);
+        when(starting.getLaunchConfiguration()).thenReturn(config);
+        CountDownLatch running = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        org.eclipse.core.runtime.jobs.Job job = new org.eclipse.core.runtime.jobs.Job("Launching IRP thin")
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                running.countDown();
+                try
+                {
+                    release.await(10, TimeUnit.SECONDS);
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                }
+                return monitor.isCanceled() ? Status.CANCEL_STATUS : Status.OK_STATUS;
+            }
+
+            @Override
+            public boolean belongsTo(Object family)
+            {
+                return config.equals(family);
+            }
+        };
+        job.schedule();
+        try
+        {
+            assertTrue(running.await(5, TimeUnit.SECONDS));
+            String result = new LaunchTool().handleExistingClientSession(
+                new ExistingClientSession(starting, null, "debug"), "launch:IRP thin", true,
+                new AlreadyRunningContext("unused"));
+            assertNotNull(result);
+            assertTrue(result, result.contains("still starting") && result.contains("force=true"));
+            assertFalse("the start must not be cancelled", job.getResult() != null
+                && job.getResult().getSeverity() == IStatus.CANCEL);
+            String already = LaunchTool.alreadyRunningMessage(starting);
+            assertTrue(already, already.contains("still starting (state: starting)"));
+        }
+        finally
+        {
+            release.countDown();
+            job.join();
+        }
+        assertEquals(IStatus.OK, job.getResult().getSeverity());
+    }
+
     @Test
     public void testName()
     {
@@ -131,6 +581,58 @@ public class LaunchToolTest
         // #270: config.launch(...) connects a runtime client to the infobase — it must arm
         // the auth-dialog suppressor's activity window.
         assertTrue(new LaunchTool().connectsToInfobase());
+    }
+
+    @Test
+    public void failedLaunchStatusGainsAccessDialogDiagnosticOnlyWhenCounterMoved()
+    {
+        IStatus failure = new Status(IStatus.ERROR, "test", "launch failed"); //$NON-NLS-1$ //$NON-NLS-2$
+
+        assertSame(failure, LaunchTool.appendAccessSettingsDialogFailure(failure, 7, 7));
+        IStatus observed = LaunchTool.appendAccessSettingsDialogFailure(failure, 7, 8);
+
+        String note = InfobaseAuthDialogSuppressor.accessSettingsDialogFailureNote(7, 8);
+        assertEquals("launch failed " + note, observed.getMessage()); //$NON-NLS-1$
+        assertTrue(observed.getMessage().contains("while this call ran")); //$NON-NLS-1$
+        assertFalse(observed.getMessage().contains("by this call")); //$NON-NLS-1$
+        assertFalse(observed.isMultiStatus());
+        assertEquals(failure.getSeverity(), observed.getSeverity());
+        assertEquals(failure.getPlugin(), observed.getPlugin());
+        assertEquals(failure.getCode(), observed.getCode());
+        assertSame(failure.getException(), observed.getException());
+    }
+
+    @Test
+    public void failedMultiStatusKeepsItsChildrenWhenAccessDialogDiagnosticIsAdded()
+    {
+        IStatus first = new Status(IStatus.WARNING, "first-plugin", 11, "first detail", null); //$NON-NLS-1$ //$NON-NLS-2$
+        IStatus second = new Status(IStatus.ERROR, "second-plugin", 12, "second detail", null); //$NON-NLS-1$ //$NON-NLS-2$
+        RuntimeException failureCause = new RuntimeException("launch cause"); //$NON-NLS-1$
+        MultiStatus failure = new MultiStatus("parent-plugin", 27, //$NON-NLS-1$
+            new IStatus[] { first, second }, "launch failed", failureCause); //$NON-NLS-1$
+
+        IStatus observed = LaunchTool.appendAccessSettingsDialogFailure(failure, 7, 8);
+
+        assertTrue(observed instanceof MultiStatus);
+        assertTrue(observed.isMultiStatus());
+        assertEquals(failure.getSeverity(), observed.getSeverity());
+        assertEquals("parent-plugin", observed.getPlugin()); //$NON-NLS-1$
+        assertEquals(27, observed.getCode());
+        assertSame(failureCause, observed.getException());
+        String note = InfobaseAuthDialogSuppressor.accessSettingsDialogFailureNote(7, 8);
+        assertEquals("launch failed " + note, observed.getMessage()); //$NON-NLS-1$
+        assertTrue(observed.getMessage().contains("while this call ran")); //$NON-NLS-1$
+        IStatus[] children = observed.getChildren();
+        assertEquals("every original child must remain", 2, children.length); //$NON-NLS-1$
+        assertSame("the first diagnostic child must keep its position", first, children[0]); //$NON-NLS-1$
+        assertSame("the second diagnostic child must keep its position", second, children[1]); //$NON-NLS-1$
+    }
+
+    @Test
+    public void successfulLaunchStatusNeverGainsAccessDialogDiagnostic()
+    {
+        assertSame(Status.OK_STATUS,
+            LaunchTool.appendAccessSettingsDialogFailure(Status.OK_STATUS, 7, 8));
     }
 
     @Test
@@ -388,7 +890,7 @@ public class LaunchToolTest
     }
 
     @Test
-    public void testStandaloneServerConfigurationGetsAnHonestRefusal() throws Exception
+    public void testStandaloneServerConfigurationRoutesToTheStandaloneBranch() throws Exception
     {
         String name = "Standalone server for B"; //$NON-NLS-1$
         assertEquals(STANDALONE_SERVER_TYPE_ID, LaunchConfigUtils.class
@@ -410,26 +912,41 @@ public class LaunchToolTest
         when(standaloneType.getIdentifier()).thenReturn(STANDALONE_SERVER_TYPE_ID);
 
         Object resolution = resolveNamedConfiguration(launchManager, name);
-        String error = (String)namedResolutionValue(resolution, "error"); //$NON-NLS-1$
 
-        assertNotNull(error);
-        assertTrue(error.contains(name));
-        assertTrue(error.contains(STANDALONE_SERVER_TYPE_ID));
-        assertTrue(error.contains(". " + LaunchTool.NAME //$NON-NLS-1$
-            + " starts runtime CLIENT configurations")); //$NON-NLS-1$
-        assertTrue(error.contains("Try " + LaunchTool.NAME //$NON-NLS-1$
-            + " with the project's thin-client configuration")); //$NON-NLS-1$
-        assertFalse("the refusal must not name the unadvertised legacy alias: " + error, //$NON-NLS-1$
-            error.contains("debug_launch")); //$NON-NLS-1$
-        assertTrue(error.contains("thin-client configuration")); //$NON-NLS-1$
-        // The workaround is stated as OBSERVED, not guaranteed: it is the issue reporter's
-        // measurement on one workspace, and the platform sources do not show a client launch
-        // starting the server. Promising it outright would repeat, in the fix, the very defect
-        // this issue is about - a tool asserting more than it knows.
-        assertTrue(error, error.contains("observed to bring its standalone server up")); //$NON-NLS-1$
-        assertFalse("the workaround must not be promised as a guaranteed side effect: " + error, //$NON-NLS-1$
-            error.contains("starts its standalone server as a side effect")); //$NON-NLS-1$
-        assertTrue(error.contains(TerminateLaunchTool.NAME));
+        assertSame(standalone, namedResolutionValue(resolution, "config")); //$NON-NLS-1$
+        assertNull(namedResolutionValue(resolution, "error")); //$NON-NLS-1$
+        assertTrue(LaunchTool.isStandaloneServerConfiguration(
+            LaunchConfigUtils.getConfigTypeId(standalone)));
+    }
+
+    @Test
+    public void testSchemaAndGuideStateTheStandaloneUpdateException()
+    {
+        JsonObject update = JsonParser.parseString(new LaunchTool().getInputSchema())
+            .getAsJsonObject().getAsJsonObject("properties") //$NON-NLS-1$
+            .getAsJsonObject("updateBeforeLaunch"); //$NON-NLS-1$
+        String description = update.get("description").getAsString(); //$NON-NLS-1$
+        assertEquals("Default true: silently apply the configuration->DB update before launching " //$NON-NLS-1$
+            + "so no 'Update database?' modal blocks the call (even on a Russian-locale EDT the " //$NON-NLS-1$
+            + "dialog is auto-confirmed); false skips the update and the platform may then show " //$NON-NLS-1$
+            + "that modal; call edt_dialog to inspect and explicitly answer it. Ignored for Attach. " //$NON-NLS-1$
+            + "A standalone-server configuration performs no " //$NON-NLS-1$
+            + "database update on this route even when omitted, and an explicit true is refused " //$NON-NLS-1$
+            + "- run update_database separately.", description); //$NON-NLS-1$
+        // Both halves must survive: the standalone carve-out, and the modal behaviour it
+        // must not displace - dropping either one silently changes what a caller is told.
+        assertTrue(description.contains("apply the configuration->DB update before launching")); //$NON-NLS-1$
+        assertTrue(description.contains(
+            "performs no database update on this route even when omitted")); //$NON-NLS-1$
+
+        String guide = new LaunchTool().getGuide();
+        String contract = "For a named standalone-server launch configuration, no database " //$NON-NLS-1$
+            + "update is performed on this route, including when this parameter is omitted. An " //$NON-NLS-1$
+            + "explicit `updateBeforeLaunch=true` is refused; run `update_database` separately, " //$NON-NLS-1$
+            + "then call `launch` with `updateBeforeLaunch=false`."; //$NON-NLS-1$
+        assertTrue(guide.contains(contract));
+        assertFalse(guide.contains("For a named standalone-server launch configuration, " //$NON-NLS-1$
+            + "the default database update is performed.")); //$NON-NLS-1$
     }
 
     @Test
@@ -470,7 +987,7 @@ public class LaunchToolTest
         ILaunchConfiguration config = Mockito.mock(ILaunchConfiguration.class);
         String error = new LaunchTool().performLaunch(config, false, ExternalInfobaseChangesPolicy.DEFAULT);
         assertNull("successful headless launch must return null", error);
-        Mockito.verify(config).launch(ILaunchManager.DEBUG_MODE, null);
+        Mockito.verify(config).launch(eq(ILaunchManager.DEBUG_MODE), isA(AttributableCancel.class));
     }
 
     @Test
@@ -482,7 +999,7 @@ public class LaunchToolTest
             ExternalInfobaseChangesPolicy.DEFAULT, null, ILaunchManager.RUN_MODE);
 
         assertNull("successful headless run launch must return null", error);
-        Mockito.verify(config).launch(ILaunchManager.RUN_MODE, null);
+        Mockito.verify(config).launch(eq(ILaunchManager.RUN_MODE), isA(AttributableCancel.class));
         Mockito.verify(config, never()).launch(eq(ILaunchManager.DEBUG_MODE), any());
     }
 
@@ -492,7 +1009,7 @@ public class LaunchToolTest
         // The synchronous (headless) path is the only one that can still report a
         // launch failure to the caller — keep that contract real, not dead code.
         ILaunchConfiguration config = Mockito.mock(ILaunchConfiguration.class);
-        Mockito.when(config.launch(ILaunchManager.DEBUG_MODE, null)).thenThrow(
+        Mockito.when(config.launch(eq(ILaunchManager.DEBUG_MODE), any(IProgressMonitor.class))).thenThrow(
             new CoreException(new Status(IStatus.ERROR, "test", "launch refused"))); //$NON-NLS-1$ //$NON-NLS-2$
         String error = new LaunchTool().performLaunch(config, false, ExternalInfobaseChangesPolicy.DEFAULT);
         assertNotNull("headless launch failure must be surfaced synchronously", error);
@@ -515,7 +1032,7 @@ public class LaunchToolTest
     // observable pairing contract).
 
     @Test
-    public void testRunLaunchJobBodySuccessReturnsOkAndPassesMonitor() throws Exception
+    public void testRunLaunchJobBodySuccessReturnsOkAndWrapsMonitor() throws Exception
     {
         // The Job body launches with the JOB'S monitor (so the Progress view shows the
         // delegate's steps) and reports OK — and the arm/disarm pair around the launch
@@ -525,7 +1042,120 @@ public class LaunchToolTest
         IStatus status = LaunchTool.runLaunchJobBody(config, true, ExternalInfobaseChangesPolicy.DEFAULT, monitor);
         assertNotNull(status);
         assertTrue("successful launch must report OK", status.isOK());
-        Mockito.verify(config).launch(ILaunchManager.DEBUG_MODE, monitor);
+        Mockito.verify(config).launch(eq(ILaunchManager.DEBUG_MODE), isA(AttributableCancel.class));
+    }
+
+    @Test
+    public void testRunLaunchJobBodyReportsADelegateCancelledMonitor() throws Exception
+    {
+        ILaunchConfiguration config = Mockito.mock(ILaunchConfiguration.class);
+        when(config.getName()).thenReturn("Cancelled launch"); //$NON-NLS-1$
+        NullProgressMonitor monitor = new NullProgressMonitor();
+        doAnswer(invocation -> {
+            ((IProgressMonitor)invocation.getArgument(1)).setCanceled(true);
+            return mock(ILaunch.class);
+        }).when(config).launch(eq(ILaunchManager.DEBUG_MODE), any(IProgressMonitor.class));
+
+        String expected = "Launch of 'Cancelled launch' was abandoned by EDT " //$NON-NLS-1$
+            + "(the launch delegate cancelled it); no reason was logged."; //$NON-NLS-1$
+        List<IStatus> logs = new ArrayList<>();
+        IStatus status = cancellationWithLogs(config, monitor, logs);
+        assertEquals("the Job result must not produce a second ERROR", IStatus.CANCEL, status.getSeverity());
+        assertEquals(expected, status.getMessage());
+        assertEquals(1, logs.size());
+        assertEquals(IStatus.INFO, logs.get(0).getSeverity());
+        assertEquals("launch cancelled asynchronously: " + expected, logs.get(0).getMessage());
+        assertTrue(AsyncLaunchOutcomes.recent().stream().anyMatch(outcome ->
+            "Cancelled launch".equals(outcome.launchConfiguration()) //$NON-NLS-1$
+                && expected.equals(outcome.message())));
+    }
+
+    private static IStatus cancellationWithLogs(ILaunchConfiguration config, IProgressMonitor monitor,
+        List<IStatus> logs)
+    {
+        ILogListener listener = (status, plugin) -> {
+            if (Activator.PLUGIN_ID.equals(status.getPlugin())) { logs.add(status); }
+        };
+        Platform.addLogListener(listener);
+        try
+        {
+            return LaunchTool.runLaunchJobBody(config, false, ExternalInfobaseChangesPolicy.DEFAULT, monitor);
+        }
+        finally
+        {
+            Platform.removeLogListener(listener);
+        }
+    }
+
+    @Test
+    public void testReasonedDelegateCancellationStaysError() throws Exception
+    {
+        ILaunchConfiguration config = mock(ILaunchConfiguration.class);
+        when(config.getName()).thenReturn("Reasoned cancellation");
+        doAnswer(invocation -> {
+            Platform.getLog(Platform.getBundle("com._1c.g5.v8.dt.debug.core")).log(new Status(
+                IStatus.ERROR, "com._1c.g5.v8.dt.debug.core", "update failed"));
+            ((IProgressMonitor)invocation.getArgument(1)).setCanceled(true);
+            return mock(ILaunch.class);
+        }).when(config).launch(eq(ILaunchManager.DEBUG_MODE), any(IProgressMonitor.class));
+        List<IStatus> logs = new ArrayList<>();
+        IStatus status = cancellationWithLogs(config, new NullProgressMonitor(), logs);
+        assertEquals(IStatus.ERROR, status.getSeverity());
+        assertTrue(status.getMessage(), status.getMessage().contains("EDT logged while it ran: update failed"));
+        assertEquals(1, logs.size());
+        assertEquals(IStatus.ERROR, logs.get(0).getSeverity());
+        assertEquals("launch failed asynchronously: " + status.getMessage(), logs.get(0).getMessage());
+        assertTrue(AsyncLaunchOutcomes.recent().stream().anyMatch(outcome ->
+            "Reasoned cancellation".equals(outcome.launchConfiguration())
+                && status.getMessage().equals(outcome.message())));
+    }
+
+    @Test
+    public void testRunLaunchJobBodyIgnoresCancellationFromAnotherThread() throws Exception
+    {
+        ILaunchConfiguration config = mock(ILaunchConfiguration.class);
+        NullProgressMonitor monitor = new NullProgressMonitor();
+        doAnswer(invocation -> {
+            IProgressMonitor launchMonitor = invocation.getArgument(1);
+            Thread external = new Thread(() -> launchMonitor.setCanceled(true),
+                "external-launch-canceller"); //$NON-NLS-1$
+            external.start();
+            external.join();
+            return mock(ILaunch.class);
+        }).when(config).launch(eq(ILaunchManager.DEBUG_MODE), any(IProgressMonitor.class));
+
+        IStatus status = LaunchTool.runLaunchJobBody(config, false,
+            ExternalInfobaseChangesPolicy.DEFAULT, monitor);
+
+        assertTrue("an external cancellation does not claim EDT abandoned the launch", status.isOK());
+        assertTrue("the underlying Job monitor still receives the cancellation", monitor.isCanceled());
+    }
+
+    @Test
+    public void testRunLaunchJobBodyIgnoresMonitorCancelledBeforeLaunch() throws Exception
+    {
+        ILaunchConfiguration config = mock(ILaunchConfiguration.class);
+        NullProgressMonitor monitor = new NullProgressMonitor();
+        monitor.setCanceled(true);
+        doAnswer(invocation -> {
+            ((IProgressMonitor)invocation.getArgument(1)).setCanceled(true);
+            return mock(ILaunch.class);
+        }).when(config).launch(eq(ILaunchManager.DEBUG_MODE), any(IProgressMonitor.class));
+
+        IStatus status = LaunchTool.runLaunchJobBody(config, false,
+            ExternalInfobaseChangesPolicy.DEFAULT, monitor);
+
+        assertTrue("a monitor already cancelled on entry is not attributed to EDT", status.isOK());
+    }
+
+    @Test
+    public void testAbandonedLaunchMessageIncludesTheCapturedReason()
+    {
+        String message = LaunchTool.abandonedLaunchMessage("Client", "update failed"); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals("Launch of 'Client' was abandoned by EDT (the launch delegate cancelled it). " //$NON-NLS-1$
+            + "EDT logged while it ran: update failed. That error may belong to another operation " //$NON-NLS-1$
+            + "running at the same time.", message); //$NON-NLS-1$
+        assertFalse(message.endsWith("EDT logged while it ran: update failed")); //$NON-NLS-1$
     }
 
     @Test
@@ -558,6 +1188,753 @@ public class LaunchToolTest
         assertSame("the status must carry the original exception", boom, status.getException());
         assertTrue("the status message must name the failure",
             status.getMessage().contains("boom")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testStandaloneServerStartSurfacesTheReturnedStatusMessage()
+    {
+        IStatus refusal = new Status(IStatus.ERROR, "test", "server start refused"); //$NON-NLS-1$ //$NON-NLS-2$
+
+        StartOutcome outcome = LaunchTool.startStandaloneServerWithPolicy(
+            new FakeStandaloneStartService(refusal), new Object(), "Standalone", //$NON-NLS-1$
+            ILaunchManager.RUN_MODE, null, null, StandaloneServerPortConflictPolicy.CANCEL);
+
+        assertEquals("server start refused", outcome.failure()); //$NON-NLS-1$
+        assertTrue(outcome.conclusive());
+        JsonObject error = JsonParser.parseString(
+            LaunchTool.standaloneAttemptError("Standalone", outcome.failure())).getAsJsonObject(); //$NON-NLS-1$
+        assertFalse(error.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertTrue(error.get("error").getAsString().contains("server start refused")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(error.get("error").getAsString().contains("thin-client configuration")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testStandaloneApplicationLookupReturnsAPreconditionFailureOnItsDeadline()
+        throws Exception
+    {
+        IApplicationManager manager = mock(IApplicationManager.class);
+        IProject project = mock(IProject.class);
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
+        when(manager.getApplication(project, "ServerApplication.Test")).thenAnswer(invocation -> { //$NON-NLS-1$
+            started.countDown();
+            try
+            {
+                release.await(30, TimeUnit.SECONDS);
+                return Optional.empty();
+            }
+            finally
+            {
+                finished.countDown();
+            }
+        });
+
+        try
+        {
+            StandaloneServerSupport.ApplicationLookup lookup =
+                StandaloneServerSupport.lookupApplicationBounded(manager, project,
+                    "ServerApplication.Test", 250L); //$NON-NLS-1$
+
+            assertTrue("the lookup must have entered EDT before this test calls it stalled", //$NON-NLS-1$
+                started.await(5, TimeUnit.SECONDS));
+            assertNull(lookup.application());
+            assertNotNull(lookup.failure());
+            assertTrue(lookup.failure().contains("EDT application lookup")); //$NON-NLS-1$
+            assertTrue(lookup.failure().contains("did not finish within 250ms")); //$NON-NLS-1$
+            assertTrue(lookup.failure().contains("may still be running")); //$NON-NLS-1$
+            assertFalse("a stalled lookup must not be misreported as a measured not-found", //$NON-NLS-1$
+                lookup.failure().contains("was not found")); //$NON-NLS-1$
+
+            JsonObject error = JsonParser.parseString(LaunchTool.standalonePreconditionError(
+                "Standalone", lookup.failure())).getAsJsonObject(); //$NON-NLS-1$
+            assertFalse(error.get("success").getAsBoolean()); //$NON-NLS-1$
+            assertTrue(error.get("error").getAsString().contains("application lookup")); //$NON-NLS-1$ //$NON-NLS-2$
+            assertFalse("a precondition timeout must not suggest that a start was attempted", //$NON-NLS-1$
+                error.get("error").getAsString().contains("thin-client configuration")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        finally
+        {
+            release.countDown();
+            assertTrue("the timed-out lookup Job must not leak into later tests", //$NON-NLS-1$
+                finished.await(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void testStandaloneBoundedLookupCarriesStartAttributionWithoutASecondEdtRead()
+        throws Exception
+    {
+        IApplicationManager manager = mock(IApplicationManager.class);
+        IProject project = mock(IProject.class);
+        IApplication application = mock(IApplication.class,
+            Mockito.withSettings().extraInterfaces(ServerBackedApplication.class));
+        NamedStandaloneServer server = new NamedStandaloneServer("Standalone server for Base"); //$NON-NLS-1$
+        when(manager.getApplication(project, "ServerApplication.Test")) //$NON-NLS-1$
+            .thenReturn(Optional.of(application));
+        when(((ServerBackedApplication)application).getServer()).thenReturn(server);
+        when(application.getName()).thenReturn("Base"); //$NON-NLS-1$
+
+        StandaloneServerSupport.ApplicationLookup lookup =
+            StandaloneServerSupport.lookupApplicationBounded(manager, project,
+                "ServerApplication.Test", 5_000L); //$NON-NLS-1$
+
+        assertNull(lookup.failure());
+        assertSame(application, lookup.application());
+        assertSame(server, lookup.server());
+        assertEquals("Base", lookup.infobaseName()); //$NON-NLS-1$
+        assertEquals("Standalone server for Base", lookup.serverName()); //$NON-NLS-1$
+        verify(manager, times(1)).getApplication(project, "ServerApplication.Test"); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testWholeStandalonePreparationStopsAtOneDeadline() throws Exception
+    {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
+
+        BoundedJob.Result result = LaunchTool.runStandalonePreparationBounded(
+            "Standalone", 250L, monitor -> { //$NON-NLS-1$
+                started.countDown();
+                try
+                {
+                    release.await(30, TimeUnit.SECONDS);
+                }
+                finally
+                {
+                    finished.countDown();
+                }
+            });
+
+        try
+        {
+            assertTrue("the complete preparation must enter its one bounded job", //$NON-NLS-1$
+                started.await(5, TimeUnit.SECONDS));
+            assertEquals(BoundedJob.Outcome.TIMED_OUT, result.getOutcome());
+        }
+        finally
+        {
+            release.countDown();
+            assertTrue(finished.await(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void testTimedOutStandalonePreparationKeepsPublishedFailureButRefusesLateSuccess()
+        throws Exception
+    {
+        AtomicReference<StandalonePreparation> published = new AtomicReference<>();
+        AtomicReference<BoundedJob.Result> bounded = new AtomicReference<>();
+        AtomicReference<Throwable> callerFailure = new AtomicReference<>();
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
+        Thread caller = new Thread(() -> {
+            try
+            {
+                bounded.set(LaunchTool.runStandalonePreparationBounded("Standalone", 250L, //$NON-NLS-1$
+                    monitor -> {
+                        published.set(StandalonePreparation.failed("project is unavailable")); //$NON-NLS-1$
+                        started.countDown();
+                        try
+                        {
+                            release.await(30, TimeUnit.SECONDS);
+                        }
+                        finally
+                        {
+                            finished.countDown();
+                        }
+                    }));
+            }
+            catch (Throwable failure)
+            {
+                callerFailure.set(failure);
+            }
+        }, "test: published standalone-preparation failure"); //$NON-NLS-1$
+
+        caller.start();
+        try
+        {
+            assertTrue(started.await(5, TimeUnit.SECONDS));
+            caller.join(5_000L);
+            assertFalse("the bounded caller must return at its deadline", caller.isAlive()); //$NON-NLS-1$
+            assertNull(callerFailure.get());
+            assertEquals(BoundedJob.Outcome.TIMED_OUT, bounded.get().getOutcome());
+            StandalonePreparation knownFailure = published.get();
+            assertTrue(knownFailure.hasFailure());
+            assertSame("a failure published before the deadline is more exact than a timeout", //$NON-NLS-1$
+                knownFailure,
+                LaunchTool.acceptPublishedStandalonePreparation(knownFailure, bounded.get()));
+
+            StandalonePreparation lateReady = StandalonePreparation.ready(null,
+                "ServerApplication.Late", null, new Object(), null, false); //$NON-NLS-1$
+            assertNull("a ready result cannot succeed after the bounded caller gave up", //$NON-NLS-1$
+                LaunchTool.acceptPublishedStandalonePreparation(lateReady, bounded.get()));
+        }
+        finally
+        {
+            release.countDown();
+            caller.join(5_000L);
+            assertTrue(finished.await(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void testClaimTimeoutRetainsAStaleStopCompletedDuringPreparation() throws Exception
+    {
+        IProject project = mock(IProject.class);
+        AtomicInteger retainedStops = new AtomicInteger();
+        AtomicInteger starts = new AtomicInteger();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
+        BoundedJob.Result bounded = LaunchTool.runStandalonePreparationBounded(
+            "Standalone", 250L, monitor -> { //$NON-NLS-1$
+                entered.countDown();
+                try
+                {
+                    release.await(30, TimeUnit.SECONDS);
+                }
+                finally
+                {
+                    finished.countDown();
+                }
+            });
+
+        try
+        {
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertEquals(BoundedJob.Outcome.TIMED_OUT, bounded.getOutcome());
+            StandalonePreparation preparation =
+                LaunchTool.finishIncompleteStandalonePreparation(project,
+                    "ServerApplication.Test", true, StandalonePreparationStage.START_CLAIM, //$NON-NLS-1$
+                    "Standalone", "TestProject", 250L, bounded); //$NON-NLS-1$ //$NON-NLS-2$
+
+            LaunchTool.startStandaloneServerGuarded("Standalone", project, //$NON-NLS-1$
+                () -> preparation.applyPreflight(
+                    applicationId -> retainedStops.incrementAndGet()),
+                () -> {
+                    starts.incrementAndGet();
+                    return new StartOutcome(null, true, false);
+                });
+
+            assertEquals("the completed stop must enter the retain/restoration path exactly once", //$NON-NLS-1$
+                1, retainedStops.get());
+            assertEquals("a claim timeout must fail before a new start is dispatched", //$NON-NLS-1$
+                0, starts.get());
+        }
+        finally
+        {
+            release.countDown();
+            assertTrue(finished.await(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void testStandaloneServerStartReportsItsCapturedPortConflict()
+    {
+        StartOutcome outcome = LaunchTool.startStandaloneServerWithPolicy(
+            new PortConflictingStandaloneStartService(), new Object(), "Standalone", //$NON-NLS-1$
+            ILaunchManager.DEBUG_MODE, null, null, StandaloneServerPortConflictPolicy.CANCEL);
+
+        assertNotNull(outcome.failure());
+        assertTrue(outcome.failure().contains("network ports are already in use")); //$NON-NLS-1$
+        assertTrue(outcome.failure().contains("standaloneServerPortConflict='reassign'")); //$NON-NLS-1$
+        assertFalse(outcome.portsReassigned());
+    }
+
+    @Test
+    public void testStandaloneServerStartClassifiesOnlyFinishedFailuresAsConclusive()
+    {
+        assertTrue(BoundedJob.isInconclusive(BoundedJob.Outcome.TIMED_OUT));
+        assertTrue(BoundedJob.isInconclusive(BoundedJob.Outcome.INTERRUPTED));
+        assertFalse(BoundedJob.isInconclusive(BoundedJob.Outcome.TIMED_OUT_BEFORE_START));
+
+        StartOutcome captured = LaunchTool.startStandaloneServerWithPolicy(
+            new ThrowingStandaloneStartService(), new Object(), "Standalone", //$NON-NLS-1$
+            ILaunchManager.DEBUG_MODE, null, null, StandaloneServerPortConflictPolicy.CANCEL);
+        assertEquals("captured start failure", captured.failure()); //$NON-NLS-1$
+        assertTrue(captured.conclusive());
+    }
+
+    @Test
+    public void testConclusiveStandaloneFailureDisarmsBeforeTheCallReturns()
+        throws Exception
+    {
+        IStatus refusal = new Status(IStatus.ERROR, "test", "server start refused"); //$NON-NLS-1$ //$NON-NLS-2$
+        AtomicInteger inFlight = authInFlightCounter();
+        int originalAuth = inFlight.get();
+        int originalPortArms = portConflictArmCount();
+        int originalConflictWatches = conflictWatchCount();
+        armPortConflictForTest(StandaloneServerPortConflictPolicy.REASSIGN,
+            "Foreign infobase", "Foreign server"); //$NON-NLS-1$ //$NON-NLS-2$
+
+        try
+        {
+            StartOutcome outcome = LaunchTool.startStandaloneServerWithPolicy(
+                new FakeStandaloneStartService(refusal), new Object(), "Standalone", //$NON-NLS-1$
+                ILaunchManager.DEBUG_MODE, null, null, StandaloneServerPortConflictPolicy.CANCEL,
+                5_000L, 5_000L);
+
+            assertNotNull(outcome.failure());
+            assertTrue(outcome.conclusive());
+            assertEquals("the auth guard must be released before a conclusive call returns", //$NON-NLS-1$
+                originalAuth, inFlight.get());
+            assertEquals("the conflict watch must close before a conclusive call returns", //$NON-NLS-1$
+                originalConflictWatches, conflictWatchCount());
+            assertEquals("headless cleanup must not release another invocation's port guard", //$NON-NLS-1$
+                originalPortArms + 1, portConflictArmCount());
+        }
+        finally
+        {
+            while (portConflictArmCount() > originalPortArms)
+            {
+                disarmPortConflictForTest(StandaloneServerPortConflictPolicy.REASSIGN,
+                    "Foreign infobase", "Foreign server"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+    }
+
+    @Test
+    public void testInconclusiveStandaloneStartStaysArmedUntilItsJobCompletes() throws Exception
+    {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<StartOutcome> answer = new AtomicReference<>();
+        AtomicReference<Throwable> callerFailure = new AtomicReference<>();
+        AtomicInteger inFlight = authInFlightCounter();
+        int originalAuth = inFlight.get();
+        int originalPortArms = portConflictArmCount();
+        int originalConflictWatches = conflictWatchCount();
+        // Seed another invocation's port arm; the headless acquisition reports false, so neither
+        // eager nor deferred cleanup may consume this marker.
+        armPortConflictForTest(StandaloneServerPortConflictPolicy.CANCEL,
+            "Foreign infobase", "Foreign server"); //$NON-NLS-1$ //$NON-NLS-2$
+        BlockingStandaloneStartService service =
+            new BlockingStandaloneStartService(started, release);
+        Thread caller = new Thread(() -> {
+            try
+            {
+                answer.set(LaunchTool.startStandaloneServerWithPolicy(service, new Object(),
+                    "Standalone", ILaunchManager.DEBUG_MODE, null, null, //$NON-NLS-1$
+                    StandaloneServerPortConflictPolicy.REASSIGN, 100L, 5_000L));
+            }
+            catch (Throwable t)
+            {
+                callerFailure.set(t);
+            }
+        }, "test: bounded standalone caller"); //$NON-NLS-1$
+
+        caller.start();
+        try
+        {
+            assertTrue("the underlying start must be running before the bounded wait returns", //$NON-NLS-1$
+                started.await(5, TimeUnit.SECONDS));
+            caller.join(5_000L);
+            assertFalse("the bounded caller must have returned", caller.isAlive()); //$NON-NLS-1$
+            assertNull(callerFailure.get());
+            assertNotNull(answer.get());
+            assertFalse(answer.get().conclusive());
+            assertFalse("an inconclusive snapshot must not assert that no port rewrite occurred", //$NON-NLS-1$
+                answer.get().portsReassigned());
+            assertTrue(answer.get().portReassignmentOutcomeUnknown());
+            assertTrue(answer.get().failure().contains(
+                "ports may have been rewritten while the start continued")); //$NON-NLS-1$
+            JsonObject error = JsonParser.parseString(LaunchTool.standaloneStartFailure(
+                LaunchTool.standaloneInconclusiveAttemptError(
+                    "Standalone", answer.get().failure()), //$NON-NLS-1$
+                answer.get().portsReassigned(), answer.get().portReassignmentOutcomeUnknown()))
+                .getAsJsonObject();
+            assertTrue(error.get("mutationOutcomeUnknown").getAsBoolean()); //$NON-NLS-1$
+            assertFalse("unknown must not be misreported as a committed reassignment", //$NON-NLS-1$
+                error.has("mutationCommitted")); //$NON-NLS-1$
+            assertFalse("unknown must not emit the exact-reassignment field", //$NON-NLS-1$
+                error.has("standaloneServerPortsReassigned")); //$NON-NLS-1$
+            assertEquals("the old eager auth release must be absent while the start is in flight", //$NON-NLS-1$
+                originalAuth + 1, inFlight.get());
+            assertEquals(
+                "the old eager conflict-watch close must be absent while the start is in flight", //$NON-NLS-1$
+                originalConflictWatches + 1, conflictWatchCount());
+            assertEquals("headless cleanup must not release another invocation's port guard", //$NON-NLS-1$
+                originalPortArms + 1, portConflictArmCount());
+
+            release.countDown();
+            long deadline = System.currentTimeMillis() + 5_000L;
+            while ((inFlight.get() != originalAuth
+                || conflictWatchCount() != originalConflictWatches)
+                && System.currentTimeMillis() < deadline)
+            {
+                Thread.sleep(10L);
+            }
+            assertEquals("job completion must release the deferred auth guard", //$NON-NLS-1$
+                originalAuth, inFlight.get());
+            assertEquals("job completion must close the deferred conflict watch", //$NON-NLS-1$
+                originalConflictWatches, conflictWatchCount());
+            assertEquals("job completion must leave another invocation's port guard armed", //$NON-NLS-1$
+                originalPortArms + 1, portConflictArmCount());
+        }
+        finally
+        {
+            release.countDown();
+            caller.join(5_000L);
+            long cleanupDeadline = System.currentTimeMillis() + 5_000L;
+            while ((inFlight.get() != originalAuth
+                || conflictWatchCount() != originalConflictWatches)
+                && System.currentTimeMillis() < cleanupDeadline)
+            {
+                Thread.sleep(10L);
+            }
+            while (portConflictArmCount() > originalPortArms)
+            {
+                disarmPortConflictForTest(StandaloneServerPortConflictPolicy.CANCEL,
+                    "Foreign infobase", "Foreign server"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+    }
+
+    @Test
+    public void testDirectStandaloneFailureSurfacesCancelledAccessSettingsDialog()
+    {
+        StartOutcome outcome = LaunchTool.startStandaloneServerWithPolicy(
+            new AuthCancellingStandaloneStartService(), new Object(), "Standalone", //$NON-NLS-1$
+            ILaunchManager.DEBUG_MODE, null, null, StandaloneServerPortConflictPolicy.CANCEL);
+
+        assertNotNull(outcome.failure());
+        assertTrue(outcome.failure().contains("infobase access-settings dialog")); //$NON-NLS-1$
+        assertTrue(outcome.failure().contains("set_infobase_credentials")); //$NON-NLS-1$
+        assertFalse("the old bare service-status failure must be absent", //$NON-NLS-1$
+            "server start refused".equals(outcome.failure())); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testDeferredStandaloneDisarmRunsAtMostOnceForCompletionAndCap() throws Exception
+    {
+        CountDownLatch cleaned = new CountDownLatch(1);
+        AtomicInteger cleanups = new AtomicInteger();
+        BoundedJob.DeferredCleanup cleanup = new BoundedJob.DeferredCleanup(() -> {
+            cleanups.incrementAndGet();
+            cleaned.countDown();
+        }, 100L, "test: standalone cleanup cap"); //$NON-NLS-1$
+
+        cleanup.afterBoundedWait(false);
+        cleanup.jobFinished();
+        assertTrue(cleaned.await(5, TimeUnit.SECONDS));
+        Thread.sleep(250L); // let the independently scheduled hard-cap path arrive too
+        cleanup.jobFinished();
+
+        assertEquals("job completion and the cap must share one exactly-once release", //$NON-NLS-1$
+            1, cleanups.get());
+    }
+
+    @Test
+    public void testDeferredStandaloneDisarmCapAlsoWinsAtMostOnce() throws Exception
+    {
+        CountDownLatch cleaned = new CountDownLatch(1);
+        AtomicInteger cleanups = new AtomicInteger();
+        BoundedJob.DeferredCleanup cleanup = new BoundedJob.DeferredCleanup(() -> {
+            cleanups.incrementAndGet();
+            cleaned.countDown();
+        }, 25L, "test: standalone cleanup cap"); //$NON-NLS-1$
+
+        cleanup.afterBoundedWait(false);
+        assertTrue("the cap must release a confirmer whose job never finishes", //$NON-NLS-1$
+            cleaned.await(5, TimeUnit.SECONDS));
+        cleanup.jobFinished();
+
+        assertEquals("a late job completion must not release the arm twice", //$NON-NLS-1$
+            1, cleanups.get());
+    }
+
+    @Test
+    public void testStandaloneServerRecoversStaleStateBeforeDispatchingStart()
+    {
+        AtomicInteger order = new AtomicInteger();
+
+        StartOutcome result = LaunchTool.startStandaloneServerGuarded("Standalone", null, //$NON-NLS-1$
+            () -> assertTrue("the preflight runs first", order.compareAndSet(0, 1)),
+            () -> {
+                assertTrue("the service starts only after recovery", order.compareAndSet(1, 2));
+                return new StartOutcome(null, true, false);
+            });
+
+        assertNull(result.failure());
+        assertEquals(2, order.get());
+    }
+
+    @Test
+    public void testStandaloneServerDoesNotStartWhenRecoveryRefuses()
+    {
+        AtomicInteger starts = new AtomicInteger();
+
+        StartOutcome result = LaunchTool.startStandaloneServerGuarded("Standalone", null, //$NON-NLS-1$
+            () -> { throw new ApplicationException("the stale server is still stopping"); }, //$NON-NLS-1$
+            () -> {
+                starts.incrementAndGet();
+                return new StartOutcome(null, true, false);
+            });
+
+        assertEquals(0, starts.get());
+        assertTrue(result.failure().contains("the stale server is still stopping")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testStandaloneServerFailedStartRestoresAStaleServerStoppedByItsPreflight()
+    {
+        StartOutcome result = LaunchTool.startStandaloneServerGuarded("Standalone", null, //$NON-NLS-1$
+            () -> recordOperationStop("ServerApplication.Test"), //$NON-NLS-1$
+            () -> new StartOutcome("server start refused", true, false)); //$NON-NLS-1$
+
+        assertTrue(result.failure().contains("server start refused")); //$NON-NLS-1$
+        assertTrue(result.failure().contains(
+            "was stopped for this operation and could NOT be started again")); //$NON-NLS-1$
+        assertTrue(result.failure().contains("launchConfigurationName='Standalone'")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testStandaloneStartSchedulingFailureRestoresTheStoppedServer()
+    {
+        AtomicInteger restorationAttempts = new AtomicInteger();
+
+        StartOutcome result = LaunchTool.startStandaloneServerGuarded("Standalone", null, //$NON-NLS-1$
+            () -> recordOperationStop("ServerApplication.Test"), //$NON-NLS-1$
+            () -> {
+                throw new IllegalStateException("Eclipse Job manager rejected the start"); //$NON-NLS-1$
+            },
+            (original, project, launchName) -> {
+                restorationAttempts.incrementAndGet();
+                return original + ". Restoration was attempted"; //$NON-NLS-1$
+            });
+
+        assertEquals("start scheduling must attempt restoration before cleanup", //$NON-NLS-1$
+            1, restorationAttempts.get());
+        assertTrue(result.conclusive());
+        assertTrue(result.failure().contains("Eclipse Job manager rejected the start")); //$NON-NLS-1$
+        assertFalse(result.failure().contains("Unexpected error")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testStandaloneServerFailedStartDoesNotClaimRestorationWhenNothingWasStopped()
+    {
+        StartOutcome result = LaunchTool.startStandaloneServerGuarded("Standalone", null, () -> { }, //$NON-NLS-1$
+            () -> new StartOutcome("server start refused", true, false)); //$NON-NLS-1$
+
+        assertTrue(result.failure().contains("server start refused")); //$NON-NLS-1$
+        assertFalse(result.failure().contains("stopped for this operation")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testInconclusiveStandaloneStartDoesNotRestoreTheStoppedServer()
+    {
+        StartOutcome result = LaunchTool.startStandaloneServerGuarded("Standalone", null, //$NON-NLS-1$
+            () -> recordOperationStop("ServerApplication.Test"), //$NON-NLS-1$
+            () -> new StartOutcome("the wait for the standalone-server start was interrupted; " //$NON-NLS-1$
+                + "the start may still be running", false, false)); //$NON-NLS-1$
+
+        JsonObject error = JsonParser.parseString(result.failure()).getAsJsonObject();
+        assertFalse(error.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertEquals("Failed to start standalone server 'Standalone': the wait for the " //$NON-NLS-1$
+            + "standalone-server start was interrupted; the start may still be running. The " //$NON-NLS-1$
+            + "standalone server 'ServerApplication.Test' was stopped for this operation and was " //$NON-NLS-1$
+            + "left stopped instead of scheduling a second start because the original start may " //$NON-NLS-1$
+            + "still be running. Wait for the in-flight start to settle, then check debug_status " //$NON-NLS-1$
+            + "and EDT's Servers view before starting anything. Only if the server is stopped, " //$NON-NLS-1$
+            + "call launch(launchConfigurationName='Standalone').", //$NON-NLS-1$
+            error.get("error").getAsString()); //$NON-NLS-1$
+        assertFalse(error.get("error").getAsString().contains("has been started again")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse(error.get("error").getAsString().contains("could NOT be started again")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("an inconclusive start must not recommend a second start through a client", //$NON-NLS-1$
+            error.get("error").getAsString().contains("thin-client configuration")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(error.get("error").getAsString().contains("check debug_status")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testStandaloneServerPortPolicyKeepsTheCallersReassignChoice() throws Exception
+    {
+        ILaunchConfiguration config = mock(ILaunchConfiguration.class);
+        when(config.getAttribute(LaunchConfigUtils.ATTR_PROJECT_NAME, "")) //$NON-NLS-1$
+            .thenReturn("Project"); //$NON-NLS-1$
+        when(config.getAttribute(LaunchConfigUtils.ATTR_APPLICATION_ID, "")) //$NON-NLS-1$
+            .thenReturn("ServerApplication.Test"); //$NON-NLS-1$
+
+        assertSame(StandaloneServerPortConflictPolicy.REASSIGN,
+            LaunchTool.standaloneServerPortPolicy(config,
+                StandaloneServerPortConflictPolicy.REASSIGN));
+    }
+
+    @Test
+    public void theUpdateRequestIsReadFromPRESENCE_notFromTheSchemaDefault()
+    {
+        assertFalse("a caller that never passed updateBeforeLaunch has requested nothing; reading " //$NON-NLS-1$
+            + "the defaulted true here would refuse every plain standalone-server start", //$NON-NLS-1$
+            LaunchTool.explicitUpdateRequest(Map.of("launchConfigurationName", "Standalone"))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("an explicit updateBeforeLaunch=true is a real request", //$NON-NLS-1$
+            LaunchTool.explicitUpdateRequest(Map.of("updateBeforeLaunch", "true"))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("an explicit updateBeforeLaunch=false is not a request", //$NON-NLS-1$
+            LaunchTool.explicitUpdateRequest(Map.of("updateBeforeLaunch", "false"))); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void theExternalChangesPolicyRequestIsReadFromPRESENCE_notFromItsDefault()
+    {
+        assertFalse(LaunchTool.explicitPolicyRequest(
+            Map.of("launchConfigurationName", "Standalone"))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse(LaunchTool.explicitPolicyRequest(
+            Map.of("externalInfobaseChanges", "  "))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(LaunchTool.explicitPolicyRequest(
+            Map.of("externalInfobaseChanges", "override"))); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testStandaloneServerRefusesOnlyAnExplicitUpdateRequest()
+    {
+        String refusal = LaunchTool.standaloneUpdateRefusal("Standalone", true, //$NON-NLS-1$
+            false, ExternalInfobaseChangesPolicy.DEFAULT);
+
+        assertNotNull(refusal);
+        assertTrue(refusal.contains("'updateBeforeLaunch'")); //$NON-NLS-1$
+        assertTrue(refusal.contains("update_database")); //$NON-NLS-1$
+        assertTrue(refusal.contains("updateBeforeLaunch=false")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testStandaloneServerRefusesANonDefaultExternalChangesPolicy()
+    {
+        String refusal = LaunchTool.standaloneUpdateRefusal("Standalone", false, //$NON-NLS-1$
+            true, ExternalInfobaseChangesPolicy.IMPORT);
+
+        assertNotNull(refusal);
+        assertTrue(refusal.contains("'externalInfobaseChanges'='import'")); //$NON-NLS-1$
+        assertTrue(refusal.contains("update_database")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testStandaloneServerRefusesAnExplicitOverrideButAcceptsAnOmittedPolicy()
+    {
+        String refusal = LaunchTool.standaloneUpdateRefusal("Standalone", false, true, //$NON-NLS-1$
+            ExternalInfobaseChangesPolicy.DEFAULT);
+        JsonObject error = JsonParser.parseString(refusal).getAsJsonObject();
+        assertFalse(error.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertEquals("Parameter 'externalInfobaseChanges'='override' cannot be honoured for " //$NON-NLS-1$
+            + "standalone-server launch configuration 'Standalone' because this direct route " //$NON-NLS-1$
+            + "performs no database update. Run update_database with " //$NON-NLS-1$
+            + "externalInfobaseChanges='override' first, then call launch with " //$NON-NLS-1$
+            + "updateBeforeLaunch=false and omit externalInfobaseChanges.", //$NON-NLS-1$
+            error.get("error").getAsString()); //$NON-NLS-1$
+        assertFalse(error.get("error").getAsString().contains("='import'")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertNull(LaunchTool.standaloneUpdateRefusal("Standalone", false, false, //$NON-NLS-1$
+            ExternalInfobaseChangesPolicy.DEFAULT));
+    }
+
+    @Test
+    public void testStandaloneServerRefusesEveryClientOnlyParameterByName()
+    {
+        String startup = LaunchTool.standaloneOverridesRefusal("Standalone", //$NON-NLS-1$
+            LaunchOverrides.of("run tests", null, null)); //$NON-NLS-1$
+        assertTrue(startup.contains("'startupOption'")); //$NON-NLS-1$
+        assertTrue(startup.contains("standalone server starts no client")); //$NON-NLS-1$
+
+        String project = LaunchTool.standaloneOverridesRefusal("Standalone", //$NON-NLS-1$
+            LaunchOverrides.of(null, "ExternalObjects", null)); //$NON-NLS-1$
+        assertTrue(project.contains("'externalObjectProjectName'")); //$NON-NLS-1$
+        assertTrue(project.contains("standalone server starts no client")); //$NON-NLS-1$
+
+        String object = LaunchTool.standaloneOverridesRefusal("Standalone", //$NON-NLS-1$
+            LaunchOverrides.of(null, null, "Runner")); //$NON-NLS-1$
+        assertTrue(object.contains("'externalObjectName'")); //$NON-NLS-1$
+        assertTrue(object.contains("standalone server starts no client")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testStandaloneServerWithNoClientOnlyParametersStillStarts()
+    {
+        assertNull(LaunchTool.standaloneOverridesRefusal("Standalone", //$NON-NLS-1$
+            LaunchOverrides.of(null, null, null)));
+        AtomicInteger starts = new AtomicInteger();
+        assertNull(LaunchTool.startStandaloneServerGuarded("Standalone", null, () -> { }, () -> { //$NON-NLS-1$
+            starts.incrementAndGet();
+            return new StartOutcome(null, true, false);
+        }).failure());
+        assertEquals(1, starts.get());
+    }
+
+    @Test
+    public void testStandalonePreconditionErrorOmitsTheThinClientFallback()
+    {
+        JsonObject error = JsonParser.parseString(LaunchTool.standalonePreconditionError(
+            "Standalone", "Project is closed: Project")).getAsJsonObject(); //$NON-NLS-1$ //$NON-NLS-2$
+
+        assertTrue(error.get("error").getAsString().contains("Project is closed: Project")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse(error.get("error").getAsString().contains("thin-client configuration")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testStandaloneServerSuccessReportsEffectiveDebugMode()
+    {
+        JsonObject result = JsonParser.parseString(LaunchTool.standaloneStartSuccess(
+            "Standalone", STANDALONE_SERVER_TYPE_ID, "Project", //$NON-NLS-1$ //$NON-NLS-2$
+            "ServerApplication.Test", false)).getAsJsonObject(); //$NON-NLS-1$
+
+        assertTrue(result.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertEquals("debug", result.get("mode").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals("running", result.get("status").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(result.get("message").getAsString() //$NON-NLS-1$
+            .contains("regardless of the requested mode")); //$NON-NLS-1$
+        assertTrue(result.get("message").getAsString() //$NON-NLS-1$
+            .contains("No database update was performed")); //$NON-NLS-1$
+        assertFalse(result.has("standaloneServerPortsReassigned")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testStandaloneServerSuccessReportsReassignedPorts()
+    {
+        StartOutcome outcome = LaunchTool.startStandaloneServerWithPolicy(
+            new PortReassigningStandaloneStartService(), new Object(), "Standalone", //$NON-NLS-1$
+            ILaunchManager.DEBUG_MODE, null, null, StandaloneServerPortConflictPolicy.REASSIGN);
+        assertNull(outcome.failure());
+        assertTrue(outcome.portsReassigned());
+
+        JsonObject result = JsonParser.parseString(LaunchTool.standaloneStartSuccess(
+            "Standalone", STANDALONE_SERVER_TYPE_ID, "Project", //$NON-NLS-1$ //$NON-NLS-2$
+            "ServerApplication.Test", outcome.portsReassigned())).getAsJsonObject(); //$NON-NLS-1$
+        assertTrue(result.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertTrue(result.get("standaloneServerPortsReassigned").getAsBoolean()); //$NON-NLS-1$
+        assertFalse(result.has("portsReassigned")); //$NON-NLS-1$
+        assertEquals("Standalone server 'Standalone' is running in DEBUG mode. EDT starts " //$NON-NLS-1$
+            + "standalone servers in DEBUG mode regardless of the requested mode. No database " //$NON-NLS-1$
+            + "update was performed. NOTE: the standalone server's ports were busy, so EDT moved " //$NON-NLS-1$
+            + "it to free ports and rewrote its configuration " //$NON-NLS-1$
+            + "(standaloneServerPortConflict=reassign) — clients must use the new address.", //$NON-NLS-1$
+            result.get("message").getAsString()); //$NON-NLS-1$
+
+        JsonObject outputProperties = JsonParser.parseString(new LaunchTool().getOutputSchema())
+            .getAsJsonObject().getAsJsonObject("properties"); //$NON-NLS-1$
+        assertTrue(outputProperties.has("standaloneServerPortsReassigned")); //$NON-NLS-1$
+        assertFalse(outputProperties.has("portsReassigned")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testStandaloneServerFailureReportsReassignedPortsAsPostMutation()
+    {
+        StartOutcome outcome = LaunchTool.startStandaloneServerWithPolicy(
+            new PortReassigningFailingStandaloneStartService(), new Object(), "Standalone", //$NON-NLS-1$
+            ILaunchManager.DEBUG_MODE, null, null, StandaloneServerPortConflictPolicy.REASSIGN);
+        assertNotNull(outcome.failure());
+        assertTrue(outcome.portsReassigned());
+
+        JsonObject result = JsonParser.parseString(LaunchTool.standaloneStartFailure(
+            LaunchTool.standaloneAttemptError("Standalone", outcome.failure()), //$NON-NLS-1$
+            outcome.portsReassigned())).getAsJsonObject();
+        assertFalse(result.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertTrue(result.get("standaloneServerPortsReassigned").getAsBoolean()); //$NON-NLS-1$
+        assertTrue(result.get("mutationCommitted").getAsBoolean()); //$NON-NLS-1$
+        assertFalse(result.has("mutationOutcomeUnknown")); //$NON-NLS-1$
+
+        JsonObject unchanged = JsonParser.parseString(LaunchTool.standaloneStartFailure(
+            LaunchTool.standaloneAttemptError("Standalone", "server start refused"), false)) //$NON-NLS-1$ //$NON-NLS-2$
+            .getAsJsonObject();
+        assertFalse(unchanged.has("standaloneServerPortsReassigned")); //$NON-NLS-1$
+        assertFalse(unchanged.has("mutationCommitted")); //$NON-NLS-1$
     }
 
     @Test
@@ -606,7 +1983,7 @@ public class LaunchToolTest
         ILaunchConfiguration config = Mockito.mock(ILaunchConfiguration.class);
         String error = new LaunchTool().performLaunch(config, true, ExternalInfobaseChangesPolicy.DEFAULT);
         assertNull("successful headless launch must return null even with update auto-confirm", error);
-        Mockito.verify(config).launch(ILaunchManager.DEBUG_MODE, null);
+        Mockito.verify(config).launch(eq(ILaunchManager.DEBUG_MODE), isA(AttributableCancel.class));
     }
 
     // ============ alreadyRunning detects a live CLIENT session only ============
@@ -883,7 +2260,7 @@ public class LaunchToolTest
         // touching the application manager at all.
         IApplicationManager mgr = mock(IApplicationManager.class);
         String error = LaunchTool.runPreLaunchUpdateStep(mockOpenProject(),
-            "ServerApplication.MyServer", mgr, true, ExternalInfobaseChangesPolicy.DEFAULT); //$NON-NLS-1$
+            "ServerApplication.MyServer", mgr, true); //$NON-NLS-1$
         assertNull("server application must proceed without a programmatic update", error);
         verify(mgr, never()).update(any(), any(), any(), any());
         verify(mgr, never()).getUpdateState(any());
@@ -891,26 +2268,36 @@ public class LaunchToolTest
     }
 
     @Test
-    public void testPreLaunchUpdateStepNonServerApplicationStillUpdates() throws Exception
+    public void testPreLaunchUpdateStepNonServerApplicationDefersTheUpdate() throws Exception
     {
-        // Non-server (file / client-server infobase) application: the programmatic
-        // pre-update KEEPS running exactly as before — the hang is server-app-specific,
-        // ordinary infobase apps don't start a standalone server. A stale IB is updated
-        // and the step proceeds on success.
+        // A stale file / client-server infobase is NOT updated in the call: EDT's launch delegate
+        // updates it inside the launch Job, so the call returns at once.
         IProject project = mockOpenProject();
         IApplication app = mock(IApplication.class);
         IApplicationManager mgr = mock(IApplicationManager.class);
         when(mgr.getApplication(any(IProject.class), eq("infobase-app-uuid"))) //$NON-NLS-1$
             .thenReturn(Optional.of(app));
         when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.INCREMENTAL_UPDATE_REQUIRED);
-        when(mgr.update(eq(app), eq(ApplicationUpdateType.INCREMENTAL),
-            any(ExecutionContext.class), any())).thenReturn(ApplicationUpdateState.UPDATED);
 
-        String error = LaunchTool.runPreLaunchUpdateStep(project,
-            "infobase-app-uuid", mgr, true, ExternalInfobaseChangesPolicy.DEFAULT); //$NON-NLS-1$
-        assertNull("a successful non-server update must proceed", error);
-        verify(mgr, times(1)).update(eq(app), eq(ApplicationUpdateType.INCREMENTAL),
-            any(ExecutionContext.class), any());
+        assertNull(LaunchTool.runPreLaunchUpdateStep(project, "infobase-app-uuid", mgr, true)); //$NON-NLS-1$
+        verify(mgr, never()).update(any(), any(), any(), any());
+    }
+
+    @Test
+    public void testPreLaunchUpdateStepRefusesWhatTheDelegateCannotRecover() throws Exception
+    {
+        IProject project = mockOpenProject();
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq("busy-app"))).thenReturn(Optional.of(app)); //$NON-NLS-1$
+        when(mgr.getApplication(any(IProject.class), eq("missing-app"))).thenReturn(Optional.empty()); //$NON-NLS-1$
+        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.BEING_UPDATED);
+
+        String busy = LaunchTool.runPreLaunchUpdateStep(project, "busy-app", mgr, true); //$NON-NLS-1$
+        assertTrue(busy, busy.contains("is being updated right now") && busy.contains("get_applications"));
+        assertEquals("Application not found: missing-app", //$NON-NLS-1$
+            LaunchTool.runPreLaunchUpdateStep(project, "missing-app", mgr, true)); //$NON-NLS-1$
+        verify(mgr, never()).update(any(), any(), any(), any());
     }
 
     @Test
@@ -922,9 +2309,9 @@ public class LaunchToolTest
         // unarmed, so the platform's modal — if any — is a human's).
         IApplicationManager mgr = mock(IApplicationManager.class);
         assertNull(LaunchTool.runPreLaunchUpdateStep(mockOpenProject(),
-            "ServerApplication.MyServer", mgr, false, ExternalInfobaseChangesPolicy.DEFAULT)); //$NON-NLS-1$
+            "ServerApplication.MyServer", mgr, false)); //$NON-NLS-1$
         assertNull(LaunchTool.runPreLaunchUpdateStep(mockOpenProject(),
-            "infobase-app-uuid", mgr, false, ExternalInfobaseChangesPolicy.DEFAULT)); //$NON-NLS-1$
+            "infobase-app-uuid", mgr, false)); //$NON-NLS-1$
         verify(mgr, never()).update(any(), any(), any(), any());
         verify(mgr, never()).getUpdateState(any());
         verify(mgr, never()).getApplication(any(IProject.class), anyString());
@@ -1146,4 +2533,335 @@ public class LaunchToolTest
             obj.has("status")); //$NON-NLS-1$
         assertFalse("attach must be omitted when unset", obj.has("attach")); //$NON-NLS-1$
     }
+
+    /** A standalone-server service that returns a chosen start status. */
+    public static final class FakeStandaloneStartService
+    {
+        private final IStatus status;
+
+        FakeStandaloneStartService(IStatus status)
+        {
+            this.status = status;
+        }
+
+        public IStatus startServer(Object server, String launchMode, Object monitor)
+        {
+            return status;
+        }
+    }
+
+    /** A service that exposes a port-conflict event while the direct start window is open. */
+    public static final class PortConflictingStandaloneStartService
+    {
+        public IStatus startServer(Object server, String launchMode, Object monitor)
+        {
+            try
+            {
+                Method method = LaunchUpdateDialogAutoConfirmer.class.getDeclaredMethod(
+                    "recordPortConflictForTest", String.class); //$NON-NLS-1$
+                method.setAccessible(true);
+                method.invoke(null, "8429 - HTTP gate port"); //$NON-NLS-1$
+                return Status.OK_STATUS;
+            }
+            catch (ReflectiveOperationException e)
+            {
+                throw new AssertionError(e);
+            }
+        }
+    }
+
+    /** A service that records a successful EDT port reassignment before returning OK. */
+    public static final class PortReassigningStandaloneStartService
+    {
+        public IStatus startServer(Object server, String launchMode, Object monitor)
+        {
+            recordPortReassign();
+            return Status.OK_STATUS;
+        }
+    }
+
+    /** A service that persistently reassigns its ports and then reports a failed start. */
+    public static final class PortReassigningFailingStandaloneStartService
+    {
+        public IStatus startServer(Object server, String launchMode, Object monitor)
+        {
+            recordPortReassign();
+            return new Status(IStatus.ERROR, "test", "server start refused after reassign"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /** A direct start whose failed connect raised and auto-cancelled EDT's auth dialog. */
+    public static final class AuthCancellingStandaloneStartService
+    {
+        public IStatus startServer(Object server, String launchMode, Object monitor)
+        {
+            recordAuthDialogCancel();
+            return new Status(IStatus.ERROR, "test", "server start refused"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /** A start that ignores cancellation until the test explicitly releases it. */
+    public static final class BlockingStandaloneStartService
+    {
+        private final CountDownLatch started;
+        private final CountDownLatch release;
+
+        BlockingStandaloneStartService(CountDownLatch started, CountDownLatch release)
+        {
+            this.started = started;
+            this.release = release;
+        }
+
+        public IStatus startServer(Object server, String launchMode, Object monitor)
+        {
+            started.countDown();
+            try
+            {
+                release.await(60, TimeUnit.SECONDS);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+            }
+            return Status.OK_STATUS;
+        }
+    }
+
+    /** Extra EDT server-application surface supplied to a Mockito application mock. */
+    public interface ServerBackedApplication
+    {
+        Object getServer();
+    }
+
+    /** Minimal already-resolved WST server used by the bounded attribution test. */
+    public static final class NamedStandaloneServer
+    {
+        private final String name;
+
+        NamedStandaloneServer(String name)
+        {
+            this.name = name;
+        }
+
+        public String getName()
+        {
+            return name;
+        }
+    }
+
+    /** A standalone-server service whose start throws inside the bounded job. */
+    public static final class ThrowingStandaloneStartService
+    {
+        public IStatus startServer(Object server, String launchMode, Object monitor)
+        {
+            throw new IllegalStateException("captured start failure"); //$NON-NLS-1$
+        }
+    }
+
+    /** Records the successful reassign event while the launch conflict window is open. */
+    private static void recordPortReassign()
+    {
+        try
+        {
+            Method method = LaunchUpdateDialogAutoConfirmer.class.getDeclaredMethod(
+                "recordPortReassignForTest", String.class); //$NON-NLS-1$
+            method.setAccessible(true);
+            method.invoke(null, "8429 - HTTP gate port"); //$NON-NLS-1$
+        }
+        catch (ReflectiveOperationException e)
+        {
+            throw new AssertionError(e);
+        }
+    }
+
+    private static void recordAuthDialogCancel()
+    {
+        try
+        {
+            Method method = InfobaseAuthDialogSuppressor.class.getDeclaredMethod(
+                "recordAutoCancelledDialog", boolean.class); //$NON-NLS-1$
+            method.setAccessible(true);
+            method.invoke(null, false);
+        }
+        catch (ReflectiveOperationException e)
+        {
+            throw new AssertionError(e);
+        }
+    }
+
+    private static int portConflictArmCount() throws Exception
+    {
+        Method method = LaunchUpdateDialogAutoConfirmer.class.getDeclaredMethod(
+            "portConflictArmsForTest"); //$NON-NLS-1$
+        method.setAccessible(true);
+        return ((Integer)method.invoke(null)).intValue();
+    }
+
+    private static int conflictWatchCount() throws Exception
+    {
+        Field lockField = LaunchUpdateDialogAutoConfirmer.class.getDeclaredField("LOCK"); //$NON-NLS-1$
+        lockField.setAccessible(true);
+        Object lock = lockField.get(null);
+        Field watchesField = LaunchUpdateDialogAutoConfirmer.class.getDeclaredField(
+            "CONFLICT_WATCHES"); //$NON-NLS-1$
+        watchesField.setAccessible(true);
+        synchronized (lock)
+        {
+            return ((java.util.List<?>)watchesField.get(null)).size();
+        }
+    }
+
+    private static void armPortConflictForTest(StandaloneServerPortConflictPolicy policy,
+        String infobaseName, String serverName) throws Exception
+    {
+        Method method = LaunchUpdateDialogAutoConfirmer.class.getDeclaredMethod(
+            "armPortConflictForTest", StandaloneServerPortConflictPolicy.class, //$NON-NLS-1$
+            String.class, String.class);
+        method.setAccessible(true);
+        method.invoke(null, policy, infobaseName, serverName);
+    }
+
+    private static void disarmPortConflictForTest(StandaloneServerPortConflictPolicy policy,
+        String infobaseName, String serverName) throws Exception
+    {
+        Method method = LaunchUpdateDialogAutoConfirmer.class.getDeclaredMethod(
+            "disarmPortConflictForTest", StandaloneServerPortConflictPolicy.class, //$NON-NLS-1$
+            String.class, String.class);
+        method.setAccessible(true);
+        method.invoke(null, policy, infobaseName, serverName);
+    }
+
+    /** Reads the suppressor's package-private activity counter without widening production API. */
+    private static AtomicInteger authInFlightCounter() throws Exception
+    {
+        Field field = InfobaseAuthDialogSuppressor.class.getDeclaredField("IN_FLIGHT"); //$NON-NLS-1$
+        field.setAccessible(true);
+        return (AtomicInteger)field.get(null);
+    }
+
+    /** Records the stop that {@code ensureStartable} normally records inside the guarded scope. */
+    private static void recordOperationStop(String applicationId)
+    {
+        try
+        {
+            Method method = StandaloneServerStateRecovery.class.getDeclaredMethod(
+                "recordStoppedServer", String.class); //$NON-NLS-1$
+            method.setAccessible(true);
+            method.invoke(null, applicationId);
+        }
+        catch (ReflectiveOperationException e)
+        {
+            throw new AssertionError(e);
+        }
+    }
+
+    // ============ #622: a wedged lookup REFUSES, and says so differently from not-found ============
+
+    @Test
+    public void testAWedgedApplicationLookupRefusesInsteadOfLaunchingWithoutTheUpdate()
+        throws Exception
+    {
+        // Falling through here looked like a harmless degradation and was not: a null application
+        // gates runPreLaunchUpdateStep off, so the call answered success/launching having skipped
+        // the database update updateBeforeLaunch asked for - while the by-NAME route hard-errors on
+        // the identical wedge. The refusal must also NOT read as a not-found.
+        IApplicationManager manager = mock(IApplicationManager.class);
+        IProject project = mock(IProject.class);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
+        when(manager.getApplication(project, "Infobase.Wedged")).thenAnswer(invocation -> { //$NON-NLS-1$
+            try
+            {
+                release.await(30, TimeUnit.SECONDS);
+                return Optional.empty();
+            }
+            finally
+            {
+                finished.countDown();
+            }
+        });
+
+        try
+        {
+            LaunchTool.ApplicationResolution resolution = LaunchTool.resolveApplication(project,
+                "Infobase.Wedged", manager, 250L); //$NON-NLS-1$
+
+            assertNotNull("a wedged lookup must refuse, not launch without the update", //$NON-NLS-1$
+                resolution.error);
+            assertNull("nothing was resolved", resolution.application); //$NON-NLS-1$
+            assertTrue("the refusal names the deadline", //$NON-NLS-1$
+                resolution.error.contains("did not finish within 250ms")); //$NON-NLS-1$
+            assertTrue("the refusal must say nothing was launched", //$NON-NLS-1$
+                resolution.error.contains("Nothing was launched")); //$NON-NLS-1$
+            assertFalse("a deadline is NOT a not-found", //$NON-NLS-1$
+                resolution.error.contains("Application not found")); //$NON-NLS-1$
+            assertEquals("the id stays the display name when nothing resolved", //$NON-NLS-1$
+                "Infobase.Wedged", resolution.applicationName); //$NON-NLS-1$
+        }
+        finally
+        {
+            release.countDown();
+            assertTrue(finished.await(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void testAConcludedEmptyLookupStillRefusesWithNotFound() throws Exception
+    {
+        // The other edge of the same branch: only a read that CONCLUDED empty is a definitive
+        // not-found, and bounding the read must not have weakened that.
+        IApplicationManager manager = mock(IApplicationManager.class);
+        IProject project = mock(IProject.class);
+        when(manager.getApplication(project, "Infobase.Missing")).thenReturn(Optional.empty()); //$NON-NLS-1$
+
+        LaunchTool.ApplicationResolution resolution = LaunchTool.resolveApplication(project,
+            "Infobase.Missing", manager, 60_000L); //$NON-NLS-1$
+
+        assertNotNull("a measured absence must still refuse", resolution.error); //$NON-NLS-1$
+        assertTrue(resolution.error.contains("Application not found: Infobase.Missing")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testARaisedApplicationLookupRefusesTheSameWayAsAnExpiredOne() throws Exception
+    {
+        // The door the deadline fix left open: the catch below it logged and CONTINUED, leaving
+        // `application` null - the very thing that gates runPreLaunchUpdateStep off. So a raising
+        // manager still produced success:true, status:"launching" with updateBeforeLaunch (default
+        // true) silently skipped, while the deadline three lines above refused.
+        IApplicationManager manager = mock(IApplicationManager.class);
+        IProject project = mock(IProject.class);
+        when(manager.getApplication(project, "Infobase.Raising")) //$NON-NLS-1$
+            .thenThrow(new ApplicationException("the provision delegate is unavailable")); //$NON-NLS-1$
+
+        LaunchTool.ApplicationResolution resolution = LaunchTool.resolveApplication(project,
+            "Infobase.Raising", manager, 60_000L); //$NON-NLS-1$
+
+        assertNotNull("a raised lookup must refuse, not fall through", resolution.error); //$NON-NLS-1$
+        assertTrue("the refusal names the raise: " + resolution.error, //$NON-NLS-1$
+            resolution.error.contains("the provision delegate is unavailable")); //$NON-NLS-1$
+        assertTrue("the refusal must say nothing was launched", //$NON-NLS-1$
+            resolution.error.contains("Nothing was launched")); //$NON-NLS-1$
+        assertFalse("a raise is NOT a not-found", //$NON-NLS-1$
+            resolution.error.contains("Application not found")); //$NON-NLS-1$
+        assertNull("and it must not hand on a resolved application", resolution.application); //$NON-NLS-1$
+    }
+    @Test
+    public void windowModeAndScreenAreValidatedBeforeAnyLaunch()
+    {
+        LaunchTool tool = new LaunchTool();
+        var invalidMode = JsonParser.parseString(tool.execute(Map.of("windowMode", "hidden"))).getAsJsonObject();
+        assertFalse(invalidMode.get("success").getAsBoolean());
+        assertTrue(invalidMode.toString().contains("hidden"));
+        assertTrue(invalidMode.toString().contains("isolated"));
+        var invalidScreen = JsonParser.parseString(tool.execute(Map.of("windowMode", "otherScreen", "screen", "1.5"))).getAsJsonObject();
+        assertFalse(invalidScreen.get("success").getAsBoolean());
+        assertTrue(invalidScreen.toString().contains("integer"));
+        var wrongMode = JsonParser.parseString(tool.execute(Map.of("windowMode", "normal", "screen", "2"))).getAsJsonObject();
+        assertFalse(wrongMode.get("success").getAsBoolean());
+        assertTrue(wrongMode.toString().contains("otherScreen"));
+        var schema = JsonParser.parseString(tool.getInputSchema()).getAsJsonObject().getAsJsonObject("properties");
+        assertEquals(4, schema.getAsJsonObject("windowMode").getAsJsonArray("enum").size());
+        assertEquals("integer", schema.getAsJsonObject("screen").get("type").getAsString());
+    }
+
 }

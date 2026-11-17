@@ -8,6 +8,7 @@ package com.ditrix.edt.mcp.server;
 
 import java.util.Dictionary;
 import java.util.Hashtable;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Supplier;
 
@@ -18,6 +19,7 @@ import org.osgi.framework.ServiceRegistration;
 
 import com._1c.g5.v8.dt.bm.xtext.BmAwareResourceSetProvider;
 import com._1c.g5.v8.dt.core.event.IEventBroker;
+import com._1c.g5.v8.dt.core.lifecycle.IDtProjectResourceLifecycleBootstrap;
 import com._1c.g5.v8.dt.core.model.IModelObjectCollectionRuntimeOrderSorter;
 import com._1c.g5.v8.dt.core.model.IModelObjectFactory;
 import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
@@ -29,11 +31,15 @@ import com._1c.g5.v8.dt.core.platform.IConfigurationProjectManager;
 import com._1c.g5.v8.dt.core.platform.IExternalObjectProjectManager;
 import com._1c.g5.v8.dt.core.platform.IExtensionProjectManager;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.core.platform.IWorkspaceOrchestrator;
 import com._1c.g5.v8.dt.form.refactoring.IFormRefactoringService;
+import com._1c.g5.v8.dt.form.service.attribute.FormAttributeManagementService;
 import com._1c.g5.v8.dt.lifecycle.IServicesOrchestrator;
 import com._1c.g5.v8.dt.md.refactoring.core.IMdRefactoringService;
 import com._1c.g5.v8.dt.navigator.providers.INavigatorContentProviderStateProvider;
+import com._1c.g5.v8.dt.platform.IRuntimeRegistry;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager;
+import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationContextProvider;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager;
 import com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchonizationQuestionHandler;
 
@@ -45,6 +51,7 @@ import com.ditrix.edt.mcp.server.bridge.EdtMcpBridge;
 import com.ditrix.edt.mcp.server.bridge.IEdtMcpBridge;
 import com.ditrix.edt.mcp.server.history.McpCallHistoryFileLog;
 import com.ditrix.edt.mcp.server.utils.BackgroundJobs;
+import com.ditrix.edt.mcp.server.utils.FormAttributeDeletion;
 import com.ditrix.edt.mcp.server.utils.Log;
 import com.ditrix.edt.mcp.server.utils.NativeRenderModeProbe;
 import com.e1c.g5.dt.applications.IApplicationManager;
@@ -68,6 +75,12 @@ public class Activator extends AbstractUIPlugin
     /** MCP Server instance */
     private McpServer mcpServer;
 
+    /**
+     * The headless host's lifetime, set by {@link #startHeadlessCore} and taken back exactly once by
+     * {@link #stop}; read from request threads.
+     */
+    private final AtomicReference<HeadlessLifetime> headlessLifetime = new AtomicReference<>();
+
     /** In-process bridge exposed to sibling OSGi bundles by string service name. */
     private ServiceRegistration<?> bridgeRegistration;
 
@@ -90,7 +103,7 @@ public class Activator extends AbstractUIPlugin
     public void start(BundleContext context) throws Exception
     {
         super.start(context);
-        NativeRenderModeProbe.captureStartupModes();
+        if (HostKind.current() == HostKind.WINDOWED) { NativeRenderModeProbe.captureStartupModes(); }
         plugin = this; // NOSONAR Eclipse singleton/Activator init pattern; method cannot be static
         mcpServer = new McpServer();
 
@@ -112,7 +125,7 @@ public class Activator extends AbstractUIPlugin
         {
             // The bridge is still published here: the headless test application has no EDT
             // services to wait for, and the bridge's own contract is what those tests exercise.
-            publishBridge(context);
+            if (HostKind.current() != HostKind.HEADLESS) { publishBridge(context); }
             logInfo("EDT MCP Server plugin started in headless mode (startup integrations skipped)"); //$NON-NLS-1$
             return;
         }
@@ -138,6 +151,18 @@ public class Activator extends AbstractUIPlugin
 
         logInfo("EDT MCP Server plugin started"); //$NON-NLS-1$
     }
+
+    void startHeadlessCore(HeadlessLifetime lifetime)
+    {
+        headlessLifetime.set(lifetime);
+        mcpServer.registerTools();
+        services.init(getBundle().getBundleContext(), false);
+        publishBridge(getBundle().getBundleContext());
+        orchestrator.start(true);
+        new McpCoreStartup(System::getenv).start();
+    }
+
+    public HeadlessLifetime getHeadlessLifetime() { return headlessLifetime.get(); }
 
     /**
      * Publishes the stable in-process bridge.
@@ -182,6 +207,9 @@ public class Activator extends AbstractUIPlugin
     @Override
     public void stop(BundleContext context) throws Exception
     {
+        com.ditrix.edt.mcp.server.transport.StdioPluginSupport.stop();
+        HeadlessLifetime lifetime = headlessLifetime.getAndSet(null);
+        if (lifetime != null) { lifetime.close(); }
         if (bridgeRegistration != null)
         {
             bridgeRegistration.unregister();
@@ -207,6 +235,8 @@ public class Activator extends AbstractUIPlugin
         // writer thread + file handle). No-op when the file log is off.
         McpCallHistoryFileLog.shutdown();
 
+        com.ditrix.edt.mcp.server.utils.ListenerDisposables.disposeAll();
+
         // Close service trackers
         services.dispose();
 
@@ -229,6 +259,12 @@ public class Activator extends AbstractUIPlugin
         return plugin;
     }
 
+    /** @return supported platform runtimes, or {@code null} when the service is unavailable */
+    public IRuntimeRegistry getRuntimeRegistry()
+    {
+        return services.getRuntimeRegistry();
+    }
+
     /**
      * Returns the IV8ProjectManager service.
      * 
@@ -247,6 +283,28 @@ public class Activator extends AbstractUIPlugin
     public IDtProjectManager getDtProjectManager()
     {
         return services.getDtProjectManager();
+    }
+
+    /**
+     * Returns the IWorkspaceOrchestrator service - the entry point that starts a project's
+     * context and answers whether it is started.
+     *
+     * @return workspace orchestrator or null if not available
+     */
+    public IWorkspaceOrchestrator getWorkspaceOrchestrator()
+    {
+        return services.getWorkspaceOrchestrator();
+    }
+
+    /**
+     * Returns the IDtProjectResourceLifecycleBootstrap service - the owner of the project start
+     * latches, whose {@code permitImport} releases the one the CLI import API parks.
+     *
+     * @return the project resource lifecycle bootstrap or null if not available
+     */
+    public IDtProjectResourceLifecycleBootstrap getDtProjectLifecycleBootstrap()
+    {
+        return services.getDtProjectLifecycleBootstrap();
     }
 
     /**
@@ -387,13 +445,13 @@ public class Activator extends AbstractUIPlugin
         return services.getInfobaseManager();
     }
 
-    /**
-     * Returns the IInfobaseAssociationManager service for binding/unbinding infobases
-     * to configuration projects.
-     * Used by create_infobase and delete_infobase.
-     *
-     * @return infobase association manager or null if not available
-     */
+    /** Returns EDT's current-context provider, or null while platform services are unavailable. */
+    public IInfobaseAssociationContextProvider getInfobaseAssociationContextProvider()
+    {
+        return services.getInfobaseAssociationContextProvider();
+    }
+
+    /** Returns the service for binding and unbinding project infobases, or null if unavailable. */
     public IInfobaseAssociationManager getInfobaseAssociationManager()
     {
         return services.getInfobaseAssociationManager();
@@ -429,6 +487,18 @@ public class Activator extends AbstractUIPlugin
     public IFormRefactoringService getFormRefactoringService()
     {
         return services.getFormRefactoringService();
+    }
+
+    /** Returns EDT's form-attribute management service, including its column-support predicate. */
+    public FormAttributeManagementService getFormAttributeManagementService()
+    {
+        return services.getFormAttributeManagementService();
+    }
+
+    /** Returns the designer's attribute delete and its read-only prediction, or null if unavailable. */
+    public FormAttributeDeletion getFormAttributeDeletion()
+    {
+        return services.getFormAttributeDeletion();
     }
 
     /**
@@ -712,6 +782,8 @@ public class Activator extends AbstractUIPlugin
     {
         // Check headless indicators without accessing Display.
         // (Display.getDefault() initializes GTK and fails in headless environments.)
+
+        if (HostKind.current() == HostKind.HEADLESS) { return true; }
 
         // 1) Eclipse test mode property
         String testSuite = System.getProperty("org.eclipse.ui.testsuite"); //$NON-NLS-1$

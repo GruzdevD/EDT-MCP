@@ -36,7 +36,10 @@ import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.McpKeys;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.ApplicationSupport;
 import com.ditrix.edt.mcp.server.utils.InfobaseAccessSupport;
+import com.ditrix.edt.mcp.server.utils.git.BranchBindingLock;
+import com.ditrix.edt.mcp.server.utils.git.BranchContexts;
 import com.ditrix.edt.mcp.server.utils.git.GitCheckoutSupport;
 import com.ditrix.edt.mcp.server.utils.git.GitRepositoryResolver;
 import com.e1c.g5.dt.applications.IApplication;
@@ -92,8 +95,6 @@ public class CreateGitBranchTool implements IMcpTool
     /** Read-back key: the context's default infobase name (may be {@code null}). */
     private static final String KEY_DEFAULT_INFOBASE = "defaultInfobase"; //$NON-NLS-1$
 
-    private static final String REFS_HEADS = "refs/heads/"; //$NON-NLS-1$
-
     /** Literal reported as {@link #KEY_START_POINT} when no explicit start point was given. */
     private static final String HEAD_LITERAL = "HEAD"; //$NON-NLS-1$
 
@@ -146,14 +147,15 @@ public class CreateGitBranchTool implements IMcpTool
             .booleanProperty(KEY_CREATED, "Always true on a non-error result.") //$NON-NLS-1$
             .booleanProperty(KEY_CHECKED_OUT,
                 "Whether the branch ended up checked out. False when checkout was not requested, " //$NON-NLS-1$
-                + "or was requested but did not complete cleanly (see message).") //$NON-NLS-1$
+                + "or the new branch did not end up checked out (see message).") //$NON-NLS-1$
             .stringProperty(KEY_START_POINT, "The start point actually used ('HEAD' when none was given).") //$NON-NLS-1$
             .objectProperty(KEY_BOUND,
                 "Branch-infobase binding read-back: {infobases: [...], defaultInfobase}. Present " //$NON-NLS-1$
                 + "only when applicationId was given and the binding succeeded.") //$NON-NLS-1$
             .stringProperty(McpKeys.MESSAGE,
-                "Present only when checkout or the infobase binding did not fully succeed: a short " //$NON-NLS-1$
-                + "warning. The branch itself was still created (success stays true).") //$NON-NLS-1$
+                "Present only when checkout or the infobase binding did not fully succeed, or EDT had " //$NON-NLS-1$
+                + "not finished loading the checked-out branch into a project's model within the wait: a " //$NON-NLS-1$
+                + "short warning. The branch itself was still created (success stays true).") //$NON-NLS-1$
             .build();
     }
 
@@ -215,6 +217,7 @@ public class CreateGitBranchTool implements IMcpTool
         }
 
         boolean hasStartPoint = startPoint != null && !startPoint.isEmpty();
+        Ref created;
         try
         {
             CreateBranchCommand cmd = Git.wrap(repo).branchCreate().setName(branch);
@@ -222,7 +225,7 @@ public class CreateGitBranchTool implements IMcpTool
             {
                 cmd.setStartPoint(startPoint);
             }
-            cmd.call();
+            created = cmd.call();
         }
         catch (RefAlreadyExistsException e)
         {
@@ -251,13 +254,18 @@ public class CreateGitBranchTool implements IMcpTool
         ToolResult ok = ToolResult.success()
             .put(KEY_BRANCH, branch)
             .put(KEY_CREATED, true)
-            .put(KEY_CHECKED_OUT, checkedOut)
             .put(KEY_START_POINT, hasStartPoint ? startPoint : HEAD_LITERAL);
 
         if (applicationId != null && !applicationId.isEmpty())
         {
-            bindApplication(project, branch, applicationId, setDefault, ok, warnings);
+            // The binding goes on the ref JGit actually created (refs/heads/<name>), the key EDT reads.
+            String createdRef = created != null ? created.getName() : BranchContexts.REFS_HEADS + branch;
+            bindApplication(project, branch, createdRef, applicationId, setDefault, ok, warnings);
+            // The binding may wait for BranchBindingLock while another checkout moves the repository (#922).
+            checkedOut = checkedOut
+                && stillCheckedOut(repo, branch, "while this call attached the application", warnings); //$NON-NLS-1$
         }
+        ok.put(KEY_CHECKED_OUT, checkedOut);
 
         if (!warnings.isEmpty())
         {
@@ -274,14 +282,18 @@ public class CreateGitBranchTool implements IMcpTool
      */
     private static boolean performCheckout(IProject project, Repository repo, String branch, List<String> warnings)
     {
-        String fullRef = REFS_HEADS + branch;
+        String fullRef = BranchContexts.REFS_HEADS + branch;
         GitCheckoutSupport.CheckoutOutcome outcome = GitCheckoutSupport.checkout(project, repo, fullRef);
 
+        if (outcome.busy())
+        {
+            warnings.add(CHECKOUT_OF_NEW_BRANCH + branch + "' did not run: " + BranchBindingLock.busyReason() //$NON-NLS-1$
+                + "; the branch was created but is not checked out - check it out with switch_git_branch."); //$NON-NLS-1$
+            return false;
+        }
         if (outcome.timedOut())
         {
-            warnings.add(CHECKOUT_OF_NEW_BRANCH + branch + "' timed out after " //$NON-NLS-1$
-                + GitCheckoutSupport.CHECKOUT_TIMEOUT_SECONDS
-                + " seconds; the branch was created but is not checked out."); //$NON-NLS-1$
+            warnings.add(timedOutCheckoutWarning(branch));
             return false;
         }
         if (outcome.interrupted())
@@ -301,13 +313,23 @@ public class CreateGitBranchTool implements IMcpTool
 
         CheckoutResult result = outcome.result();
         CheckoutResult.Status status = result != null ? result.getStatus() : CheckoutResult.Status.ERROR;
-        if (status == CheckoutResult.Status.OK)
+        if (GitCheckoutSupport.changesBranch(status))
         {
-            if (outcome.refreshWarning() != null)
+            if (status == CheckoutResult.Status.NONDELETED)
             {
-                warnings.add(outcome.refreshWarning());
+                // HEAD moved to the new branch; JGit only could not remove some paths (#922).
+                warnings.add(CHECKOUT_OF_NEW_BRANCH + branch + "' switched the repository, but some files could " //$NON-NLS-1$
+                    + "not be deleted (likely locked or dirty): " + SwitchGitBranchTool.joinBounded( //$NON-NLS-1$
+                        result.getUndeletedList()) + "."); //$NON-NLS-1$
             }
-            return true;
+            String note = GitCheckoutSupport.joinNotes(outcome.refreshWarning(),
+                GitCheckoutSupport.awaitModelReload(outcome));
+            if (note != null)
+            {
+                warnings.add(note);
+            }
+            // The reload wait runs outside BranchBindingLock (#922): another checkout may have moved the repository.
+            return stillCheckedOut(repo, branch, "while this call waited for EDT to load it", warnings); //$NON-NLS-1$
         }
         warnings.add(CHECKOUT_OF_NEW_BRANCH + branch + "' did not complete cleanly " //$NON-NLS-1$
             + "(status: " + status + "); the branch was created but is not checked out."); //$NON-NLS-1$ //$NON-NLS-2$
@@ -315,14 +337,67 @@ public class CreateGitBranchTool implements IMcpTool
     }
 
     /**
-     * Attaches {@code applicationId} to the new branch's context
-     * ({@code InfobaseAssociationContext.of(branch)} - the same context whether or
-     * not the branch was also checked out). A resolution or association failure
-     * never fails the already-successful branch creation - it is appended to
-     * {@code warnings} and {@link #KEY_BOUND} is simply omitted.
+     * Whether the new branch is still the one checked out, re-read after work that ran outside
+     * {@link BranchBindingLock}; when another checkout has moved the repository, a warning names where it is now
+     * (#922). Package-visible for tests.
+     *
+     * @param repo the repository
+     * @param branch the new branch's short name
+     * @param during what this call was doing meanwhile, for the warning
+     * @param warnings receives the warning
+     * @return {@code false} when the repository has moved away from the new branch
      */
-    private static void bindApplication(IProject project, String branch, String applicationId, boolean setDefault,
-        ToolResult ok, List<String> warnings)
+    static boolean stillCheckedOut(Repository repo, String branch, String during, List<String> warnings)
+    {
+        String now = GitCheckoutSupport.movedAwayFrom(repo, BranchContexts.REFS_HEADS + branch);
+        if (now == null)
+        {
+            return true;
+        }
+        if (GitCheckoutSupport.UNREADABLE.equals(now))
+        {
+            warnings.add(CHECKOUT_OF_NEW_BRANCH + branch + "' succeeded, but " + during + " the repository's " //$NON-NLS-1$ //$NON-NLS-2$
+                + "current branch became unreadable, so the new branch is not confirmed to be the one checked out."); //$NON-NLS-1$
+            return false;
+        }
+        warnings.add(CHECKOUT_OF_NEW_BRANCH + branch + "' succeeded, but " + during + " another checkout moved " //$NON-NLS-1$ //$NON-NLS-2$
+            + "the repository to '" + now + "'; the new branch is not the one checked out now."); //$NON-NLS-1$ //$NON-NLS-2$
+        return false;
+    }
+
+    /**
+     * The warning for a checkout of the new branch whose Job outlived its bounded wait
+     * ({@link GitCheckoutSupport#CHECKOUT_TIMEOUT_SECONDS}). The branch exists; the Job was asked to cancel but
+     * may still be finishing, and {@link GitCheckoutSupport} records it as a branch change still running until it
+     * ends, so meanwhile a {@code set_branch_infobase} detach of the repository's projects is refused (#656).
+     * Whether the branch ends up checked out is not known when the call returns, so the warning does not say.
+     */
+    static String timedOutCheckoutWarning(String branch)
+    {
+        return CHECKOUT_OF_NEW_BRANCH + branch + "' timed out after " //$NON-NLS-1$
+            + GitCheckoutSupport.CHECKOUT_TIMEOUT_SECONDS
+            + " seconds; the branch was created, and its checkout may still be finishing - a " //$NON-NLS-1$
+            + "set_branch_infobase detach of the repository's projects is refused until it ends."; //$NON-NLS-1$
+    }
+
+    /**
+     * Attaches {@code applicationId} to the new branch's context - the created full ref
+     * {@code refs/heads/<branch>}, the key EDT itself reads for a checked-out branch (#684,
+     * {@link BranchContexts}); the same context whether or not the branch was also checked
+     * out. A resolution or association failure
+     * never fails the already-successful branch creation - it is appended to
+     * {@code warnings} and {@link #KEY_BOUND} is simply omitted. A refused default after a
+     * successful attach (EDT records a default only for an infobase also bound to the checked-out
+     * branch) is a warning too, and {@link #KEY_BOUND} is still reported - the attach stands; a
+     * platform failure storing the default is such a warning as well, and is logged.
+     * <p>
+     * The attach and its default are binding writes, so they run under {@link BranchBindingLock}, the lock
+     * {@code set_branch_infobase}'s binding changes and this server's checkouts take (#656) - after the checkout
+     * has released it. A call that waits {@link BranchBindingLock#WAIT_SECONDS} for it attaches nothing and says
+     * so in {@code warnings}.
+     */
+    private static void bindApplication(IProject project, String branch, String createdRef, String applicationId,
+        boolean setDefault, ToolResult ok, List<String> warnings)
     {
         IInfobaseAssociationManager assocManager = Activator.getDefault().getInfobaseAssociationManager();
         if (assocManager == null)
@@ -338,23 +413,45 @@ public class CreateGitBranchTool implements IMcpTool
             warnings.add(appRef.warning());
             return;
         }
+        bindResolved(assocManager, project, branch, createdRef, applicationId, appRef.reference(),
+            setDefault, ok, warnings);
+    }
 
-        InfobaseAssociationContext ctx = InfobaseAssociationContext.of(branch);
+    /**
+     * The binding itself, with the association manager and the application's infobase already
+     * resolved (unit-testable without a live workspace). {@code createdRef} is the ref that was
+     * created ({@code refs/heads/<branch>}); the binding, the default and the read-back all use it.
+     */
+    static void bindResolved(IInfobaseAssociationManager assocManager, IProject project, String branch,
+        String createdRef, String applicationId, InfobaseReference ref, boolean setDefault, ToolResult ok,
+        List<String> warnings)
+    {
+        BranchContexts.Resolution resolution = BranchContexts.resolve(createdRef);
+        if (!resolution.ok())
+        {
+            warnings.add("Branch '" + branch + "' was created, but application '" + applicationId //$NON-NLS-1$ //$NON-NLS-2$
+                + "' was not attached to it: " + resolution.error()); //$NON-NLS-1$
+            return;
+        }
+        InfobaseAssociationContext ctx = resolution.target().context();
+        if (!BranchBindingLock.tryLock())
+        {
+            warnings.add("Branch '" + branch + "' was created, but application '" + applicationId //$NON-NLS-1$ //$NON-NLS-2$
+                + "' was not attached to it: " + BranchBindingLock.busyReason() //$NON-NLS-1$
+                + "; attach it with set_branch_infobase."); //$NON-NLS-1$
+            return;
+        }
         try
         {
-            assocManager.associate(project, appRef.reference(), InfobaseAssociationSettings.alreadySynchronized(ctx));
-            if (setDefault)
+            if (!writeBinding(assocManager, project, branch, applicationId, ref, setDefault, resolution.target(),
+                warnings))
             {
-                assocManager.setDefaultInfobase(project, appRef.reference(), ctx);
+                return;
             }
         }
-        catch (InfobaseAssociationException e)
+        finally
         {
-            Activator.logError("create_git_branch: attach failed for branch '" + branch + "', application '" //$NON-NLS-1$ //$NON-NLS-2$
-                + applicationId + "'", e); //$NON-NLS-1$
-            warnings.add("Branch '" + branch + "' was created, but attaching application '" + applicationId //$NON-NLS-1$ //$NON-NLS-2$
-                + "' failed: " + e.getMessage()); //$NON-NLS-1$
-            return;
+            BranchBindingLock.unlock();
         }
 
         Map<String, Object> bound = readBack(assocManager, project, ctx);
@@ -362,6 +459,53 @@ public class CreateGitBranchTool implements IMcpTool
         {
             ok.put(KEY_BOUND, bound);
         }
+    }
+
+    /**
+     * {@link #bindResolved}'s binding writes - the attach and the optional default - under
+     * {@link BranchBindingLock}.
+     *
+     * @return {@code false} when the attach itself failed (a warning says so), {@code true} once it stands
+     */
+    private static boolean writeBinding(IInfobaseAssociationManager assocManager, IProject project, String branch,
+        String applicationId, InfobaseReference ref, boolean setDefault, BranchContexts.Target target,
+        List<String> warnings)
+    {
+        InfobaseAssociationContext ctx = target.context();
+        try
+        {
+            assocManager.associate(project, ref, InfobaseAssociationSettings.alreadySynchronized(ctx));
+        }
+        catch (InfobaseAssociationException e)
+        {
+            Activator.logError("create_git_branch: attach failed for branch '" + branch + "', application '" //$NON-NLS-1$ //$NON-NLS-2$
+                + applicationId + "'", e); //$NON-NLS-1$
+            warnings.add("Branch '" + branch + "' was created, but attaching application '" + applicationId //$NON-NLS-1$ //$NON-NLS-2$
+                + "' failed: " + e.getMessage()); //$NON-NLS-1$
+            return false;
+        }
+        if (setDefault)
+        {
+            // The attach above is done: a refused default must neither hide it nor fail the creation.
+            // EDT refuses a default for a branch that is not checked out, unless the checked-out branch
+            // already has this base bound (BranchContexts#defaultNotSetNote).
+            try
+            {
+                assocManager.setDefaultInfobase(project, ref, ctx);
+            }
+            catch (IllegalArgumentException e)
+            {
+                // EDT's refusal (the base is not bound to the checked-out branch): a remedy, not a fault.
+                warnings.add(BranchContexts.defaultNotSetNote(applicationId, target, e));
+            }
+            catch (InfobaseAssociationException e)
+            {
+                Activator.logError("create_git_branch: setDefault failed for branch '" + branch //$NON-NLS-1$
+                    + "', application '" + applicationId + "'", e); //$NON-NLS-1$ //$NON-NLS-2$
+                warnings.add(BranchContexts.defaultNotSetNote(applicationId, target, e));
+            }
+        }
+        return true;
     }
 
     private static Map<String, Object> readBack(IInfobaseAssociationManager assocManager, IProject project,
@@ -415,13 +559,27 @@ public class CreateGitBranchTool implements IMcpTool
         if (appManager == null)
         {
             return ApplicationReferenceResolution.warning(
-                "Could not attach application '" + applicationId + "': IApplicationManager service is not " //$NON-NLS-1$ //$NON-NLS-2$
-                + "available."); //$NON-NLS-1$
+                "Could not attach application '" + applicationId + "': " //$NON-NLS-1$ //$NON-NLS-2$
+                + ApplicationSupport.MANAGER_UNAVAILABLE + "."); //$NON-NLS-1$
+        }
+        // Bounded (#622). The branch already exists at this point, so an expired deadline takes the
+        // SAME degradation as a raised lookup: a warning on an otherwise successful create.
+        ApplicationSupport.BoundedRead<Optional<IApplication>> read =
+            ApplicationSupport.getApplicationBounded(appManager, project, applicationId,
+                ApplicationSupport.LOOKUP_TIMEOUT_MS);
+        if (!read.concluded())
+        {
+            Activator.logWarning("create_git_branch: " + read.deadlineFailure()); //$NON-NLS-1$
+            return ApplicationReferenceResolution.warning(
+                "Could not resolve application '" + applicationId + "': " //$NON-NLS-1$ //$NON-NLS-2$
+                + read.deadlineFailure() + ". The branch was created; the application was not " //$NON-NLS-1$
+                + "attached to it. Attach it with set_branch_infobase once EDT is responsive - " //$NON-NLS-1$
+                + "the branch does NOT need to be created again."); //$NON-NLS-1$
         }
         Optional<IApplication> appOpt;
         try
         {
-            appOpt = appManager.getApplication(project, applicationId);
+            appOpt = read.valueOrRethrow();
         }
         catch (Exception e) // NOSONAR EDT application lookup — surface as an actionable warning
         {

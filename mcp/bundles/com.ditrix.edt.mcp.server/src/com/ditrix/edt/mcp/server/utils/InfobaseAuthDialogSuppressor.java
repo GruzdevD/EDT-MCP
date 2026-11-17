@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.SWTException;
@@ -175,6 +176,8 @@ public final class InfobaseAuthDialogSuppressor
      */
     static final AtomicInteger IN_FLIGHT = new AtomicInteger();
 
+    private static final AtomicLong ACCESS_SETTINGS_AUTO_CANCELLED = new AtomicLong();
+
     /**
      * {@link System#currentTimeMillis()} of the most recent {@link #markActivityEnd()}. Combined with
      * {@link #DEFAULT_ACTIVITY_GRACE_MILLIS} it bridges the gap to an asynchronous read-back Job's
@@ -189,6 +192,30 @@ public final class InfobaseAuthDialogSuppressor
 
     private static Display filterDisplay;
     private static Listener filter;
+    private static Runnable filterDisposable;
+
+    /** Adds the observed access-dialog refusal without changing the primary diagnosis. */
+    public static String appendFailureNote(String message, long before, long after)
+    {
+        String note = accessSettingsDialogFailureNote(before, after);
+        if (note.isEmpty()) { return message; }
+        return message == null || message.isEmpty() ? note : message + " " + note;
+    }
+
+    public static org.eclipse.core.runtime.IStatus appendFailureNote(
+        org.eclipse.core.runtime.IStatus status, long before, long after)
+    {
+        if (status == null || status.isOK()) { return status; }
+        String message = appendFailureNote(status.getMessage(), before, after);
+        if (java.util.Objects.equals(message, status.getMessage())) { return status; }
+        if (status.isMultiStatus())
+        {
+            return new org.eclipse.core.runtime.MultiStatus(status.getPlugin(), status.getCode(),
+                status.getChildren(), message, status.getException());
+        }
+        return new org.eclipse.core.runtime.Status(status.getSeverity(), status.getPlugin(),
+            status.getCode(), message, status.getException());
+    }
 
     private InfobaseAuthDialogSuppressor()
     {
@@ -222,6 +249,46 @@ public final class InfobaseAuthDialogSuppressor
             IN_FLIGHT.set(0);
         }
         lastActivityEndMillis = System.currentTimeMillis();
+    }
+
+    /**
+     * How many operations currently hold the suppression armed — the {@link #IN_FLIGHT} counter.
+     *
+     * <p>Readable so a guard that must OUTLIVE its caller's bounded wait (a bounded read whose job
+     * keeps running past the deadline) can be pinned by a test rather than asserted in prose.
+     *
+     * @return the current in-flight count, never negative
+     */
+    public static int inFlightCount()
+    {
+        return IN_FLIGHT.get();
+    }
+
+    /** Returns the number of access-settings dialogs this process has auto-cancelled. */
+    public static long accessSettingsAutoCancelCount()
+    {
+        return ACCESS_SETTINGS_AUTO_CANCELLED.get();
+    }
+
+    /** Returns the diagnostic sentence when the access-settings counter moved in the interval. */
+    public static String accessSettingsDialogFailureNote(long before, long after)
+    {
+        if (before < 0 || after <= before)
+        {
+            return ""; //$NON-NLS-1$
+        }
+        return "EDT raised its infobase access-settings dialog while this call ran and it was " //$NON-NLS-1$
+            + "auto-cancelled. That dialog means some infobase's stored credentials were missing " //$NON-NLS-1$
+            + "or refused; if it belonged to this call's infobase, set them with " //$NON-NLS-1$
+            + "set_infobase_credentials."; //$NON-NLS-1$
+    }
+
+    static void recordAutoCancelledDialog(boolean hintDialog)
+    {
+        if (!hintDialog)
+        {
+            ACCESS_SETTINGS_AUTO_CANCELLED.incrementAndGet();
+        }
     }
 
     /**
@@ -340,7 +407,8 @@ public final class InfobaseAuthDialogSuppressor
         }
         try
         {
-            display.syncExec(() -> installOnUiThread(display));
+            BoundedUiCall.dispatch(BoundedUiCall.executorOrNull(display),
+                () -> installOnUiThread(display), 0, BoundedUiCall.UiThreadPolicy.RUN_INLINE);
         }
         catch (SWTException e)
         {
@@ -348,7 +416,7 @@ public final class InfobaseAuthDialogSuppressor
         }
     }
 
-    private static void installOnUiThread(Display display)
+    private static Runnable installOnUiThread(Display display)
     {
         Listener toInstall;
         synchronized (LOCK)
@@ -356,7 +424,7 @@ public final class InfobaseAuthDialogSuppressor
             if (filter != null && filterDisplay == display && !display.isDisposed())
             {
                 installed = true;
-                return; // already installed on this display
+                return filterDisposable; // already installed on this display
             }
             toInstall = createFilterListener();
             filter = toInstall;
@@ -365,6 +433,20 @@ public final class InfobaseAuthDialogSuppressor
         display.addFilter(SWT.Activate, toInstall);
         display.addFilter(SWT.Show, toInstall);
         installed = true;
+        filterDisposable = ListenerDisposables.register(() -> EdtDialogs.removeFilters(display, () -> {
+            display.removeFilter(SWT.Activate, toInstall);
+            display.removeFilter(SWT.Show, toInstall);
+            synchronized (LOCK)
+            {
+                if (filter == toInstall)
+                {
+                    filter = null;
+                    filterDisplay = null;
+                    installed = false;
+                }
+            }
+        }));
+        return filterDisposable;
     }
 
     private static Listener createFilterListener()
@@ -440,6 +522,7 @@ public final class InfobaseAuthDialogSuppressor
                     + "set_infobase_credentials)"); //$NON-NLS-1$
             }
             shell.close();
+            recordAutoCancelledDialog(isHint);
         }
         catch (RuntimeException e)
         {

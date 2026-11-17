@@ -6,6 +6,9 @@
 
 package com.ditrix.edt.mcp.server;
 
+import java.lang.reflect.Constructor;
+import java.util.Set;
+
 import org.eclipse.core.runtime.Platform;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
@@ -16,6 +19,7 @@ import org.osgi.util.tracker.ServiceTracker;
 import com._1c.g5.v8.dt.bm.xtext.BmAwareResourceSetProvider;
 import com._1c.g5.v8.dt.compare.core.IComparisonManager;
 import com._1c.g5.v8.dt.core.event.IEventBroker;
+import com._1c.g5.v8.dt.core.lifecycle.IDtProjectResourceLifecycleBootstrap;
 import com._1c.g5.v8.dt.core.model.IModelObjectCollectionRuntimeOrderSorter;
 import com._1c.g5.v8.dt.core.model.IModelObjectFactory;
 import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
@@ -27,13 +31,21 @@ import com._1c.g5.v8.dt.core.platform.IConfigurationProjectManager;
 import com._1c.g5.v8.dt.core.platform.IExternalObjectProjectManager;
 import com._1c.g5.v8.dt.core.platform.IExtensionProjectManager;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.core.platform.IWorkspaceOrchestrator;
 import com._1c.g5.v8.dt.form.refactoring.IFormRefactoringService;
+import com._1c.g5.v8.dt.form.model.AbstractDataPath;
+import com._1c.g5.v8.dt.form.model.Form;
+import com._1c.g5.v8.dt.form.service.attribute.FormAttributeManagementService;
+import com._1c.g5.v8.dt.form.service.datasourceinfo.IDataSourceInfoAssociationService;
+import com._1c.g5.v8.dt.form.service.extension.IFormExtensionService;
 import com._1c.g5.v8.dt.lifecycle.IServicesOrchestrator;
 import com._1c.g5.v8.dt.md.MdPlugin;
 import com._1c.g5.v8.dt.md.refactoring.core.IMdRefactoringService;
 import com._1c.g5.v8.dt.md.ui.presentation.IPresentationService;
 import com._1c.g5.v8.dt.navigator.providers.INavigatorContentProviderStateProvider;
+import com._1c.g5.v8.dt.platform.IRuntimeRegistry;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager;
+import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationContextProvider;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager;
 import com._1c.g5.v8.dt.rights.IRightInfosService;
 import com._1c.g5.v8.dt.rights.RightsPlugin;
@@ -43,6 +55,7 @@ import com.e1c.g5.dt.applications.IApplicationManager;
 import com.e1c.g5.v8.dt.check.ICheckScheduler;
 import com.e1c.g5.v8.dt.check.qfix.IFixManager;
 import com.e1c.g5.v8.dt.check.qfix.IFixRepository;
+import com.ditrix.edt.mcp.server.utils.FormAttributeDeletion;
 import com.ditrix.edt.mcp.server.utils.compare.ComparisonEngine;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 import com.google.inject.Injector;
@@ -58,8 +71,12 @@ import com.google.inject.Injector;
 public class EdtServices
 {
     /** Service trackers */
+    private ServiceTracker<IRuntimeRegistry, IRuntimeRegistry> runtimeRegistryTracker;
     private ServiceTracker<IV8ProjectManager, IV8ProjectManager> v8ProjectManagerTracker;
     private ServiceTracker<IDtProjectManager, IDtProjectManager> dtProjectManagerTracker;
+    private ServiceTracker<IWorkspaceOrchestrator, IWorkspaceOrchestrator> workspaceOrchestratorTracker;
+    private ServiceTracker<IDtProjectResourceLifecycleBootstrap,
+        IDtProjectResourceLifecycleBootstrap> dtProjectLifecycleBootstrapTracker;
     private ServiceTracker<IConfigurationProvider, IConfigurationProvider> configurationProviderTracker;
     private ServiceTracker<IMarkerManager, IMarkerManager> markerManagerTracker;
     private ServiceTracker<ICheckScheduler, ICheckScheduler> checkSchedulerTracker;
@@ -73,6 +90,7 @@ public class EdtServices
     private ServiceTracker<IApplicationManager, IApplicationManager> applicationManagerTracker;
     private ServiceTracker<IInfobaseManager, IInfobaseManager> infobaseManagerTracker;
     private ServiceTracker<IInfobaseAssociationManager, IInfobaseAssociationManager> infobaseAssociationManagerTracker;
+    private ServiceTracker<IInfobaseAssociationContextProvider, IInfobaseAssociationContextProvider> infobaseAssociationContextProviderTracker;
     private ServiceTracker<INavigatorContentProviderStateProvider, INavigatorContentProviderStateProvider> navigatorStateProviderTracker;
     private ServiceTracker<IMdRefactoringService, IMdRefactoringService> mdRefactoringServiceTracker;
     private ServiceTracker<IFormRefactoringService, IFormRefactoringService> formRefactoringServiceTracker;
@@ -147,12 +165,32 @@ public class EdtServices
      */
     public void init(BundleContext context)
     {
+        init(context, true);
+    }
+
+    public void init(BundleContext context, boolean windowed)
+    {
         // Initialize service trackers
+        runtimeRegistryTracker = new ServiceTracker<>(context, IRuntimeRegistry.class, null);
+        runtimeRegistryTracker.open();
+
         v8ProjectManagerTracker = new ServiceTracker<>(context, IV8ProjectManager.class, null);
         v8ProjectManagerTracker.open();
 
         dtProjectManagerTracker = new ServiceTracker<>(context, IDtProjectManager.class, null);
         dtProjectManagerTracker.open();
+
+        // The two halves of EDT's project lifecycle. import_configuration_from_xml needs them to
+        // start a project the CLI import API leaves parked behind a blocked MANUAL start latch
+        // (issue #647): the orchestrator issues and observes the start, the bootstrap releases the
+        // latch. Both are Guice service-aware singletons in EDT's CoreModule, i.e. published as
+        // OSGi services, so a plain tracker reaches them.
+        workspaceOrchestratorTracker = new ServiceTracker<>(context, IWorkspaceOrchestrator.class, null);
+        workspaceOrchestratorTracker.open();
+
+        dtProjectLifecycleBootstrapTracker =
+            new ServiceTracker<>(context, IDtProjectResourceLifecycleBootstrap.class, null);
+        dtProjectLifecycleBootstrapTracker.open();
 
         configurationProviderTracker = new ServiceTracker<>(context, IConfigurationProvider.class, null);
         configurationProviderTracker.open();
@@ -193,9 +231,15 @@ public class EdtServices
         infobaseAssociationManagerTracker =
             new ServiceTracker<>(context, IInfobaseAssociationManager.class, null);
         infobaseAssociationManagerTracker.open();
+        infobaseAssociationContextProviderTracker =
+            new ServiceTracker<>(context, IInfobaseAssociationContextProvider.class, null);
+        infobaseAssociationContextProviderTracker.open();
 
-        navigatorStateProviderTracker = new ServiceTracker<>(context, INavigatorContentProviderStateProvider.class, null);
-        navigatorStateProviderTracker.open();
+        if (windowed)
+        {
+            navigatorStateProviderTracker = new ServiceTracker<>(context, INavigatorContentProviderStateProvider.class, null);
+            navigatorStateProviderTracker.open();
+        }
 
         mdRefactoringServiceTracker = new ServiceTracker<>(context, IMdRefactoringService.class, null);
         mdRefactoringServiceTracker.open();
@@ -203,8 +247,11 @@ public class EdtServices
         formRefactoringServiceTracker = new ServiceTracker<>(context, IFormRefactoringService.class, null);
         formRefactoringServiceTracker.open();
 
-        presentationServiceTracker = new ServiceTracker<>(context, IPresentationService.class, null);
-        presentationServiceTracker.open();
+        if (windowed)
+        {
+            presentationServiceTracker = new ServiceTracker<>(context, IPresentationService.class, null);
+            presentationServiceTracker.open();
+        }
 
         topObjectFqnGeneratorTracker = new ServiceTracker<>(context, ITopObjectFqnGenerator.class, null);
         topObjectFqnGeneratorTracker.open();
@@ -286,8 +333,11 @@ public class EdtServices
 
         // Close service trackers (each closeTracker() closes when non-null and returns null,
         // exactly reproducing the former "if (t != null) { t.close(); t = null; }" per-field block). // NOSONAR explanatory comment, not commented-out code
+        runtimeRegistryTracker = closeTracker(runtimeRegistryTracker);
         v8ProjectManagerTracker = closeTracker(v8ProjectManagerTracker);
         dtProjectManagerTracker = closeTracker(dtProjectManagerTracker);
+        workspaceOrchestratorTracker = closeTracker(workspaceOrchestratorTracker);
+        dtProjectLifecycleBootstrapTracker = closeTracker(dtProjectLifecycleBootstrapTracker);
         configurationProviderTracker = closeTracker(configurationProviderTracker);
         markerManagerTracker = closeTracker(markerManagerTracker);
         checkSchedulerTracker = closeTracker(checkSchedulerTracker);
@@ -301,6 +351,7 @@ public class EdtServices
         applicationManagerTracker = closeTracker(applicationManagerTracker);
         infobaseManagerTracker = closeTracker(infobaseManagerTracker);
         infobaseAssociationManagerTracker = closeTracker(infobaseAssociationManagerTracker);
+        infobaseAssociationContextProviderTracker = closeTracker(infobaseAssociationContextProviderTracker);
         navigatorStateProviderTracker = closeTracker(navigatorStateProviderTracker);
         mdRefactoringServiceTracker = closeTracker(mdRefactoringServiceTracker);
         formRefactoringServiceTracker = closeTracker(formRefactoringServiceTracker);
@@ -359,6 +410,12 @@ public class EdtServices
         return null;
     }
 
+    /** @return supported platform runtimes, or {@code null} when the service is unavailable */
+    public IRuntimeRegistry getRuntimeRegistry()
+    {
+        return runtimeRegistryTracker == null ? null : runtimeRegistryTracker.getService();
+    }
+
     /**
      * Returns the IV8ProjectManager service.
      *
@@ -385,6 +442,36 @@ public class EdtServices
             return null;
         }
         return dtProjectManagerTracker.getService();
+    }
+
+    /**
+     * Returns the IWorkspaceOrchestrator service - the entry point that starts a project's context
+     * and answers whether it is started.
+     *
+     * @return workspace orchestrator or null if not available
+     */
+    public IWorkspaceOrchestrator getWorkspaceOrchestrator()
+    {
+        if (workspaceOrchestratorTracker == null)
+        {
+            return null;
+        }
+        return workspaceOrchestratorTracker.getService();
+    }
+
+    /**
+     * Returns the IDtProjectResourceLifecycleBootstrap service - the owner of the project start
+     * latches, whose {@code permitImport} releases the one the CLI import API parks.
+     *
+     * @return the project resource lifecycle bootstrap or null if not available
+     */
+    public IDtProjectResourceLifecycleBootstrap getDtProjectLifecycleBootstrap()
+    {
+        if (dtProjectLifecycleBootstrapTracker == null)
+        {
+            return null;
+        }
+        return dtProjectLifecycleBootstrapTracker.getService();
     }
 
     /**
@@ -566,13 +653,14 @@ public class EdtServices
         return infobaseManagerTracker.getService();
     }
 
-    /**
-     * Returns the IInfobaseAssociationManager service for binding infobases to
-     * configuration projects (and removing those bindings).
-     * Used by create_infobase and delete_infobase.
-     *
-     * @return infobase association manager or null if not available
-     */
+    /** Returns EDT's current-context provider, or null while platform services are unavailable. */
+    public IInfobaseAssociationContextProvider getInfobaseAssociationContextProvider()
+    {
+        return infobaseAssociationContextProviderTracker == null ? null
+            : infobaseAssociationContextProviderTracker.getService();
+    }
+
+    /** Returns the service for binding and unbinding project infobases, or null if unavailable. */
     public IInfobaseAssociationManager getInfobaseAssociationManager()
     {
         if (infobaseAssociationManagerTracker == null)
@@ -646,6 +734,103 @@ public class EdtServices
             service = formRefactoringServiceTracker.getService();
         }
         return service;
+    }
+
+    /** The form bundle's activator, internal (not exported) - reached reflectively for its injector. */
+    private static final String FORM_PLUGIN_CLASS = "com._1c.g5.v8.dt.internal.form.FormPlugin"; //$NON-NLS-1$
+
+    /** EDT's collector of the items an attribute delete removes - a private nested class. */
+    private static final String DELETE_ITEM_COLLECTOR_CLASS =
+        FormAttributeManagementService.class.getName() + "$DeleteDataItemByPathDathPrefixCommand"; //$NON-NLS-1$
+
+    /**
+     * Returns EDT's own form-attribute delete - {@link FormAttributeManagementService}, the service the
+     * form designer's "delete attribute" runs ({@code DeleteFormAttributeTask}) - together with the
+     * platform pieces that predict it without mutating: the data-source association and extension
+     * services and the delete's own item collector.
+     * <p>
+     * The services are Guice singletons of the form bundle and the management service is NOT an OSGi
+     * service; the bundle's activator ({@code FormPlugin}) sits in a non-exported package, so its
+     * injector is reached reflectively, and so is the collector, a private nested class of the
+     * management service. The instances are the ones the platform itself uses.
+     *
+     * @return the deletion, or {@code null} (logged as an ERROR) when any piece is unavailable
+     */
+    public FormAttributeDeletion getFormAttributeDeletion()
+    {
+        try
+        {
+            Injector injector = formInjector();
+            return injector == null ? null : new FormAttributeDeletion(
+                injector.getInstance(FormAttributeManagementService.class),
+                injector.getInstance(IDataSourceInfoAssociationService.class),
+                injector.getInstance(IFormExtensionService.class), deleteItemCollectorConstructor());
+        }
+        catch (Exception | LinkageError e) // NOSONAR preserve the service-unavailable contract
+        {
+            Activator.logError("Failed to obtain EDT's form-attribute delete from the form injector", e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /** EDT's complete column-support predicate uses the same injector as the designer's delete. */
+    public FormAttributeManagementService getFormAttributeManagementService()
+    {
+        try
+        {
+            Injector injector = formInjector();
+            return injector == null ? null : injector.getInstance(FormAttributeManagementService.class);
+        }
+        catch (Exception | LinkageError e) // NOSONAR a missing service is a readiness refusal
+        {
+            Activator.logError("Failed to obtain EDT's form-attribute management service", e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    private Injector formInjector()
+    {
+        Bundle formBundle = Platform.getBundle(FORM_BUNDLE_ID);
+        if (formBundle == null)
+        {
+            Activator.logError("form bundle '" + FORM_BUNDLE_ID + "' not found in the running platform", null); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        try
+        {
+            ensureFormBundleActive(formBundle);
+            Class<?> pluginClass = formBundle.loadClass(FORM_PLUGIN_CLASS);
+            Object plugin = pluginClass.getMethod("getDefault").invoke(null); //$NON-NLS-1$
+            Object injector = plugin == null ? null : pluginClass.getMethod("getInjector").invoke(plugin); //$NON-NLS-1$
+            if (injector instanceof Injector)
+            {
+                return (Injector)injector;
+            }
+            Activator.logError("form bundle injector is not available", null); //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError e) // NOSONAR an EDT that moved this internal API must answer null, not throw
+        {
+            Activator.logError("Failed to obtain EDT's form injector", e); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    /**
+     * The constructor of EDT's {@code DeleteDataItemByPathDathPrefixCommand(Set<DataItem>,
+     * AbstractDataPath, IDataSourceInfoAssociationService, Form)}, made accessible. It only resolves
+     * each item's path and adds the matches to the set; the delete removes them afterwards.
+     *
+     * @return the accessible constructor
+     * @throws ReflectiveOperationException when this EDT no longer has it
+     */
+    public static Constructor<?> deleteItemCollectorConstructor() throws ReflectiveOperationException
+    {
+        Class<?> collectorClass = Class.forName(DELETE_ITEM_COLLECTOR_CLASS, false,
+            FormAttributeManagementService.class.getClassLoader());
+        Constructor<?> constructor = collectorClass.getDeclaredConstructor(Set.class, AbstractDataPath.class,
+            IDataSourceInfoAssociationService.class, Form.class);
+        constructor.setAccessible(true); // NOSONAR the platform's own collector is private; no public twin exists
+        return constructor;
     }
 
     /**

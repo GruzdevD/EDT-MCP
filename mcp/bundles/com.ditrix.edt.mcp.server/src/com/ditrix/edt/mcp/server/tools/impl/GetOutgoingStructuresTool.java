@@ -12,6 +12,7 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -21,7 +22,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
@@ -36,6 +36,7 @@ import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
+import com.ditrix.edt.mcp.server.utils.ReadToolExecution;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
@@ -45,6 +46,7 @@ import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.BslModuleUtils;
 import com.ditrix.edt.mcp.server.utils.Pagination;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
+import com.ditrix.edt.mcp.server.utils.Refusals;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
@@ -195,15 +197,14 @@ public class GetOutgoingStructuresTool implements IMcpTool
         final String qualifierFilter = (qualifier != null && !qualifier.isEmpty()) ? qualifier : null;
 
         AtomicReference<String> resultRef = new AtomicReference<>();
-        Display display = PlatformUI.getWorkbench().getDisplay();
-        display.syncExec(() -> {
+        ReadToolExecution.dispatch(() -> {
             try
             {
-                resultRef.set(analyze(projectName, modulePath, methodFilter, qualifierFilter, maxResults));
+                resultRef.set(ReadToolExecution.readOnHost(projectName, NAME, () -> analyze(projectName, modulePath, methodFilter, qualifierFilter, maxResults)));
             }
             catch (Exception e)
             {
-                Activator.logError("Error collecting outgoing structures", e); //$NON-NLS-1$
+                Refusals.log("Error collecting outgoing structures", e); //$NON-NLS-1$
                 resultRef.set(ToolResult.error(e.getMessage()).toJson());
             }
         });
@@ -375,8 +376,8 @@ public class GetOutgoingStructuresTool implements IMcpTool
         {
             return false;
         }
-        String lowerQualifier = qualifier.toLowerCase();
-        String lowerFilter = filter.toLowerCase();
+        String lowerQualifier = qualifier.toLowerCase(Locale.ROOT);
+        String lowerFilter = filter.toLowerCase(Locale.ROOT);
         return lowerQualifier.equals(lowerFilter) || lowerQualifier.startsWith(lowerFilter);
     }
 

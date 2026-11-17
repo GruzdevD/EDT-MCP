@@ -26,7 +26,9 @@ import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchema;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetFieldFolder;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetQuery;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionChart;
+import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionChartOutputParameterValues;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionSettings;
+import com._1c.g5.v8.dt.dcs.model.settings.SettingsParameterValue;
 import com._1c.g5.v8.dt.dcs.model.settings.SettingsVariant;
 import com._1c.g5.v8.dt.form.model.DynamicListExtInfo;
 import com._1c.g5.v8.dt.form.model.FormFactory;
@@ -34,6 +36,7 @@ import com.ditrix.edt.mcp.server.protocol.jsonrpc.ToolAnnotations;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
 import com.ditrix.edt.mcp.server.tools.base.WriteScope;
+import com.ditrix.edt.mcp.server.utils.DcsReplaceTestCatalogues;
 import com.ditrix.edt.mcp.server.utils.DcsAddress;
 import com.ditrix.edt.mcp.server.utils.DcsModelComparison;
 import com.google.gson.JsonArray;
@@ -44,6 +47,62 @@ import com.google.gson.JsonParser;
 /** Exact public-contract tests for {@link DcsTool}. */
 public class DcsToolTest
 {
+    @Test
+    public void testXmlRoundTripRefusalNamesLostContentWithoutAssumingItsCause()
+    {
+        String path = "/DataCompositionSchema/settingsVariant/settings/item/groupItems";
+        String error = DcsTool.xmlRoundTripLossError(path);
+        assertTrue(error, error.contains(path));
+        assertTrue(error, error.contains("dropped or changed submitted XML content"));
+        assertTrue(error, error.contains("Check the value, type and namespace"));
+        assertTrue(error, error.contains("retry; nothing was written"));
+        assertFalse(error, error.contains("unrecognized"));
+    }
+
+    @Test
+    public void testWriteResultWaitsForTheRecordedExportBeforeAnswering()
+    {
+        WriteScope scope = new WriteScope();
+        scope.wrote("ActualProject");
+        AtomicReference<String> disk = new AtomicReference<>("previous schema");
+        String result = DcsTool.finalizeWriteResult(scope, "**Export scheduled:** `true`", (project, budget) -> {
+            assertEquals("ActualProject", project);
+            assertTrue(budget > 0 && budget <= 60_000);
+            disk.set("new schema");
+            return com.ditrix.edt.mcp.server.utils.BuildUtils.DiskExportState.DRAINED;
+        });
+        assertEquals("new schema", disk.get());
+        assertTrue(result, result.contains("**Export drained:** `true`"));
+    }
+
+    @Test
+    public void testPendingAndUnobservableExportsCannotClaimDcsWriteSuccess()
+    {
+        for (var state : Arrays.asList(
+            com.ditrix.edt.mcp.server.utils.BuildUtils.DiskExportState.PENDING,
+            com.ditrix.edt.mcp.server.utils.BuildUtils.DiskExportState.UNOBSERVABLE))
+        {
+            WriteScope scope = new WriteScope();
+            scope.wrote("TestConfiguration");
+            String result = DcsTool.finalizeWriteResult(scope, "**Export scheduled:** `true`",
+                (project, budget) -> state);
+            JsonObject error = JsonParser.parseString(result).getAsJsonObject();
+            assertFalse(error.get("success").getAsBoolean());
+            assertTrue(error.get("mutationCommitted").getAsBoolean());
+            assertTrue(result, error.get("error").getAsString().contains("resync_to_disk"));
+        }
+    }
+
+    @Test
+    public void testFailedDcsRequestNeverWaitsForExports()
+    {
+        WriteScope scope = new WriteScope();
+        scope.wrote("TestConfiguration");
+        String result = DcsTool.finalizeWriteResult(scope, ToolResult.error("write failed").toJson(),
+            (project, budget) -> { throw new AssertionError("errors must not wait"); });
+        assertTrue(JsonParser.parseString(result).getAsJsonObject().get("mutationCommitted").getAsBoolean());
+    }
+
     private static final Set<String> PROPERTIES = new LinkedHashSet<>(Arrays.asList(
         "projectName", "fqn", "action", "type", "body", "expectedHash", "language", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
         "format", "limit", "offset")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -55,7 +114,7 @@ public class DcsToolTest
         "schema", "dynamicList", "dataSource", "dataSet", "field", "fieldFolder", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
         "parameter", //$NON-NLS-1$
         "calculatedField", "totalField", "variant", "grouping", "selection", "filter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-        "dataParameter", "order", "conditionalAppearance", "table", "userField", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        "dataParameter", "order", "conditionalAppearance", "table", "chart", "userField", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
         "outputParameter", "userSettings")); //$NON-NLS-1$ //$NON-NLS-2$
 
     @Test
@@ -71,6 +130,8 @@ public class DcsToolTest
         assertTrue(tool.getDescription().contains("get_tool_guide('dcs')")); //$NON-NLS-1$
         assertTrue(tool.getDescription().contains("expectedHash")); //$NON-NLS-1$
         assertTrue(tool.getDescription().contains("action='get'")); //$NON-NLS-1$
+        assertTrue(tool.getDescription().contains("autoFillFields=true")); //$NON-NLS-1$
+        assertTrue(tool.getDescription().contains("fields and parameters")); //$NON-NLS-1$
 
         Map<String, String> xmlGet = baseGet("Report.Sales", "schema"); //$NON-NLS-1$ //$NON-NLS-2$
         xmlGet.put("format", "xml"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -94,6 +155,15 @@ public class DcsToolTest
         assertTrue(guide, guide.contains(
             "#/variants/<name>/settings/items/<table-index>/columns")); //$NON-NLS-1$
         assertTrue(guide, guide.contains("#/variants/<name>/settings/items/<index>")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideSaysANullKindPeriodBoundIsNotSet()
+    {
+        // #672: the caller has to learn which value clears a grouping field's period bound. One
+        // substring on purpose: the behaviour itself is pinned by DcsSettingsWriterTest and the e2e.
+        String guide = new DcsTool().getGuide();
+        assertTrue(guide, guide.contains("`{kind:'null'}` means the bound is not set")); //$NON-NLS-1$
     }
 
     @Test
@@ -174,6 +244,10 @@ public class DcsToolTest
         assertEquals(new LinkedHashSet<>(Arrays.asList("md", "xml")), //$NON-NLS-1$ //$NON-NLS-2$
             strings(properties.getAsJsonObject("format").getAsJsonArray("enum"))); //$NON-NLS-1$ //$NON-NLS-2$
         assertEquals("object", properties.getAsJsonObject("body").get("type").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        JsonObject position = properties.getAsJsonObject("body").getAsJsonObject("properties")
+            .getAsJsonObject("insertPosition");
+        assertEquals("integer", position.get("type").getAsString());
+        assertEquals(1, position.get("minimum").getAsInt());
         assertEquals("integer", properties.getAsJsonObject("limit").get("type").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         assertEquals("integer", properties.getAsJsonObject("offset").get("type").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         // The action prose must warn about the two destructive verbs, since their semantics are not
@@ -211,6 +285,17 @@ public class DcsToolTest
         String result = new DcsTool().execute(params);
         assertTrue(result.contains("expectedHash is required")); //$NON-NLS-1$
         assertTrue(result.contains("action='get'")); //$NON-NLS-1$
+    }
+
+    @Test public void testInsertPositionRequiresTheObservedCollectionHash()
+    {
+        String result = new DcsTool().execute(Map.of("projectName", "AnyProject",
+            "fqn", "Report.Sales#/defaultSettings/filter", "action", "upsert", "type", "filter",
+            "body", "{\"insertPosition\":1,\"items\":[{}]}"));
+        assertTrue(result, result.contains("expectedHash is required"));
+        assertTrue(result, result.contains("body.insertPosition"));
+        assertTrue(result, result.contains("action='get'"));
+        assertTrue(ToolResult.isErrorPayload(result));
     }
 
     @Test
@@ -270,15 +355,15 @@ public class DcsToolTest
     {
         DcsAddress address = address("Report.Sales"); //$NON-NLS-1$
         DataCompositionSchema schema = schemaWithUnsupportedField();
-        assertNull(DcsTool.replaceRefusal(schema, null, "selection", address)); //$NON-NLS-1$
+        assertNull(DcsTool.replaceRefusal(schema, null, "selection", address, DcsReplaceTestCatalogues.schema())); //$NON-NLS-1$
 
         DynamicListExtInfo dynamic = FormFactory.eINSTANCE.createDynamicListExtInfo();
         DataCompositionSchemaDataSetFieldFolder folder = com._1c.g5.v8.dt.dcs.model.schema
             .DcsFactory.eINSTANCE.createDataCompositionSchemaDataSetFieldFolder();
         folder.setDataPath("UnsupportedFolder"); //$NON-NLS-1$
         dynamic.getFields().add(folder);
-        assertNull(DcsTool.replaceRefusal(dynamic, null, "selection", address)); //$NON-NLS-1$
-        assertNull(DcsTool.replaceRefusal(dynamic, null, "userSettings", address)); //$NON-NLS-1$
+        assertNull(DcsTool.replaceRefusal(dynamic, null, "selection", address, DcsReplaceTestCatalogues.schema())); //$NON-NLS-1$
+        assertNull(DcsTool.replaceRefusal(dynamic, null, "userSettings", address, DcsReplaceTestCatalogues.schema())); //$NON-NLS-1$
     }
 
     @Test
@@ -289,16 +374,19 @@ public class DcsToolTest
         DataCompositionSettings settings = com._1c.g5.v8.dt.dcs.model.settings.DcsFactory.eINSTANCE
             .createDataCompositionSettings();
         schema.setDefaultSettings(settings);
-        assertNull(DcsTool.replaceRefusal(schema, settings, "userSettings", address)); //$NON-NLS-1$
+        assertNull(DcsTool.replaceRefusal(schema, settings, "userSettings", address, DcsReplaceTestCatalogues.schema())); //$NON-NLS-1$
 
-        DataCompositionChart settingsChart = com._1c.g5.v8.dt.dcs.model.settings.DcsFactory
-            .eINSTANCE.createDataCompositionChart();
-        settings.getItems().add(settingsChart);
-        assertNull(DcsTool.replaceRefusal(schema, settings, "selection", address)); //$NON-NLS-1$
+        // A chart is modelled now; its nested output-parameter values are not.
+        settings.getItems().add(com._1c.g5.v8.dt.dcs.model.settings.DcsFactory.eINSTANCE
+            .createDataCompositionChart());
+        assertNull("a fully modelled chart must not block a replacement", //$NON-NLS-1$
+            DcsTool.replaceRefusal(schema, settings, "userSettings", address, DcsReplaceTestCatalogues.schema())); //$NON-NLS-1$
+        settings.getItems().add(chartWithNestedOutputParameter());
+        assertNull(DcsTool.replaceRefusal(schema, settings, "selection", address, DcsReplaceTestCatalogues.schema())); //$NON-NLS-1$
         String reportSettingsRefusal =
-            DcsTool.replaceRefusal(schema, settings, "userSettings", address); //$NON-NLS-1$
+            DcsTool.replaceRefusal(schema, settings, "userSettings", address, DcsReplaceTestCatalogues.schema()); //$NON-NLS-1$
         assertNotNull(reportSettingsRefusal);
-        assertArticulateChartRefusal(reportSettingsRefusal);
+        assertUnmodellableRefusal(reportSettingsRefusal);
 
         SettingsVariant variant = com._1c.g5.v8.dt.dcs.model.settings.DcsFactory.eINSTANCE
             .createSettingsVariant();
@@ -307,14 +395,12 @@ public class DcsToolTest
             .eINSTANCE.createDataCompositionSettings();
         variant.setSettings(variantSettings);
         schema.getSettingsVariants().add(variant);
-        assertNull(DcsTool.replaceRefusal(schema, settings, "variant", address)); //$NON-NLS-1$
+        assertNull(DcsTool.replaceRefusal(schema, settings, "variant", address, DcsReplaceTestCatalogues.schema())); //$NON-NLS-1$
 
-        DataCompositionChart variantChart = com._1c.g5.v8.dt.dcs.model.settings.DcsFactory
-            .eINSTANCE.createDataCompositionChart();
-        variantSettings.getItems().add(variantChart);
-        String variantRefusal = DcsTool.replaceRefusal(schema, settings, "variant", address); //$NON-NLS-1$
+        variantSettings.getItems().add(chartWithNestedOutputParameter());
+        String variantRefusal = DcsTool.replaceRefusal(schema, settings, "variant", address, DcsReplaceTestCatalogues.schema()); //$NON-NLS-1$
         assertNotNull(variantRefusal);
-        assertArticulateChartRefusal(variantRefusal);
+        assertUnmodellableRefusal(variantRefusal);
 
         DynamicListExtInfo dynamic = FormFactory.eINSTANCE.createDynamicListExtInfo();
         dynamic.getFields().add(com._1c.g5.v8.dt.dcs.model.schema.DcsFactory.eINSTANCE
@@ -322,14 +408,13 @@ public class DcsToolTest
         DataCompositionSettings listSettings = com._1c.g5.v8.dt.dcs.model.settings.DcsFactory
             .eINSTANCE.createDataCompositionSettings();
         dynamic.setListSettings(listSettings);
-        assertNull(DcsTool.replaceRefusal(dynamic, listSettings, "userSettings", address)); //$NON-NLS-1$
-        listSettings.getItems().add(com._1c.g5.v8.dt.dcs.model.settings.DcsFactory.eINSTANCE
-            .createDataCompositionChart());
-        assertNull(DcsTool.replaceRefusal(dynamic, listSettings, "selection", address)); //$NON-NLS-1$
+        assertNull(DcsTool.replaceRefusal(dynamic, listSettings, "userSettings", address, DcsReplaceTestCatalogues.schema())); //$NON-NLS-1$
+        listSettings.getItems().add(chartWithNestedOutputParameter());
+        assertNull(DcsTool.replaceRefusal(dynamic, listSettings, "selection", address, DcsReplaceTestCatalogues.schema())); //$NON-NLS-1$
         String listSettingsRefusal =
-            DcsTool.replaceRefusal(dynamic, listSettings, "userSettings", address); //$NON-NLS-1$
+            DcsTool.replaceRefusal(dynamic, listSettings, "userSettings", address, DcsReplaceTestCatalogues.schema()); //$NON-NLS-1$
         assertNotNull(listSettingsRefusal);
-        assertArticulateChartRefusal(listSettingsRefusal);
+        assertUnmodellableRefusal(listSettingsRefusal);
     }
 
     @Test
@@ -340,29 +425,28 @@ public class DcsToolTest
         DataCompositionSettings listSettings = com._1c.g5.v8.dt.dcs.model.settings.DcsFactory
             .eINSTANCE.createDataCompositionSettings();
         dynamic.setListSettings(listSettings);
-        listSettings.getItems().add(com._1c.g5.v8.dt.dcs.model.settings.DcsFactory.eINSTANCE
-            .createDataCompositionChart());
+        listSettings.getItems().add(chartWithNestedOutputParameter());
 
         String bare = DcsTool.replaceRefusal(dynamic, listSettings, "userSettings", //$NON-NLS-1$
-            address(root));
+            address(root), DcsReplaceTestCatalogues.schema());
         assertNotNull("the established bare-root scan must remain guarded", bare); //$NON-NLS-1$
-        assertArticulateChartRefusal(bare);
+        assertUnmodellableRefusal(bare);
 
         String settingsPointer = DcsTool.replaceRefusal(dynamic, listSettings, "userSettings", //$NON-NLS-1$
-            address(root + "#/listSettings")); //$NON-NLS-1$
+            address(root + "#/listSettings"), DcsReplaceTestCatalogues.schema()); //$NON-NLS-1$
         assertNotNull("a pointer to the whole non-containment settings root must be guarded", //$NON-NLS-1$
             settingsPointer);
-        assertTrue(settingsPointer, settingsPointer.contains("DataCompositionChart")); //$NON-NLS-1$
+        assertUnmodellableRefusal(settingsPointer);
 
         String itemPointer = DcsTool.replaceRefusal(dynamic, listSettings, "grouping", //$NON-NLS-1$
-            address(root + "#/listSettings/items/0")); //$NON-NLS-1$
+            address(root + "#/listSettings/items/0"), DcsReplaceTestCatalogues.schema()); //$NON-NLS-1$
         assertNotNull("the relative pointer must line up with the scanned chart address", //$NON-NLS-1$
             itemPointer);
-        assertTrue(itemPointer, itemPointer.contains("DataCompositionChart")); //$NON-NLS-1$
+        assertUnmodellableRefusal(itemPointer);
 
         assertNull("a sibling holder replacement does not discard the chart", //$NON-NLS-1$
             DcsTool.replaceRefusal(dynamic, listSettings, "selection", //$NON-NLS-1$
-                address(root + "#/listSettings/selection"))); //$NON-NLS-1$
+                address(root + "#/listSettings/selection"), DcsReplaceTestCatalogues.schema())); //$NON-NLS-1$
     }
 
     @Test
@@ -422,6 +506,48 @@ public class DcsToolTest
         assertTrue(result, result.contains("not both")); //$NON-NLS-1$
     }
 
+    @Test
+    public void testInvalidXmlBodyValuesExplainNoWriteAndRecovery()
+    {
+        for (String xml : new String[] {"\"\"", "\"   \"", "42", "true", "{}", "[]"})
+        {
+            var params = baseGet("Report.Sales", "schema");
+            params.put("action", "replace");
+            params.put("body", "{\"xml\":" + xml + "}");
+            params.put("expectedHash", "00000000000000000000");
+
+            String result = new DcsTool().execute(params);
+
+            assertTrue(result, result.contains("body.xml must be a non-empty string"));
+            assertTrue(result, result.contains("nothing was written"));
+            assertTrue(result, result.contains("retry with the complete DataCompositionSchema XML"));
+            assertTrue(result, result.contains("action='get', type='schema', format='xml'"));
+        }
+    }
+
+    @Test
+    public void testExactIntegerValidationPreservesPublicErrors()
+    {
+        for (String key : new String[] {"limit", "offset"})
+        {
+            for (String raw : new String[] {"1.0000000000000001", "2147483647.00000001", "1.5", "NaN", "2147483648"})
+            {
+                var params = baseGet("Report.Sales", "schema");
+                params.put(key, raw);
+                String error = JsonParser.parseString(new DcsTool().execute(params))
+                    .getAsJsonObject().get("error").getAsString();
+                assertEquals(key + " '" + raw + "' is not an integer. " + (key.equals("limit")
+                    ? "Pass a whole number; Markdown collection reads clamp it to 1..1000 items, "
+                        + "while exact-value and XML reads bound it by their serialized-character output envelope."
+                    : "Pass a zero-based whole-number offset."), error);
+            }
+        }
+        var negative = baseGet("Report.Sales", "schema");
+        negative.put("offset", "-1.0");
+        assertEquals("offset '-1' is negative. Pass offset=0 or a later zero-based collection offset.",
+            JsonParser.parseString(new DcsTool().execute(negative)).getAsJsonObject().get("error").getAsString());
+    }
+
     private static Map<String, String> baseGet(String fqn, String type)
     {
         Map<String, String> params = new HashMap<>();
@@ -465,13 +591,26 @@ public class DcsToolTest
         assertTrue(result, result.contains("bare root FQN")); //$NON-NLS-1$
     }
 
-    private static void assertArticulateChartRefusal(String error)
+    /** A chart whose chart-type output parameter carries nested values, which V1 cannot model. */
+    private static DataCompositionChart chartWithNestedOutputParameter()
     {
-        assertTrue(error, error.contains("DataCompositionChart")); //$NON-NLS-1$
-        assertTrue(error, error.contains("authoring it is not supported by this tool")); //$NON-NLS-1$
-        assertTrue(error, error.contains("action='replace', type='schema'")); //$NON-NLS-1$
-        assertTrue(error, error.contains("body={xml:...}")); //$NON-NLS-1$
-        assertTrue(error, error.contains("bare schema root")); //$NON-NLS-1$
+        com._1c.g5.v8.dt.dcs.model.settings.DcsFactory factory =
+            com._1c.g5.v8.dt.dcs.model.settings.DcsFactory.eINSTANCE;
+        DataCompositionChart chart = factory.createDataCompositionChart();
+        DataCompositionChartOutputParameterValues output =
+            factory.createDataCompositionChartOutputParameterValues();
+        SettingsParameterValue chartType = factory.createSettingsParameterValue();
+        chartType.getNestedParameterValues().add(factory.createSettingsParameterValue());
+        output.getItems().add(chartType);
+        chart.setOutputParameters(output);
+        return chart;
+    }
+
+    private static void assertUnmodellableRefusal(String error)
+    {
+        assertTrue(error, error.contains("cannot model")); //$NON-NLS-1$
+        assertTrue(error, error.contains("SettingsParameterValue")); //$NON-NLS-1$
+        assertTrue(error, error.contains("/outputParameters/items/0")); //$NON-NLS-1$
         assertFalse(error, error.contains("no public DCS type")); //$NON-NLS-1$
     }
 

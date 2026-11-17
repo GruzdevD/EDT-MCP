@@ -1,0 +1,251 @@
+/**
+ * MCP Server for EDT
+ * Copyright (C) 2026 DitriX (https://github.com/DitriXNew)
+ * Licensed under AGPL-3.0-or-later
+ */
+package com.ditrix.edt.mcp.server.ipc;
+
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.*;
+import java.nio.file.attribute.*;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
+
+/** Owner-only IPC storage. Never traverse symbolic links or Windows directory reparse points. */
+public final class PrivatePaths
+{
+    private static final String SYSTEM_SID = "S-1-5-18";
+    private static final String ADMINISTRATORS_SID = "S-1-5-32-544";
+    private static final String PRIVILEGED_LOOKUP_FAILED = "Cannot resolve privileged Windows accounts for IPC storage validation";
+    /** The current account's principal, looked up once; a racing first lookup yields an equal principal. */
+    private static final AtomicReference<UserPrincipal> CURRENT_OWNER = new AtomicReference<>();
+    private static Set<UserPrincipal> windowsPrivilegedAccounts;
+    private PrivatePaths() { }
+
+    private static UserPrincipal owner(Path path) throws IOException
+    {
+        UserPrincipal result = CURRENT_OWNER.get();
+        if (result == null)
+        {
+            String account = ProcessHandle.current().info().user().orElseThrow(
+                () -> new IOException("Cannot determine the current account"));
+            result = path.getFileSystem().getUserPrincipalLookupService().lookupPrincipalByName(account);
+            CURRENT_OWNER.set(result);
+        }
+        return result;
+    }
+
+    public static void noLinks(Path path) throws IOException
+    {
+        if (!path.isAbsolute() || !path.normalize().equals(path)) { throw new IOException("Private paths must be absolute and normalized"); }
+        Path current = path.getRoot();
+        for (Path component : path)
+        {
+            current = current.resolve(component);
+            if (!Files.exists(current, LinkOption.NOFOLLOW_LINKS)) { continue; }
+            BasicFileAttributes attributes = Files.readAttributes(current, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (attributes.isSymbolicLink() || (attributes.isDirectory() && attributes.isOther()))
+            { throw new IOException("Private paths must not contain links or reparse points"); }
+            if (attributes.isDirectory() && !current.toRealPath().equals(current.toRealPath(LinkOption.NOFOLLOW_LINKS)))
+            { throw new IOException("Private paths must not traverse reparse points"); }
+        }
+    }
+
+    public static boolean posix(Path path)
+    { return Files.getFileAttributeView(path, PosixFileAttributeView.class, LinkOption.NOFOLLOW_LINKS) != null; }
+
+    private static FileAttribute<?>[] attributes(Path parent, boolean directory) throws IOException
+    {
+        if (posix(parent))
+        { return new FileAttribute<?>[]{PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString(directory ? "rwx------" : "rw-------"))}; }
+        if (!directory) { return new FileAttribute<?>[0]; }
+        var acl = List.of(AclEntry.newBuilder().setType(AclEntryType.ALLOW).setPrincipal(owner(parent))
+            .setPermissions(EnumSet.allOf(AclEntryPermission.class))
+            .setFlags(AclEntryFlag.DIRECTORY_INHERIT, AclEntryFlag.FILE_INHERIT).build());
+        return new FileAttribute<?>[]{new FileAttribute<List<AclEntry>>() {
+            public String name() { return "acl:acl"; }
+            public List<AclEntry> value() { return acl; }
+        }};
+    }
+
+    public static Path directory(Path path) throws IOException
+    {
+        noLinks(path);
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS))
+        {
+            if (!Files.exists(path.getParent(), LinkOption.NOFOLLOW_LINKS)) { directory(path.getParent()); }
+            try { Files.createDirectory(path, attributes(path.getParent(), true)); }
+            catch (FileAlreadyExistsException e) { /* A competing owner must pass the same checks. */ }
+        }
+        verifyOwnedDirectory(path);
+        if (posix(path)) { Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwx------")); }
+        else
+        {
+            var acl = Files.getFileAttributeView(path, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+            if (acl == null) { throw new IOException("Private IPC storage requires POSIX permissions or Windows ACLs"); }
+            @SuppressWarnings("unchecked") var entries = (List<AclEntry>)attributes(path, true)[0].value();
+            acl.setAcl(entries);
+        }
+        verifyDirectory(path);
+        return path;
+    }
+
+    /** Creates a unique private child of an already private, verified parent. */
+    public static Path temporaryDirectory(Path parent, String prefix) throws IOException
+    {
+        verifyDirectory(parent);
+        Path temporary = Files.createTempDirectory(parent, prefix, attributes(parent, true));
+        try { return directory(temporary); }
+        catch (IOException | RuntimeException failure)
+        {
+            try { Files.delete(temporary); }
+            catch (IOException cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
+        }
+    }
+
+    public static void verifyDirectory(Path path) throws IOException
+    {
+        verifyOwnedDirectory(path);
+        verifyAccess(path);
+    }
+
+    private static void verifyOwnedDirectory(Path path) throws IOException
+    {
+        noLinks(path);
+        if (!Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).isDirectory())
+        { throw new IOException("Expected a private directory"); }
+        verifyOwner(path);
+    }
+
+    public static void verifyOwner(Path path) throws IOException
+    {
+        UserPrincipal fileOwner = Files.getOwner(path, LinkOption.NOFOLLOW_LINKS), account = owner(path);
+        Set<UserPrincipal> privileged = fileOwner.equals(account) || posix(path) ? Set.of() : windowsPrivilegedAccounts(path);
+        if (!isTrustedOwner(fileOwner, account, privileged))
+        { throw new IOException("IPC storage belongs to another account"); }
+    }
+
+    public static boolean isTrustedOwner(UserPrincipal fileOwner, UserPrincipal account, Set<UserPrincipal> privilegedAccounts)
+    { return fileOwner.equals(account) || privilegedAccounts.contains(fileOwner); }
+
+    public static void verifyFile(Path path) throws IOException
+    {
+        noLinks(path);
+        if (!Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).isRegularFile())
+        { throw new IOException("Expected a regular IPC file"); }
+        verifyOwner(path);
+        verifyAccess(path);
+    }
+
+    private static void verifyAccess(Path path) throws IOException
+    {
+        if (posix(path))
+        {
+            if (Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS).stream()
+                .anyMatch(permission -> permission.name().startsWith("GROUP_") || permission.name().startsWith("OTHERS_")))
+            { throw new IOException("IPC storage must be accessible only to its owner"); }
+        }
+        else { verifyWindowsAcl(path); }
+    }
+
+    private static void verifyWindowsAcl(Path path) throws IOException
+    {
+        var view = Files.getFileAttributeView(path, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+        if (view == null) { throw new IOException("Private IPC storage requires POSIX permissions or Windows ACLs"); }
+        var entries = view.getAcl();
+        // Java also returns an empty list for an absent DACL, which grants everyone access.
+        if (entries.isEmpty()) { throw new IOException("IPC storage requires an explicit private DACL"); }
+        for (AclEntry entry : entries)
+        {
+            if (entry.type() == AclEntryType.ALLOW && !entry.principal().equals(owner(path))
+                && !windowsPrivilegedAccounts(path).contains(entry.principal()))
+            { throw new IOException("IPC storage must not grant access to other accounts"); }
+        }
+    }
+
+    private static synchronized Set<UserPrincipal> windowsPrivilegedAccounts(Path path) throws IOException
+    {
+        if (windowsPrivilegedAccounts != null) { return windowsPrivilegedAccounts; }
+        // Mismatched Windows owners and non-user ACEs share this cached lookup.
+        String root = System.getenv("SystemRoot");
+        if (root == null || root.isBlank()) { throw new IOException(PRIVILEGED_LOOKUP_FAILED + ": SystemRoot is not set"); }
+        try
+        {
+            windowsPrivilegedAccounts = readWindowsPrivilegedAccounts(path.getFileSystem().getPath(root));
+            return windowsPrivilegedAccounts;
+        }
+        catch (InvalidPathException | SecurityException e)
+        { throw new IOException(PRIVILEGED_LOOKUP_FAILED + ": cannot read the SystemRoot directory", e); }
+    }
+
+    /** Reads the SYSTEM and Administrators principals from the ACL of the Windows system directory. */
+    public static Set<UserPrincipal> readWindowsPrivilegedAccounts(Path systemRoot) throws IOException
+    {
+        var view = Files.getFileAttributeView(systemRoot, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+        if (view == null) { throw new IOException(PRIVILEGED_LOOKUP_FAILED + ": the system directory has no ACL view"); }
+        return selectWindowsPrivilegedAccounts(view.getAcl());
+    }
+
+    /**
+     * Selects the SYSTEM and Administrators principals from the ACL of the Windows system directory.
+     * <p>
+     * Localized or renamed account names are not stable, so the well-known SIDs identify these accounts. The JDK has
+     * no public route from a SID to a principal, and {@code LookupAccountName} rejects SID strings. The JDK's Windows
+     * principals are defined by their SID, which makes {@code hashCode()} the SID string's hash. That hash is 32
+     * bits, not an identity: two principals sharing it fail closed with an {@link IOException}, and so does a
+     * missing one, but a lone principal whose SID merely collides would be taken in place of an absent real
+     * account. Producing that ACL requires rewriting the DACL of the system directory, which only accounts
+     * already trusted here (TrustedInstaller, SYSTEM, Administrators) may do.
+     *
+     * @param entries the ACL entries of the Windows system directory
+     * @return exactly the SYSTEM and Administrators principals
+     * @throws IOException if either principal is absent or ambiguous
+     */
+    public static Set<UserPrincipal> selectWindowsPrivilegedAccounts(List<AclEntry> entries) throws IOException
+    {
+        UserPrincipal system = principalBySid(entries, SYSTEM_SID);
+        UserPrincipal administrators = principalBySid(entries, ADMINISTRATORS_SID);
+        if (system.equals(administrators))
+        { throw new IOException(PRIVILEGED_LOOKUP_FAILED + ": the well-known accounts are not distinct"); }
+        return Set.of(system, administrators);
+    }
+
+    private static UserPrincipal principalBySid(List<AclEntry> entries, String sid) throws IOException
+    {
+        Set<UserPrincipal> matches = new HashSet<>();
+        for (AclEntry entry : entries)
+        {
+            UserPrincipal principal = entry.principal();
+            if (principal instanceof GroupPrincipal && principal.hashCode() == sid.hashCode()) { matches.add(principal); }
+        }
+        if (matches.size() != 1)
+        { throw new IOException(PRIVILEGED_LOOKUP_FAILED + ": expected one account for " + sid + " but found " + matches.size()); }
+        return matches.iterator().next();
+    }
+
+    public static FileChannel lockFile(Path path) throws IOException
+    {
+        verifyDirectory(path.getParent());
+        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) { verifyFile(path); }
+        FileChannel channel = FileChannel.open(path, Set.of(StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+            LinkOption.NOFOLLOW_LINKS), attributes(path.getParent(), false));
+        try { verifyFile(path); return channel; }
+        catch (IOException e) { channel.close(); throw e; }
+    }
+
+    public static void atomicWrite(Path destination, byte[] bytes) throws IOException
+    {
+        verifyDirectory(destination.getParent());
+        noLinks(destination);
+        if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) { verifyFile(destination); }
+        Path temporary = Files.createTempFile(destination.getParent(), "ipc-", ".tmp", attributes(destination.getParent(), false));
+        try
+        {
+            Files.write(temporary, bytes);
+            Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        }
+        finally { Files.deleteIfExists(temporary); }
+    }
+}

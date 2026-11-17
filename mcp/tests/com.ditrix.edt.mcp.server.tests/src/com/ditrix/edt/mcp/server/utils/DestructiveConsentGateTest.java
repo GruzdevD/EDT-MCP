@@ -40,6 +40,84 @@ import com.ditrix.edt.mcp.server.utils.DestructiveConsentGate.Outcome;
  */
 public class DestructiveConsentGateTest
 {
+    @Test
+    public void headlessAllowAuditsWithAndWithoutEnvironmentOverride()
+    {
+        var records = new java.util.ArrayList<org.eclipse.core.runtime.IStatus>();
+        org.eclipse.core.runtime.ILogListener listener = (status, plugin) -> {
+            if (status.getMessage().startsWith("Destructive-consent gate:")) records.add(status);
+        };
+        org.eclipse.core.runtime.Platform.addLogListener(listener);
+        try
+        {
+            for (boolean env : new boolean[] {false, true})
+            {
+                records.clear();
+                var preview = ConsentPreview.withUnloggableNames("Evaluate expression", "Runs BSL", 1,
+                    java.util.List.of("private-token"));
+                assertEquals(ConsentDecision.ALLOW, DestructiveConsentGate.getInstance().requireConsent(
+                    "evaluate_expression", preview, com.ditrix.edt.mcp.server.HostKind.HEADLESS, env));
+                assertEquals("Every headless allow must be audited", 1, records.size());
+                assertEquals(org.eclipse.core.runtime.IStatus.INFO, records.get(0).getSeverity());
+                String line = records.get(0).getMessage();
+                assertTrue(line, line.contains("headless"));
+                assertTrue(line, line.contains("'evaluate_expression'"));
+                assertTrue(line, line.endsWith("Evaluate expression: Runs BSL (1 item(s): content not logged, 13 chars)"));
+                assertFalse(line, line.contains("private-token"));
+            }
+        }
+        finally { org.eclipse.core.runtime.Platform.removeLogListener(listener); }
+    }
+
+    @Test
+    public void windowedAuditRemainsByteIdenticalAndUsesTheSameRedactedPreviewAsHeadless()
+    {
+        var records = new java.util.ArrayList<org.eclipse.core.runtime.IStatus>();
+        org.eclipse.core.runtime.ILogListener listener = (status, plugin) -> {
+            if (status.getMessage().startsWith("Destructive-consent gate:")) records.add(status);
+        };
+        org.eclipse.core.runtime.Platform.addLogListener(listener);
+        try
+        {
+            var preview = ConsentPreview.withUnloggableNames("Evaluate expression", "Runs BSL", 1,
+                java.util.List.of("private-token"));
+            var gate = DestructiveConsentGate.getInstance();
+            assertEquals(ConsentDecision.ALLOW, gate.requireConsent("evaluate_expression", preview,
+                com.ditrix.edt.mcp.server.HostKind.WINDOWED, true));
+            String expected = "Destructive-consent gate: EDT_MCP_DESTRUCTIVE_CONSENT=allow bypassed the prompt for 'evaluate_expression' — Evaluate expression: Runs BSL (1 item(s): content not logged, 13 chars)";
+            assertEquals(1, records.size());
+            assertEquals(expected, records.get(0).getMessage());
+            assertEquals(org.eclipse.core.runtime.IStatus.INFO, records.get(0).getSeverity());
+            assertEquals(ConsentDecision.ALLOW, gate.requireConsent("evaluate_expression", preview,
+                com.ditrix.edt.mcp.server.HostKind.HEADLESS, false));
+            assertEquals("Both hosts must use the audit writer", 2, records.size());
+            assertTrue(records.get(1).getMessage().endsWith(expected.substring(expected.indexOf(" bypassed"))));
+            assertEquals(records.get(0).getSeverity(), records.get(1).getSeverity());
+            assertFalse(records.toString().contains("private-token"));
+        }
+        finally { org.eclipse.core.runtime.Platform.removeLogListener(listener); }
+    }
+
+    @Test
+    public void explicitHeadlessHostAlwaysAllowsEveryGatedTool()
+    {
+        String previous = System.getProperty("eclipse.application");
+        try
+        {
+            System.setProperty("eclipse.application", com.ditrix.edt.mcp.server.HostKind.APPLICATION_ID);
+            for (String name : DestructiveConsentGate.GATED_TOOLS)
+            {
+                assertEquals(name, ConsentDecision.ALLOW,
+                    DestructiveConsentGate.getInstance().requireConsent(name, null));
+            }
+        }
+        finally
+        {
+            if (previous == null) System.clearProperty("eclipse.application");
+            else System.setProperty("eclipse.application", previous);
+        }
+    }
+
     private static final String TOOL = "delete_metadata"; //$NON-NLS-1$
 
     @After
@@ -104,6 +182,51 @@ public class DestructiveConsentGateTest
         {
             assertEquals("Headless / unattended must REFUSE, and never block", //$NON-NLS-1$
                 ConsentDecision.UNATTENDED, decision);
+        }
+    }
+
+    @Test
+    public void aSessionAllowDoesNotOutrankTheHeadlessRefusal()
+    {
+        // Pins the ONE thing about requireConsent that the verdict table above cannot see: the
+        // headless probe runs BEFORE the policy, not after. Every other test here calls the pure
+        // decide() seam, which never learns whether there is a display; this one drives the whole
+        // method with the policy set to ALLOW, so the two steps disagree and the order decides.
+        //
+        // Before #566 the order genuinely did not matter - both steps answered ALLOW, so a
+        // disjunction commuted, and this branch reordered them to spare an already-allowed call
+        // the unbounded display.syncExec inside grabActiveShell. #566 killed that equivalence:
+        // the headless step now REFUSES, because the absence of a human is not entitled to grant
+        // consent on the operator's behalf. Reading the policy first would answer ALLOW here, and
+        // equally for ALLOW_ALL and for a Preferences-approved tool - re-opening the fail-open
+        // path on exactly the headless EDT #566 closed it for. No verdict-table test catches
+        // that: the test JVM has no preference store, so getLevel() answers ASK_ALWAYS, decide()
+        // yields PROMPT and the probe runs under either order. Session-allow is the one lever
+        // that needs no preference store, so it is the lever this test pulls.
+        DestructiveConsentGate gate = DestructiveConsentGate.getInstance();
+        gate.allowForSession(TOOL);
+
+        // Positive control. If allowForSession did not take, the policy would say PROMPT, the
+        // call would fall through to the probe and refuse under BOTH orders - the pin would pass
+        // while measuring nothing, which is precisely how the ratchet this test replaces came to
+        // guard the wrong order.
+        assertTrue("the policy must actually say ALLOW here, or this test proves nothing", //$NON-NLS-1$
+            gate.isSessionAllowed(TOOL));
+
+        ConsentDecision decision = gate.requireConsent(TOOL, null);
+        if (DestructiveConsentGate.isEnvAllow())
+        {
+            // The launch bypass is step 1 and outranks both; assert that it still does rather
+            // than skip, so this test cannot quietly certify its removal.
+            assertEquals("with EDT_MCP_DESTRUCTIVE_CONSENT=allow, step 1 must still win", //$NON-NLS-1$
+                ConsentDecision.ALLOW, decision);
+        }
+        else
+        {
+            assertEquals("the headless refusal must outrank a session-allow: with no display " //$NON-NLS-1$
+                + "there is nobody to have granted it, and settling the policy first would " //$NON-NLS-1$
+                + "return ALLOW for every session-allowed / ALLOW_ALL / per-tool-allowed call " //$NON-NLS-1$
+                + "on a headless EDT", ConsentDecision.UNATTENDED, decision); //$NON-NLS-1$
         }
     }
 
@@ -184,9 +307,10 @@ public class DestructiveConsentGateTest
     public void gatedToolsAreTheFrozenSet()
     {
         assertEquals("GATED_TOOLS must be exactly the frozen set", //$NON-NLS-1$
-            Set.of("delete_metadata", "rename_metadata_object", "delete_project", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "delete_infobase", "update_database", "modify_metadata", "dcs", "git", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-                "evaluate_expression"), //$NON-NLS-1$
+            Set.of("clone_metadata_object", "delete_metadata", "rename_metadata_object", "delete_project", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "delete_infobase", "update_database", "infobase_sessions", "infobase_extensions", "standalone_server", "modify_metadata", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                "dcs", "git", "business_process_route_map", "project_checks", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                "merge_rules", "evaluate_expression", "manage_profiling_results", "manage_tech_log"), //$NON-NLS-1$ //$NON-NLS-2$
             DestructiveConsentGate.GATED_TOOLS);
     }
 
@@ -198,10 +322,18 @@ public class DestructiveConsentGateTest
         // conversion), git (only the commands that destroy work - see GitTool.destructiveForm), and
         // evaluate_expression (arbitrary BSL: usually a read, occasionally a mutation, and nothing
         // in the call says which - which is exactly why the GATE asks every time while the HINT,
-        // one per tool, keeps describing the typical read). Those four carry their own annotations
+        // one per tool, keeps describing the typical read), plus project_checks (only effective
+        // set/switch writes and profile create/copy/delete). Those five carry their own annotations
         // and are deliberately NOT in the always-destructive classifier list.
+        //
+        // merge_rules is gated conditionally too - only the same-path rewrite asks - and yet it IS
+        // classified destructive, so it belongs on the other side of this branch. There is no
+        // contradiction: the classifier answers per TOOL and has to describe what the tool CAN do,
+        // while the gate is called per CALL and can see which one this is. The five above are
+        // absent from ToolAnnotationClassifier.DESTRUCTIVE_TOOLS, so classify() answers "an
+        // ordinary write"; merge_rules is IN that list, and its entry there says why.
         Set<String> conditionallyDestructive =
-            Set.of("modify_metadata", "dcs", "git", "evaluate_expression"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            Set.of("modify_metadata", "dcs", "git", "evaluate_expression", "project_checks", "manage_profiling_results", "manage_tech_log"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         for (String tool : DestructiveConsentGate.GATED_TOOLS)
         {
             boolean classifiedDestructive =

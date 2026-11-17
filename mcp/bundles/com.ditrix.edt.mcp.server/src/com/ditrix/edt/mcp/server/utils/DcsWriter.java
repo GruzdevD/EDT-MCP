@@ -6,6 +6,7 @@
 
 package com.ditrix.edt.mcp.server.utils;
 
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -44,9 +45,11 @@ import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.McoreFactory;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.Value;
+import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.platform.version.Version;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
+import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -414,9 +417,21 @@ public final class DcsWriter
 
     /**
      * Shared parameter-type resolver used by the {@code dcs} tool. It deliberately routes through
-     * the one metadata type grammar in {@link MetadataTypeBuilder}.
+     * the one metadata type grammar in {@link MetadataTypeBuilder}. A caller's bad spec is returned
+     * as a failed resolution; a platform failure is RAISED unmarked, so the tool logs it at ERROR.
      */
     public static TypeResolver typeResolver(Configuration configuration, Version version)
+    {
+        return typeResolver(configuration, version, false);
+    }
+
+    /**
+     * {@link #typeResolver(Configuration, Version)} for a project that may be a configuration EXTENSION:
+     * there an unresolved reference also suggests adopting the base object, as {@code modify_metadata}
+     * does (issue #920) - an extension sees a base object only once it is adopted.
+     */
+    public static TypeResolver typeResolver(Configuration configuration, Version version,
+        boolean isExtensionProject)
     {
         return valueTypeSpec -> {
             if (version == null)
@@ -425,7 +440,11 @@ public final class DcsWriter
                     "Cannot resolve the platform version needed to build the parameter type."); //$NON-NLS-1$
             }
             MetadataTypeBuilder.Result result = MetadataTypeBuilder.build(valueTypeSpec, configuration,
-                version, false, MetadataTypeBuilder.TypeTarget.DCS_PARAMETER);
+                version, isExtensionProject, MetadataTypeBuilder.TypeTarget.DCS_PARAMETER);
+            if (result.platformFailure)
+            {
+                throw result.asException("Cannot build the parameter type: " + result.error); //$NON-NLS-1$
+            }
             return result.error != null ? TypeResolution.failed(result.error)
                 : TypeResolution.of(result.typeDescription);
         };
@@ -723,7 +742,7 @@ public final class DcsWriter
             if (element == null || !element.isJsonObject())
                 return "Order expression at '" + itemPath + "' must be an object."; //$NON-NLS-1$ //$NON-NLS-2$
             JsonObject item = element.getAsJsonObject();
-            String unknown = unknownMembers(item, itemPath, KEY_EXPRESSION, KEY_ORDER_TYPE,
+            String unknown = JsonUtils.unknownMemberError(item, itemPath, KEY_EXPRESSION, KEY_ORDER_TYPE,
                 KEY_AUTO_ORDER);
             if (unknown != null) return unknown;
             StringResult expression = optionalString(item, KEY_EXPRESSION, itemPath);
@@ -774,7 +793,7 @@ public final class DcsWriter
                 return AvailableValuesResult.failure("Available value at '" + itemPath //$NON-NLS-1$
                     + "' must be an object with 'value' and optional 'presentation'."); //$NON-NLS-1$
             JsonObject item = element.getAsJsonObject();
-            String unknown = unknownMembers(item, itemPath, KEY_VALUE, KEY_PRESENTATION);
+            String unknown = JsonUtils.unknownMemberError(item, itemPath, KEY_VALUE, KEY_PRESENTATION);
             if (unknown != null) return AvailableValuesResult.failure(unknown);
             if (!item.has(KEY_VALUE)) return AvailableValuesResult.failure("Available value at '" //$NON-NLS-1$
                 + itemPath + "' needs a 'value' ValueSpec."); //$NON-NLS-1$
@@ -829,12 +848,24 @@ public final class DcsWriter
         if (expected == null)
             return ValueBuildResult.failure("Value at '" + path //$NON-NLS-1$
                 + "' cannot be mapped to the declared valueType. Supported declared default/available " //$NON-NLS-1$
-                + "types are String, Number, Boolean, Date, and Null/Undefined; change the ValueSpec " //$NON-NLS-1$
+                + "types are String, Number, Boolean, Date, StandardPeriod, and Null/Undefined; change the ValueSpec " //$NON-NLS-1$
                 + "or remove this member."); //$NON-NLS-1$
         DcsSettingsWriter.ValueResult value = DcsSettingsWriter.buildTypedParameterValue(raw,
             expected, languages, path);
         return value.error == null ? ValueBuildResult.success(value.value)
             : ValueBuildResult.failure(value.error);
+    }
+
+    /** Restates a schema default/available value through the same declared-value writer. */
+    static String declaredValueRefusal(TypeDescription declared, Value stored,
+        DcsPresentationParser.LanguageContext languages)
+    {
+        DcsPresentationParser.LanguageContext dryRun = languages == null ? null : languages.dryRun();
+        return DcsSettingsWriter.untypedValueRefusal(stored, raw -> {
+            ValueBuildResult built = declaredValue(raw, declared, dryRun, "value"); //$NON-NLS-1$
+            return built.error == null ? DcsSettingsWriter.ValueResult.success(built.value)
+                : DcsSettingsWriter.ValueResult.failure(built.error);
+        });
     }
 
     private static Value expectedValue(TypeDescription declared, JsonElement raw)
@@ -858,7 +889,21 @@ public final class DcsWriter
             case "boolean": return McoreFactory.eINSTANCE.createBooleanValue(); //$NON-NLS-1$
             case "date": return McoreFactory.eINSTANCE.createDateValue(); //$NON-NLS-1$
             case "null": return McoreFactory.eINSTANCE.createNullValue(); //$NON-NLS-1$
+            case "standardperiod": return McoreFactory.eINSTANCE.createStandardPeriodValue(); //$NON-NLS-1$
             default: return null;
+        }
+    }
+
+    /** A resolved platform type is a proxy whose URI carries no name; EDT's resolver names it. */
+    private static boolean isStandardPeriod(TypeItem type)
+    {
+        try
+        {
+            return "StandardPeriod".equals(McoreUtil.getTypeName(type)); //$NON-NLS-1$
+        }
+        catch (RuntimeException e)
+        {
+            return false;
         }
     }
 
@@ -872,6 +917,8 @@ public final class DcsWriter
                 ? EcoreUtil.getURI(type).toString().toLowerCase(java.util.Locale.ROOT)
                 : name == null ? "" : name.toLowerCase(java.util.Locale.ROOT); //$NON-NLS-1$
             result.add(normalized);
+            if (normalized.endsWith("/standardperiod") || normalized.endsWith("#standardperiod")
+                || normalized.equals("стандартныйпериод") || isStandardPeriod(type)) result.add("standardperiod");
             if (normalized.contains("string")) result.add("string"); //$NON-NLS-1$ //$NON-NLS-2$
             if (normalized.contains("number") || normalized.contains("decimal")) result.add("number"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (normalized.contains("boolean")) result.add("boolean"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -888,7 +935,7 @@ public final class DcsWriter
         if (!raw.isJsonObject()) return InputParametersResult.failure("Member at '" + path //$NON-NLS-1$
             + "' must be {items:[...]}, or null to clear it."); //$NON-NLS-1$
         JsonObject body = raw.getAsJsonObject();
-        String unknown = unknownMembers(body, path, KEY_ITEMS);
+        String unknown = JsonUtils.unknownMemberError(body, path, KEY_ITEMS);
         if (unknown != null) return InputParametersResult.failure(unknown);
         if (!body.has(KEY_ITEMS) || !body.get(KEY_ITEMS).isJsonArray())
             return InputParametersResult.failure("Input parameters at '" + path //$NON-NLS-1$
@@ -903,7 +950,7 @@ public final class DcsWriter
                 return InputParametersResult.failure("Input parameter at '" + itemPath //$NON-NLS-1$
                     + "' must be an object."); //$NON-NLS-1$
             JsonObject item = element.getAsJsonObject();
-            unknown = unknownMembers(item, itemPath, KEY_PARAMETER, KEY_VALUES, KEY_USE);
+            unknown = JsonUtils.unknownMemberError(item, itemPath, KEY_PARAMETER, KEY_VALUES, KEY_USE);
             if (unknown != null) return InputParametersResult.failure(unknown);
             if (!item.has(KEY_PARAMETER))
                 return InputParametersResult.failure("Input parameter at '" + itemPath //$NON-NLS-1$
@@ -2052,7 +2099,7 @@ public final class DcsWriter
             return ParseResult.failed("A 'dcs' payload is required, e.g. {dataSets:[{name:'DataSet1'," //$NON-NLS-1$
                 + "type:'query',query:'SELECT ...'}]}."); //$NON-NLS-1$
         }
-        String unknown = unknownMembers(spec, "body", KEY_DATA_SOURCES, KEY_DATA_SETS, //$NON-NLS-1$
+        String unknown = JsonUtils.unknownMemberError(spec, "body", KEY_DATA_SOURCES, KEY_DATA_SETS, //$NON-NLS-1$
             KEY_PARAMETERS, KEY_CALCULATED_FIELDS, KEY_TOTAL_FIELDS, KEY_DATA_SET_LINKS);
         if (unknown != null)
         {
@@ -2117,7 +2164,7 @@ public final class DcsWriter
         {
             JsonObject entry = entries.get(i);
             String where = KEY_DATA_SOURCES + "[" + i + "]"; //$NON-NLS-1$ //$NON-NLS-2$
-            String unknown = unknownMembers(entry, where, KEY_NAME, KEY_TYPE, KEY_CONNECTION_STRING);
+            String unknown = JsonUtils.unknownMemberError(entry, where, KEY_NAME, KEY_TYPE, KEY_CONNECTION_STRING);
             if (unknown != null)
             {
                 return unknown;
@@ -2174,7 +2221,7 @@ public final class DcsWriter
         DcsPresentationParser.LanguageContext languages, DataSetValidationContext dataSetValidation,
         List<String> parentPath)
     {
-        String unknown = unknownMembers(entry, where, KEY_NAME, KEY_TYPE, KEY_QUERY,
+        String unknown = JsonUtils.unknownMemberError(entry, where, KEY_NAME, KEY_TYPE, KEY_QUERY,
             KEY_DATA_SOURCE, KEY_AUTO_FILL, KEY_FIELDS, KEY_OBJECT_NAME, KEY_ITEMS);
         if (unknown != null)
         {
@@ -2267,7 +2314,7 @@ public final class DcsWriter
             if (child.error != null) return child;
             items.add(child.plan);
         }
-        return DataSetParseResult.ok(new DataSetPlan(name, type.toLowerCase(), query, dataSource,
+        return DataSetParseResult.ok(new DataSetPlan(name, type.toLowerCase(Locale.ROOT), query, dataSource,
             objectName, autoFill, fields, items));
     }
 
@@ -2279,7 +2326,7 @@ public final class DcsWriter
         {
             JsonObject entry = entries.get(i);
             String where = KEY_DATA_SET_LINKS + "[" + i + "]"; //$NON-NLS-1$ //$NON-NLS-2$
-            String unknown = unknownMembers(entry, where, KEY_SOURCE_DATA_SET,
+            String unknown = JsonUtils.unknownMemberError(entry, where, KEY_SOURCE_DATA_SET,
                 KEY_DESTINATION_DATA_SET, KEY_SOURCE_EXPRESSION, KEY_DESTINATION_EXPRESSION, KEY_PARAMETER,
                 KEY_PARAMETER_LIST_ALLOWED, KEY_LINK_CONDITION_EXPRESSION, KEY_LINK_CONDITION,
                 KEY_START_EXPRESSION, KEY_REQUIRED);
@@ -2342,7 +2389,7 @@ public final class DcsWriter
     private static FieldParseResult parseField(JsonObject entry, String where,
         DcsPresentationParser.LanguageContext languages)
     {
-        String unknown = unknownMembers(entry, where, KEY_DATA_PATH, KEY_FIELD, KEY_NAME,
+        String unknown = JsonUtils.unknownMemberError(entry, where, KEY_DATA_PATH, KEY_FIELD, KEY_NAME,
             KEY_TITLE, KEY_ROLE, KEY_USE_RESTRICTION, KEY_VALUE_TYPE, KEY_APPEARANCE,
             KEY_ATTRIBUTE_USE_RESTRICTION, KEY_PRESENTATION_EXPRESSION, KEY_ORDER_EXPRESSIONS,
             KEY_IN_HIERARCHY_DATA_SET, KEY_IN_HIERARCHY_DATA_SET_PARAMETER,
@@ -2411,7 +2458,7 @@ public final class DcsWriter
         DcsPresentationParser.LanguageContext languages)
     {
         String where = KEY_PARAMETERS + "[" + index + "]"; //$NON-NLS-1$ //$NON-NLS-2$
-        String unknown = unknownMembers(entry, where, KEY_NAME, KEY_VALUE_TYPE, KEY_TITLE, KEY_USE,
+        String unknown = JsonUtils.unknownMemberError(entry, where, KEY_NAME, KEY_VALUE_TYPE, KEY_TITLE, KEY_USE,
             KEY_VALUES, KEY_AVAILABLE_VALUES, KEY_EXPRESSION, KEY_USE_RESTRICTION_FLAG,
             KEY_VALUE_LIST_ALLOWED, KEY_AVAILABLE_AS_FIELD, KEY_DENY_INCOMPLETE_VALUES,
             KEY_FUNCTIONAL_OPTIONS_PARAMETER, KEY_INPUT_PARAMETERS);
@@ -2486,7 +2533,7 @@ public final class DcsWriter
         DcsPresentationParser.LanguageContext languages, DataSetValidationContext dataSetValidation)
     {
         String where = KEY_CALCULATED_FIELDS + "[" + index + "]"; //$NON-NLS-1$ //$NON-NLS-2$
-        String unknown = unknownMembers(entry, where, KEY_DATA_PATH, KEY_EXPRESSION, KEY_TITLE,
+        String unknown = JsonUtils.unknownMemberError(entry, where, KEY_DATA_PATH, KEY_EXPRESSION, KEY_TITLE,
             KEY_VALUE_TYPE, KEY_APPEARANCE, KEY_USE_RESTRICTION,
             KEY_PRESENTATION_EXPRESSION, KEY_ORDER_EXPRESSION, KEY_AVAILABLE_VALUES,
             KEY_INPUT_PARAMETERS);
@@ -2536,7 +2583,7 @@ public final class DcsWriter
         {
             JsonObject entry = entries.get(i);
             String where = KEY_TOTAL_FIELDS + "[" + i + "]"; //$NON-NLS-1$ //$NON-NLS-2$
-            String unknown = unknownMembers(entry, where, KEY_DATA_PATH, KEY_EXPRESSION, KEY_GROUPS);
+            String unknown = JsonUtils.unknownMemberError(entry, where, KEY_DATA_PATH, KEY_EXPRESSION, KEY_GROUPS);
             if (unknown != null)
             {
                 return unknown;
@@ -2601,7 +2648,7 @@ public final class DcsWriter
                 + "{dimension:true}."); //$NON-NLS-1$
         }
         JsonObject roleObj = element.getAsJsonObject();
-        String unknown = unknownMembers(roleObj, where + "." + KEY_ROLE, ROLE_DIMENSION, ROLE_MAIN, //$NON-NLS-1$
+        String unknown = JsonUtils.unknownMemberError(roleObj, where + "." + KEY_ROLE, ROLE_DIMENSION, ROLE_MAIN, //$NON-NLS-1$
             ROLE_REQUIRED, ROLE_IGNORE_NULL, ROLE_DIMENSION_ATTRIBUTE, ROLE_ACCOUNT, ROLE_BALANCE,
             ROLE_PERIOD_TYPE, ROLE_PERIOD_NUMBER);
         if (unknown != null)
@@ -2668,7 +2715,7 @@ public final class DcsWriter
                 + ") must be an object with boolean field/condition/group/order members."); //$NON-NLS-1$
         }
         JsonObject object = element.getAsJsonObject();
-        String unknown = unknownMembers(object, where + "." + KEY_USE_RESTRICTION, //$NON-NLS-1$
+        String unknown = JsonUtils.unknownMemberError(object, where + "." + KEY_USE_RESTRICTION, //$NON-NLS-1$
             RESTRICTION_FIELD, RESTRICTION_CONDITION, RESTRICTION_GROUP, RESTRICTION_ORDER);
         if (unknown != null)
         {
@@ -2792,20 +2839,6 @@ public final class DcsWriter
         return result;
     }
 
-    private static String unknownMembers(JsonObject object, String where, String... accepted)
-    {
-        Set<String> allowed = new LinkedHashSet<>(Arrays.asList(accepted));
-        for (String key : object.keySet())
-        {
-            if (!allowed.contains(key))
-            {
-                return "Unknown member '" + key + "' in " + where + ". Accepted members: " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + String.join(", ", allowed) + ". Remove '" + key + "' or use one of them."; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            }
-        }
-        return null;
-    }
-
     private static String notAnObjectArray(String key)
     {
         return "'" + key + "' must be an array of objects."; //$NON-NLS-1$ //$NON-NLS-2$
@@ -2895,7 +2928,7 @@ public final class DcsWriter
         {
             return Boolean.valueOf(primitive.getAsBoolean());
         }
-        String s = primitive.getAsString().trim().toLowerCase();
+        String s = primitive.getAsString().trim().toLowerCase(Locale.ROOT);
         if ("true".equals(s) || "1".equals(s) || "yes".equals(s)) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         {
             return Boolean.TRUE;

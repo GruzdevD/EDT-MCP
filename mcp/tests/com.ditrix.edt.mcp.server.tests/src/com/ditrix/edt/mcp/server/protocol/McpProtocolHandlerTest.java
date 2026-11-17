@@ -11,11 +11,18 @@ import static org.junit.Assert.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
+import org.eclipse.core.runtime.ILog;
+import org.eclipse.core.runtime.ILogListener;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Platform;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.FrameworkUtil;
 
 import com.ditrix.edt.mcp.server.UserSignal;
 import com.ditrix.edt.mcp.server.UserSignal.SignalType;
@@ -759,6 +766,35 @@ public class McpProtocolHandlerTest
             r.getContent().get(0).getText().contains("disabled by the user"));
     }
 
+    @Test
+    public void testADisabledToolIsRefusedOnTheWireAndNeverRuns()
+    {
+        // The shape above, asserted where a client actually sees it: the serialized tools/call
+        // response. "git" ships DISABLED (DEFAULT_DISABLED_TOOLS) and the store-less fallback keeps
+        // it that way, so the handler's disabled branch is reachable without an Eclipse runtime.
+        RecordingTool tool = new RecordingTool("git");
+        registry.register(tool);
+        assertFalse("git must ship disabled, or this asserts nothing",
+            registry.isToolEnabled("git"));
+
+        JsonObject result = parseResponse(handler.processRequest(
+            buildToolCallRequest(1, "git", "{\"projectName\":\"X\"}"))).getAsJsonObject("result");
+
+        assertNull("a refused tool must not have run", tool.params);
+        assertTrue("a refusal must be machine-distinguishable from a result",
+            result.has("isError") && result.get("isError").getAsBoolean());
+        assertFalse("no structuredContent on a refusal: a tool switched off between tools/list and "
+            + "this call would otherwise answer against its advertised outputSchema",
+            result.has("structuredContent"));
+        // The text channel is the ONLY channel a refusal has, so both the reason and the fix live
+        // there - the machine half of the contract is carried by isError, not by a payload.
+        String text = result.getAsJsonArray("content").get(0).getAsJsonObject()
+            .get("text").getAsString();
+        assertTrue(text, text.contains("Tool 'git' is disabled by the user"));
+        assertTrue("the refusal must name where to switch it back on: " + text,
+            text.contains("Tools tab"));
+    }
+
     /**
      * The single tool entry of a tools/list response, so a test can assert what was advertised
      * for it without restating the envelope.
@@ -1069,12 +1105,66 @@ public class McpProtocolHandlerTest
     @Test
     public void testToolCallNullToolName()
     {
-        String request = buildJsonRpcRequest(1, "tools/call",
-            "{\"arguments\":{}}");
-        String response = handler.processRequest(request);
+        assertInvalidToolName("{\"arguments\":{}}");
+    }
 
-        JsonObject json = parseResponse(response);
-        assertNotNull("Should return error for null tool name", json.get("error"));
+    @Test
+    public void testToolCallExplicitNullToolName()
+    {
+        assertInvalidToolName("{\"name\":null,\"arguments\":{}}");
+    }
+
+    @Test
+    public void testToolCallEmptyToolName()
+    {
+        assertInvalidToolName("{\"name\":\"\",\"arguments\":{}}");
+    }
+
+    @Test
+    public void testToolCallBlankToolName()
+    {
+        assertInvalidToolName("{\"name\":\" \\t\\n\",\"arguments\":{}}");
+    }
+
+    @Test
+    public void testToolCallMissingParams()
+    {
+        assertInvalidToolName(null);
+    }
+
+    private void assertInvalidToolName(String paramsJson)
+    {
+        Bundle bundle = FrameworkUtil.getBundle(McpProtocolHandler.class);
+        assertNotNull("Observe the real server bundle log", bundle);
+        ILog log = Platform.getLog(bundle);
+        List<IStatus> logged = new CopyOnWriteArrayList<>();
+        ILogListener listener = (status, plugin) -> {
+            if (bundle.getSymbolicName().equals(status.getPlugin()))
+            {
+                logged.add(status);
+            }
+        };
+        log.addLogListener(listener);
+        try
+        {
+            JsonObject json = parseResponse(handler.processRequest(
+                buildJsonRpcRequest(1, "tools/call", paramsJson)));
+            assertTrue("Invalid params must not log an exception: " + logged,
+                logged.stream().noneMatch(status -> status.getException() != null));
+            assertTrue("Invalid params must not be logged as server errors: " + logged,
+                logged.stream().noneMatch(status -> status.getSeverity() == IStatus.ERROR));
+            assertEquals(1, json.get("id").getAsInt());
+            assertFalse(json.has("result"));
+            JsonObject error = json.getAsJsonObject("error");
+            assertEquals(McpConstants.ERROR_INVALID_PARAMS, error.get("code").getAsInt());
+            String message = error.get("message").getAsString();
+            assertTrue(message, message.contains("params.name"));
+            assertTrue(message, message.contains("tools/list"));
+        }
+        finally
+        {
+            log.removeLogListener(listener);
+        }
     }
 
     /**
@@ -1856,5 +1946,25 @@ public class McpProtocolHandlerTest
             // Intentionally no-op: the recording-off baseline for the byte-identical
             // output comparison.
         }
+    }
+
+    @Test
+    public void unknownArgumentsReachTheToolWithoutSchemaRejection()
+    {
+        var received = new java.util.concurrent.atomic.AtomicReference<Map<String, String>>();
+        registry.register(new IMcpTool() {
+            @Override public String getName() { return "argument_probe"; }
+            @Override public String getDescription() { return "Argument compatibility probe"; }
+            @Override public String getInputSchema() { return JsonSchemaBuilder.object().build(); }
+            @Override public String execute(Map<String, String> params) {
+                received.set(params); return "accepted";
+            }
+        });
+        String response = handler.processRequest(buildToolCallRequest(1, "argument_probe",
+            "{\"autoSortTopObjects\":false,\"unknownFutureArgument\":1}"));
+        assertNotNull(response, received.get());
+        assertEquals("false", received.get().get("autoSortTopObjects"));
+        assertTrue(response, response.contains("accepted"));
+        assertFalse(response, parseResponse(response).has("error"));
     }
 }

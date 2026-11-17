@@ -1,4 +1,4 @@
-﻿/**
+/**
  * MCP Server for EDT
  * Copyright (C) 2025 DitriX (https://github.com/DitriXNew)
  * Licensed under AGPL-3.0-or-later
@@ -14,14 +14,21 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import org.eclipse.core.resources.IProject;
 
 import com._1c.g5.v8.derived.DerivedDataStatus;
 import com._1c.g5.v8.derived.IDerivedDataManager;
+import com._1c.g5.v8.derived.pipeline.DerivedDataSegmentBucket;
+import com._1c.g5.v8.derived.pipeline.PipelineSegmentStatus;
+import com._1c.g5.v8.derived.pipeline.PipelineStatus;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
+import com._1c.g5.v8.dt.core.platform.IWorkspaceOrchestrator;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.utils.ExtensionOriginUtils.DeclaredBaseProject;
 
@@ -98,19 +105,67 @@ public final class ProjectStateChecker
         }
     }
     
+    /** Why a project is not ready, without changing the public state values. */
+    public enum NotReadyReason
+    {
+        NONE,
+        MISSING,
+        CLOSED,
+        MANAGER_UNAVAILABLE,
+        NOT_EDT_PROJECT,
+        NATURE_UNREADABLE,
+        CONTEXT_NOT_STARTED,
+        CONTEXT_STARTING,
+        CONTEXT_RESTARTING,
+        BUILDING,
+        BUILD_STATE_UNKNOWN
+    }
+
     /**
      * Result of project state check.
      */
     public static class ProjectStateResult
     {
         private final ProjectState state;
+        private final NotReadyReason reason;
         private final String message;
+        private final String contextDetail;
         private final boolean ready;
         
         public ProjectStateResult(ProjectState state, String message)
         {
+            this(state, defaultReason(state), message);
+        }
+
+        private static NotReadyReason defaultReason(ProjectState state)
+        {
+            if (state == ProjectState.BUILDING)
+            {
+                return NotReadyReason.BUILDING;
+            }
+            if (state == ProjectState.UNKNOWN)
+            {
+                return NotReadyReason.BUILD_STATE_UNKNOWN;
+            }
+            return NotReadyReason.NONE;
+        }
+
+        public ProjectStateResult(ProjectState state, NotReadyReason reason, String message)
+        {
+            this(state, reason, message, null);
+        }
+
+        /**
+         * @param contextDetail a sentence about the EDT context that explains the verdict without
+         *     changing its {@code message}, or {@code null}
+         */
+        public ProjectStateResult(ProjectState state, NotReadyReason reason, String message,
+            String contextDetail)
+        {
             this.state = state;
+            this.reason = reason;
             this.message = message;
+            this.contextDetail = contextDetail;
             this.ready = state == ProjectState.READY;
         }
         
@@ -119,9 +174,29 @@ public final class ProjectStateChecker
             return state;
         }
         
+        public NotReadyReason getReason()
+        {
+            return reason;
+        }
+
         public String getMessage()
         {
             return message;
+        }
+
+        /** The context sentence attached to the verdict, or {@code null}. */
+        public String getContextDetail()
+        {
+            return contextDetail;
+        }
+
+        /**
+         * The full explanation a project listing shows: the verdict text, followed by the context
+         * sentence when there is one. Refusals keep using {@link #getMessage()}.
+         */
+        public String getReasonText()
+        {
+            return contextDetail == null ? message : message + ". " + contextDetail; //$NON-NLS-1$
         }
         
         public boolean isReady()
@@ -148,11 +223,21 @@ public final class ProjectStateChecker
      * AFTER_SYNC and BEFORE_BUILD buckets, and the only way to ask about it is
      * {@code waitImportantDataComputations} - a WAIT that its own timeout does not bound, which then
      * needs a job wrapper and a one-in-flight claim whose ownership rules produced a defect on every
-     * attempt. Naming the segments makes this a pure query that cannot block, and makes the
+     * attempt. The gate therefore does not call it: naming the segments lets
+     * {@code isComputed(MODEL_SEGMENTS)} answer as a pure query that cannot block, and makes the
      * assumption reviewable, which a wait never was.
      */
     private static final java.util.List<String> MODEL_SEGMENTS =
         java.util.Arrays.asList("MD", "FORM"); //$NON-NLS-1$ //$NON-NLS-2$
+
+    /**
+     * At most this many active derived-data segments are named in a "still building" refusal, so a
+     * large configuration with many active segments cannot bloat the message.
+     */
+    private static final int MAX_RENDERED_SEGMENTS = 8;
+
+    /** What a "still building" refusal says when the platform status names nothing more specific. */
+    private static final String UNSPECIFIED_BUILD_STATUS = "derived data is being computed"; //$NON-NLS-1$
 
     /** The DT project behind a workspace project, or {@code null} when it is not an EDT project. */
     private static IDtProject resolveDtProject(IProject project)
@@ -162,11 +247,18 @@ public final class ProjectStateChecker
     }
 
     /**
-     * Checks if a project is ready for operations.
-     * A project is ready when:
-     * - It exists and is open
-     * - It is a valid EDT project
-     * - Derived data computations are complete (not building)
+     * Checks whether a workspace project has a started EDT context and complete derived data.
+     * <ul>
+     * <li>The project must exist and be open, with an available DT project manager.</li>
+     * <li>When no DT project is registered, reads the persistent BM nature lazily to distinguish
+     * an unstarted EDT context from a plain project or an unreadable description. Only a known
+     * EDT nature needs the lazy workspace-wide pending-restart-job snapshot.</li>
+     * <li>A registered DT project is judged by its derived data, exactly as before the context
+     * state existed: the verdict (ready, building or unknown) and its text are unchanged. Only a
+     * NOT-ready verdict whose context EDT reports as not started yet additionally carries the
+     * {@link NotReadyReason#CONTEXT_STARTING} reason and a context sentence; a ready verdict never
+     * does. A missing or throwing lifecycle service leaves that answer unknown and adds nothing.</li>
+     * </ul>
      * 
      * @param project the IProject to check
      * @return ProjectStateResult with state and message
@@ -175,35 +267,168 @@ public final class ProjectStateChecker
     {
         if (project == null)
         {
-            return new ProjectStateResult(ProjectState.NOT_AVAILABLE, "Project is null");
+            return new ProjectStateResult(ProjectState.NOT_AVAILABLE, NotReadyReason.MISSING,
+                "Project is null"); //$NON-NLS-1$
         }
-        
-        if (!project.exists())
-        {
-            return new ProjectStateResult(ProjectState.NOT_AVAILABLE, "Project does not exist");
-        }
-        
-        if (!project.isOpen())
-        {
-            return new ProjectStateResult(ProjectState.NOT_AVAILABLE, "Project is closed");
-        }
-        
-        // Get DtProject
-        IDtProjectManager dtProjectManager = Activator.getDefault().getDtProjectManager();
-        if (dtProjectManager == null)
-        {
-            return new ProjectStateResult(ProjectState.UNKNOWN, "DtProjectManager not available");
-        }
-        
-        IDtProject dtProject = dtProjectManager.getDtProject(project);
-        if (dtProject == null)
-        {
-            return new ProjectStateResult(ProjectState.NOT_AVAILABLE, "Not an EDT project");
-        }
-        
-        return checkDtProjectState(dtProject);
+        boolean exists = project.exists();
+        boolean open = exists && project.isOpen();
+        Activator activator = open ? Activator.getDefault() : null;
+        IDtProjectManager manager = activator == null ? null : activator.getDtProjectManager();
+        IDtProject dtProject = manager == null ? null : manager.getDtProject(project);
+        return classifyContext(exists, open, manager != null, dtProject != null,
+            () -> hasBmModelProjectNature(project), () -> readStarted(activator, project),
+            RestartJobFailureSignal::anyRestartJobPending, () -> checkDtProjectState(dtProject));
     }
-    
+
+    /** Snapshot classification; expensive platform facts are consulted only where needed. */
+    static ProjectStateResult classifyContext(boolean exists, boolean isOpen,
+        boolean managerAvailable, boolean dtProjectPresent, Supplier<Boolean> bmNature,
+        Supplier<Boolean> started, BooleanSupplier restartJobPending,
+        Supplier<ProjectStateResult> derivedData)
+    {
+        if (!exists)
+        {
+            return new ProjectStateResult(ProjectState.NOT_AVAILABLE, NotReadyReason.MISSING,
+                "Project does not exist"); //$NON-NLS-1$
+        }
+        if (!isOpen)
+        {
+            return new ProjectStateResult(ProjectState.NOT_AVAILABLE, NotReadyReason.CLOSED,
+                "Project is closed"); //$NON-NLS-1$
+        }
+        if (!managerAvailable)
+        {
+            return new ProjectStateResult(ProjectState.UNKNOWN, NotReadyReason.MANAGER_UNAVAILABLE,
+                "DtProjectManager not available"); //$NON-NLS-1$
+        }
+        if (!dtProjectPresent)
+        {
+            Boolean nature = bmNature.get();
+            if (isUnstartedEdtProject(managerAvailable, dtProjectPresent, nature))
+            {
+                if (restartJobPending.getAsBoolean())
+                {
+                    return new ProjectStateResult(ProjectState.NOT_AVAILABLE,
+                        NotReadyReason.CONTEXT_RESTARTING,
+                        "EDT context is unavailable: a project-restart job is pending in the workspace; " //$NON-NLS-1$
+                            + "poll list_projects until it reads 'ready'"); //$NON-NLS-1$
+                }
+                return new ProjectStateResult(ProjectState.NOT_AVAILABLE,
+                    NotReadyReason.CONTEXT_NOT_STARTED,
+                    "EDT project whose context is not started: it has an EDT nature but no DtProject. " //$NON-NLS-1$
+                        + "If it was just imported or created it is still starting - poll list_projects " //$NON-NLS-1$
+                        + "until it reads 'ready'. If it stays here, close and reopen the project in EDT, " //$NON-NLS-1$
+                        + "or delete_project it and import it again; EDT does not restart it by itself"); //$NON-NLS-1$
+            }
+            if (Boolean.FALSE.equals(nature))
+            {
+                return new ProjectStateResult(ProjectState.NOT_AVAILABLE, NotReadyReason.NOT_EDT_PROJECT,
+                    "Not an EDT project"); //$NON-NLS-1$
+            }
+            return new ProjectStateResult(ProjectState.NOT_AVAILABLE, NotReadyReason.NATURE_UNREADABLE,
+                "Project description could not be read, so it cannot be told from a non-EDT project"); //$NON-NLS-1$
+        }
+        ProjectStateResult verdict = derivedData.get();
+        if (verdict.isReady() || !Boolean.FALSE.equals(started.get()))
+        {
+            return verdict;
+        }
+        return new ProjectStateResult(verdict.getState(), NotReadyReason.CONTEXT_STARTING,
+            verdict.getMessage(), STARTING_CONTEXT);
+    }
+
+    /** Why a registered DT project whose derived data is not ready may stay that way. */
+    static final String STARTING_CONTEXT =
+        "EDT is starting this project's context (services are starting). If it stays here " //$NON-NLS-1$
+            + "after clean_project reported a failed restart, run clean_project on it again - " //$NON-NLS-1$
+            + "it recovers stranded contexts - or close and reopen the project in EDT"; //$NON-NLS-1$
+
+    /** A missing lifecycle service or a failed snapshot must not turn an unknown answer into false. */
+    static Boolean readStarted(Activator activator, IProject project)
+    {
+        try
+        {
+            IWorkspaceOrchestrator orchestrator = activator == null ? null : activator.getWorkspaceOrchestrator();
+            return orchestrator == null ? null : orchestrator.isStarted(project);
+        }
+        catch (RuntimeException e)
+        {
+            Activator.logInfo("Cannot read whether EDT has started project '" + project.getName() //$NON-NLS-1$
+                + "': " + e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /** The persistent EDT nature distinguishes a stopped context from a plain Eclipse project. */
+    public static boolean isUnstartedEdtProject(boolean managerAvailable, boolean dtProjectPresent,
+        Boolean hasBmNature)
+    {
+        return managerAvailable && !dtProjectPresent && Boolean.TRUE.equals(hasBmNature);
+    }
+
+    /** A context-specific recovery sentence, or null when a different condition explains the state. */
+    public static String unstartedContextReasonOrNull(IProject project)
+    {
+        return unstartedContextReasonOrNull(checkProjectState(project));
+    }
+
+    /**
+     * The recovery sentence for a context state, with the retry rule of
+     * {@link #readyOrError(ProjectStateResult)}: a starting or restarting context is transient and
+     * ends with the retry advice, an unstarted context (which EDT does not restart by itself) does
+     * not. A starting context is named by its context sentence, not by its derived-data verdict;
+     * a registered context whose derived data reads ready carries no reason and gets none.
+     */
+    static String unstartedContextReasonOrNull(ProjectStateResult result)
+    {
+        switch (result.getReason())
+        {
+            case CONTEXT_NOT_STARTED:
+            case CONTEXT_RESTARTING:
+                return readyOrError(result);
+            case CONTEXT_STARTING:
+                return withRetryRule(result.getReason(), result.getContextDetail() == null
+                    ? result.getMessage() : result.getContextDetail());
+            default:
+                return null;
+        }
+    }
+
+    /** Keeps a sibling tool's existing refusal and adds recovery advice only for a known EDT nature. */
+    public static String withUnstartedContextReason(IProject project, String refusal)
+    {
+        return withUnstartedContextReason(project, refusal, refusal);
+    }
+
+    /** Uses an alternate prefix only when context recovery advice is available. */
+    public static String withUnstartedContextReason(IProject project, String refusal, String contextRefusal)
+    {
+        return withUnstartedContextReason(refusal, contextRefusal, hasBmModelProjectNature(project),
+            () -> checkProjectState(project));
+    }
+
+    static String withUnstartedContextReason(String refusal, Boolean hasBmNature,
+        Supplier<ProjectStateResult> context)
+    {
+        return withUnstartedContextReason(refusal, refusal, hasBmNature, context);
+    }
+
+    private static String withUnstartedContextReason(String refusal, String contextRefusal, Boolean hasBmNature,
+        Supplier<ProjectStateResult> context)
+    {
+        if (!Boolean.TRUE.equals(hasBmNature))
+        {
+            return refusal;
+        }
+        String reason = unstartedContextReasonOrNull(context.get());
+        if (reason == null)
+        {
+            return refusal;
+        }
+        String separator = contextRefusal.endsWith(".") ? " " : ". "; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return contextRefusal + separator + reason;
+    }
+
     /**
      * Checks if a DT project is ready for operations.
      * 
@@ -232,24 +457,160 @@ public final class ProjectStateChecker
             Activator.logInfo("DerivedDataManager not available for " + dtProject.getName());
             return new ProjectStateResult(ProjectState.UNKNOWN, "Cannot determine build state");
         }
-        
+
+        return checkDerivedDataState(ddManager);
+    }
+
+    /**
+     * The derived-data half of {@link #checkDtProjectState(IDtProject)}: the verdict from the
+     * project's derived-data manager, and the wording of a BUILDING verdict.
+     * <p>
+     * Issue #769: the refusal used to append {@code DerivedDataStatus.toString()}, which the platform
+     * does not override, so every client got {@code com._1c.g5.v8.derived.DerivedDataStatus@<hash>}
+     * - a JVM object identity that changes on every call and says nothing about what is building.
+     * The wording now comes from {@link #describeBuildStatus(DerivedDataStatus)}; the verdict is
+     * decided exactly as before, and the stable {@code "Project is building: "} prefix the e2e
+     * harness retries on is kept.
+     * <p>
+     * On EDT 2026.1 and 2026.2, the polled snapshot names only the stage, the pipeline status and
+     * the model-sync flag. Active segment maps are filled only for status listeners; the renderer's
+     * segment support is forward-compatible. The idle but incomplete branch keeps its base text
+     * without polling a status.
+     *
+     * @param ddManager the project's derived-data manager, never {@code null}
+     * @return BUILDING while the pipeline is busy or not everything is computed, READY otherwise
+     */
+    static ProjectStateResult checkDerivedDataState(IDerivedDataManager ddManager)
+    {
         // Check if computation pipeline is idle
         if (!ddManager.isIdle())
         {
-            DerivedDataStatus status = ddManager.getDerivedDataStatus();
-            String statusStr = status != null ? status.toString() : "computing";
-            return new ProjectStateResult(ProjectState.BUILDING, 
-                "Project is building: " + statusStr);
+            return new ProjectStateResult(ProjectState.BUILDING,
+                "Project is building: " + describeBuildStatus(readBuildStatus(ddManager))); //$NON-NLS-1$
         }
-        
+
         // Check if all derived data is computed
         if (!ddManager.isAllComputed())
         {
-            return new ProjectStateResult(ProjectState.BUILDING, 
-                "Project build in progress (derived data not complete)");
+            return new ProjectStateResult(ProjectState.BUILDING,
+                "Project build in progress (derived data not complete)"); //$NON-NLS-1$
         }
-        
+
         return new ProjectStateResult(ProjectState.READY, "Project is ready");
+    }
+
+    /**
+     * The status to word a BUILDING verdict with, or {@code null} when it cannot be read. Only the
+     * wording depends on it: the verdict has already been decided by the caller.
+     */
+    private static DerivedDataStatus readBuildStatus(IDerivedDataManager ddManager)
+    {
+        try
+        {
+            return ddManager.getDerivedDataStatus();
+        }
+        catch (RuntimeException e)
+        {
+            Activator.logWarning("Cannot read the derived-data status to describe a build in progress: " //$NON-NLS-1$
+                + e);
+            return null;
+        }
+    }
+
+    /**
+     * Words a derived-data status for a client. On EDT 2026.1 and 2026.2, the polled snapshot names
+     * only the active stage, the pipeline status and the model-sync flag. For example
+     * {@code stage NORMAL, pipeline WAITING_STAGE_PROCCESING_END, model sync active}.
+     * <p>
+     * The active segment map is filled only for status listeners on these platforms. Segment
+     * rendering is retained as forward-compatible support if a future polled snapshot supplies the
+     * map: it appends the segment keys and their remaining and total units of work. This checker
+     * does not subscribe to status listeners, so current live refusals contain no segment details.
+     * <p>
+     * Never calls {@code toString()} on the status (issue #769: it is not overridden, so it renders
+     * a JVM object identity). A {@code null} status, a status with nothing to name, or a getter that
+     * throws yields the neutral {@value #UNSPECIFIED_BUILD_STATUS}; a {@code null} stage, pipeline
+     * status, segment key or segment status is left out rather than rendered as {@code null}.
+     *
+     * @param status the status, may be {@code null}
+     * @return the wording, never {@code null} or empty, without a trailing period
+     */
+    static String describeBuildStatus(DerivedDataStatus status)
+    {
+        if (status == null)
+        {
+            return UNSPECIFIED_BUILD_STATUS;
+        }
+        try
+        {
+            List<String> parts = new ArrayList<>();
+            DerivedDataSegmentBucket stage = status.getActiveStage();
+            if (stage != null)
+            {
+                parts.add("stage " + stage.name()); //$NON-NLS-1$
+            }
+            PipelineStatus pipeline = status.getPipelineStatus();
+            if (pipeline != null)
+            {
+                parts.add("pipeline " + pipeline.name()); //$NON-NLS-1$
+            }
+            if (status.isModelSyncActive())
+            {
+                parts.add("model sync active"); //$NON-NLS-1$
+            }
+            String head = String.join(", ", parts); //$NON-NLS-1$
+            String segments = renderSegments(status.getActivePipelineSegments());
+            if (segments.isEmpty())
+            {
+                return head.isEmpty() ? UNSPECIFIED_BUILD_STATUS : head;
+            }
+            return (head.isEmpty() ? "" : head + "; ") + "computing " + segments; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        catch (RuntimeException e)
+        {
+            Activator.logWarning("Cannot describe the derived-data status for a build in progress: " //$NON-NLS-1$
+                + e);
+            return UNSPECIFIED_BUILD_STATUS;
+        }
+    }
+
+    /**
+     * {@code KEY (remaining of total units remaining)} per segment, in key order so the wording is
+     * deterministic, cut after {@link #MAX_RENDERED_SEGMENTS} with a count of the rest.
+     */
+    private static String renderSegments(Map<String, PipelineSegmentStatus> segments)
+    {
+        if (segments == null || segments.isEmpty())
+        {
+            return ""; //$NON-NLS-1$
+        }
+        TreeMap<String, PipelineSegmentStatus> named = new TreeMap<>();
+        for (Map.Entry<String, PipelineSegmentStatus> segment : segments.entrySet())
+        {
+            if (segment.getKey() != null && segment.getValue() != null)
+            {
+                named.put(segment.getKey(), segment.getValue());
+            }
+        }
+        StringBuilder text = new StringBuilder();
+        int rendered = 0;
+        for (Map.Entry<String, PipelineSegmentStatus> segment : named.entrySet())
+        {
+            if (rendered == MAX_RENDERED_SEGMENTS)
+            {
+                text.append(", ... (+").append(named.size() - rendered).append(" more)"); //$NON-NLS-1$ //$NON-NLS-2$
+                break;
+            }
+            if (rendered > 0)
+            {
+                text.append(", "); //$NON-NLS-1$
+            }
+            PipelineSegmentStatus work = segment.getValue();
+            text.append(segment.getKey()).append(" (").append(work.getRemainingUnitsOfWork()) //$NON-NLS-1$
+                .append(" of ").append(work.getTotalUnitsOfWork()).append(" units remaining)"); //$NON-NLS-1$ //$NON-NLS-2$
+            rendered++;
+        }
+        return text.toString();
     }
 
     /**
@@ -270,13 +631,12 @@ public final class ProjectStateChecker
      * {@code LanguageCheckDerivedDataComputer}, {@code MarkerCleanerDerivedDataComputer} - runs
      * through {@code executeReadonlyTask}. The check bundle contains no read-write BM task at all.
      * <p>
-     * The question is asked through {@code waitImportantDataComputations}, the platform's own wait on
-     * the segments that must be complete during the incremental phase, because that is the ONLY form
-     * of the question that accounts for QUEUED work: it begins with
-     * {@code contextManager.waitAccumulatedContextProcessing}. Inferring readiness from the active
-     * pipeline STAGE does not - a change arriving during a long post-build check enqueues model work
-     * in an earlier bucket while the reported stage stays {@code AFTER_BUILD}. The timeout must stay
-     * POSITIVE: with {@code timeout <= 0} the platform waits on its task condition without a bound.
+     * The question is asked as PURE QUERIES that cannot block - no wait, no job, no claim (see
+     * {@link #isModelDataComputed(IDerivedDataManager)}): {@code isComputed} on the named model
+     * segments, bracketed by two reads of whether a model synchronisation is pending. Inferring
+     * readiness from the active pipeline STAGE is not used - a change arriving during a long
+     * post-build check enqueues model work in an earlier bucket while the reported stage stays
+     * {@code AFTER_BUILD}.
      *
      * @param project the project the caller wants to edit (a {@code null} project skips the check)
      * @return an actionable error, or {@code null} when the model may be edited
@@ -297,14 +657,214 @@ public final class ProjectStateChecker
         if (ddManager == null)
         {
             // Cannot ask: fall back to the strict gate rather than inventing readiness.
-            return buildingErrorOrNull(project);
+            String reload = checkoutReloadErrorOrNull(project);
+            return reload != null ? reload : buildingErrorOrNull(project);
+        }
+        return modelBuildingErrorOrNull(ddManager, project.getName(), ProjectStateChecker::isWorkspaceRefreshPending);
+    }
+
+    /**
+     * Whether Eclipse's automatic workspace refresh has a job running or queued
+     * ({@link org.eclipse.core.resources.ResourcesPlugin#FAMILY_AUTO_REFRESH}).
+     * <p>
+     * Issue #922, measured on the stand with thread dumps: after a branch switch the auto-refresh job takes up the
+     * files the checkout rewrote, and EDT registers their import into the model INSIDE that job's change
+     * notification - for a large change that takes seconds, during which the derived-data pipeline is still empty
+     * and the model still holds the previous branch. EDT's own import job waits for this family before importing
+     * ({@code SynchronizationManager$ImportChangesJob.waitAutoRefreshJobComplete}, EDT 2026.2); the gate asks the
+     * same question. The refresh job is workspace-wide and names no project, so the answer is too - which is why
+     * it is asked only for a project whose reload this server registered ({@link CheckoutReloads}), never for
+     * every write.
+     * <p>
+     * Fail closed: a job manager that cannot be asked counts as a refresh pending.
+     *
+     * @return {@code true} while an automatic refresh job is running, waiting or sleeping
+     */
+    static boolean isWorkspaceRefreshPending()
+    {
+        try
+        {
+            return org.eclipse.core.runtime.jobs.Job.getJobManager()
+                .find(org.eclipse.core.resources.ResourcesPlugin.FAMILY_AUTO_REFRESH).length > 0;
+        }
+        catch (RuntimeException e)
+        {
+            Activator.logError("Cannot read the workspace refresh jobs; treating a refresh as pending", e); //$NON-NLS-1$
+            return true;
+        }
+    }
+
+    /** What a write is refused with while EDT loads a checked-out branch into the model (#922). */
+    static final String LOADING_FROM_DISK_ERROR =
+        "Project is building: EDT is still loading the files a git branch switch rewrote into the model, " //$NON-NLS-1$
+            + "and a write now could be overwritten by that reload. Nothing was changed. " //$NON-NLS-1$
+            + "Please wait and retry."; //$NON-NLS-1$
+
+    /** What a write is refused with while the model or the reference index is computed. */
+    static final String MODEL_COMPUTING_ERROR =
+        "Project is building: the model or the reference index is still being computed. " //$NON-NLS-1$
+            + "Please wait and retry."; //$NON-NLS-1$
+
+    /**
+     * The derived-data half of {@link #modelBuildingErrorOrNull(IProject)}: {@code null} when the model may be
+     * edited, otherwise the refusal - {@link #MODEL_COMPUTING_ERROR} while the model segments are not computed, and,
+     * only for a project whose checkout reload this server registered ({@link CheckoutReloads#isPending}),
+     * {@link #LOADING_FROM_DISK_ERROR} until that reload has been seen finished
+     * ({@link CheckoutReloads#observe}): while a workspace refresh is taking up the rewritten files
+     * ({@link #isWorkspaceRefreshPending()}) or EDT is still importing them
+     * ({@link #isLoadingChangedFiles(IDerivedDataManager)}). Neither signal is specific to a disk import, so an
+     * unregistered project never reads them - an ordinary write is not held back by an unrelated refresh or by its
+     * own derived-data work.
+     *
+     * @param ddManager the project's derived-data manager, never {@code null}
+     * @param projectName the project's name
+     * @param workspaceRefreshPending answers {@link #isWorkspaceRefreshPending()}
+     * @return the refusal, or {@code null}
+     */
+    static String modelBuildingErrorOrNull(IDerivedDataManager ddManager, String projectName,
+        BooleanSupplier workspaceRefreshPending)
+    {
+        String reload = checkoutReloadErrorOrNull(projectName, ddManager, workspaceRefreshPending);
+        if (reload != null)
+        {
+            return reload;
         }
         if (isModelDataComputed(ddManager))
         {
             return null;
         }
-        return "Project is building: the model or the reference index is still being computed. " //$NON-NLS-1$
-            + "Please wait and retry."; //$NON-NLS-1$
+        return MODEL_COMPUTING_ERROR;
+    }
+
+    /**
+     * The checkout-reload half of the write gates: {@link #LOADING_FROM_DISK_ERROR} while a project this server just
+     * switched ({@link CheckoutReloads}) has not been seen finished loading the checked-out branch, {@code null}
+     * otherwise - always {@code null} for any other project. Shared by the model gate
+     * ({@link #modelBuildingErrorOrNull(IProject)}) and by the writers that use the strict gate or a cascade
+     * pre-flight, which do not go through the model gate (#922).
+     *
+     * @param projectName the project the caller wants to write (null/empty skips the check)
+     * @return the refusal, or {@code null}
+     */
+    public static String checkoutReloadErrorOrNull(String projectName)
+    {
+        if (projectName == null || projectName.isEmpty() || !CheckoutReloads.isPending(projectName))
+        {
+            return null;
+        }
+        return checkoutReloadErrorOrNull(ProjectContext.of(projectName).project());
+    }
+
+    /**
+     * Project-addressed {@link #checkoutReloadErrorOrNull(String)}. A project without a started EDT context is left
+     * to the caller's other checks; a context whose derived-data manager cannot be asked counts as loading.
+     *
+     * @param project the project (may be {@code null})
+     * @return the refusal, or {@code null}
+     */
+    public static String checkoutReloadErrorOrNull(IProject project)
+    {
+        if (project == null || !CheckoutReloads.isPending(project.getName()))
+        {
+            return null;
+        }
+        IDtProject dtProject = resolveDtProject(project);
+        if (dtProject == null)
+        {
+            return null;
+        }
+        IDerivedDataManagerProvider ddProvider = Activator.getDefault().getDerivedDataManagerProvider();
+        IDerivedDataManager ddManager = ddProvider == null ? null : ddProvider.get(dtProject);
+        return checkoutReloadErrorOrNull(project.getName(), ddManager, ProjectStateChecker::isWorkspaceRefreshPending);
+    }
+
+    /**
+     * The strict gate of a tool that WRITES into the project's model outside the metadata write tools (it builds
+     * from or writes into the model): the checkout-reload refusal first ({@link #checkoutReloadErrorOrNull(IProject)}),
+     * then {@link #buildingErrorOrNull(IProject)} (#922).
+     *
+     * @param project the project
+     * @return the refusal, or {@code null}
+     */
+    public static String strictWriteErrorOrNull(IProject project)
+    {
+        String reload = checkoutReloadErrorOrNull(project);
+        return reload != null ? reload : buildingErrorOrNull(project);
+    }
+
+    /**
+     * Name-addressed {@link #strictWriteErrorOrNull(IProject)}; a null/empty name skips the check.
+     *
+     * @param projectName the project
+     * @return the refusal, or {@code null}
+     */
+    public static String strictWriteErrorOrNull(String projectName)
+    {
+        String reload = checkoutReloadErrorOrNull(projectName);
+        return reload != null ? reload : buildingErrorOrNull(projectName);
+    }
+
+    /** Seam of {@link #checkoutReloadErrorOrNull(IProject)}; a {@code null} manager counts as loading. */
+    static String checkoutReloadErrorOrNull(String projectName, IDerivedDataManager ddManager,
+        BooleanSupplier workspaceRefreshPending)
+    {
+        if (!CheckoutReloads.isPending(projectName))
+        {
+            return null;
+        }
+        boolean loading = workspaceRefreshPending.getAsBoolean() || ddManager == null
+            || isLoadingChangedFiles(ddManager);
+        return CheckoutReloads.observe(projectName, loading) == CheckoutReloads.State.SETTLED ? null
+            : LOADING_FROM_DISK_ERROR;
+    }
+
+    /**
+     * Whether EDT is still importing files changed on disk into the BM model: work is queued in the derived-data
+     * pipeline AND its active stage is {@code STARTING} or {@code SYNC}. Ordinary derived-data work passes those
+     * stages too, so this is read only for a project whose checkout reload is registered ({@link CheckoutReloads}).
+     * <p>
+     * Issue #922: EDT does not import a changed {@code .mdo} inside the workspace refresh that noticed it. The
+     * refresh's resource listener only schedules the import into the {@code SYNC} stage of the derived-data
+     * pipeline; the import itself replaces the top object in the model later. A write admitted in between lands in
+     * the model the import is about to replace: its export then races the reload, and the reload puts the file's
+     * value back after the write has already answered {@code persisted: true}. The model-segment probe of
+     * {@link #isModelDataComputed(IDerivedDataManager)} cannot see this - the {@code MD} and {@code FORM} segments
+     * still read as computed for the model being replaced - and the cached sync flag is deliberately not trusted
+     * alone (#699).
+     * <p>
+     * The predicate is EDT's own: {@code SynchronizationManager$ImportChangesJob.waitChanges} (EDT 2026.2) treats
+     * the import of a change batch as finished exactly when the pipeline status is {@code EMPTY} or the active stage
+     * is past {@code SYNC}. A stage past {@code SYNC} (the post-build validation of #495 included) is therefore never
+     * refused here.
+     * <p>
+     * Fail closed like the rest of the gate: a {@code null} status or a status read that throws counts as loading.
+     * A status that names no pipeline status or no stage names no import either and counts as not loading.
+     *
+     * @param ddManager the project's derived-data manager
+     * @return {@code true} while an import of changed files is queued or running, or when that cannot be read
+     */
+    static boolean isLoadingChangedFiles(IDerivedDataManager ddManager)
+    {
+        try
+        {
+            DerivedDataStatus status = ddManager.getDerivedDataStatus();
+            if (status == null)
+            {
+                return true;
+            }
+            PipelineStatus pipeline = status.getPipelineStatus();
+            DerivedDataSegmentBucket stage = status.getActiveStage();
+            if (pipeline == null || pipeline == PipelineStatus.EMPTY || stage == null)
+            {
+                return false;
+            }
+            return stage.ordinal() <= DerivedDataSegmentBucket.SYNC.ordinal();
+        }
+        catch (RuntimeException e)
+        {
+            Activator.logError("Cannot read the derived-data status; treating the model as loading", e); //$NON-NLS-1$
+            return true;
+        }
     }
 
     /**
@@ -319,13 +879,90 @@ public final class ProjectStateChecker
         {
             return null;
         }
-        return modelBuildingErrorOrNull(org.eclipse.core.resources.ResourcesPlugin.getWorkspace()
-            .getRoot().getProject(projectName));
+        return modelBuildingErrorOrNull(ProjectContext.of(projectName).project());
+    }
+
+    /** Poll interval of {@link #awaitModelReload(Collection, long)}. */
+    private static final long MODEL_RELOAD_POLL_MS = 100L;
+
+    /**
+     * Waits, bounded by {@code timeoutMs}, until the metadata-write gate ({@link #modelBuildingErrorOrNull(IProject)})
+     * admits every one of {@code projects} - that is, until EDT has loaded the files a checkout changed into each
+     * project's model (#922).
+     * <p>
+     * Every pass asks the gate about EVERY project, so the answer is always the current state: a project admitted
+     * once and refused again later (its import started after an idle sample) is waited for again and named at the
+     * timeout. A registered checkout reload is admitted only after {@link CheckoutReloads#STABLE_MS} of idle
+     * samples, never on one. The wait never runs past {@code timeoutMs}, and a project that is not an EDT project
+     * (the gate admits it) settles at once. The caller decides what an unsettled project means: the write gate
+     * keeps refusing writes into it until it settles, so the wait exists to let the caller report the state
+     * honestly rather than to protect the model.
+     *
+     * @param projects the projects to wait for
+     * @param timeoutMs the bound of the whole wait
+     * @return the names of the projects the gate still refused when the time ran out or the wait was interrupted;
+     *     empty when all settled
+     */
+    public static List<String> awaitModelReload(java.util.Collection<IProject> projects, long timeoutMs)
+    {
+        return awaitModelReload(projects, timeoutMs, ProjectStateChecker::modelBuildingErrorOrNull,
+            ProjectStateChecker::pauseQuietly);
+    }
+
+    /**
+     * Seam of {@link #awaitModelReload(java.util.Collection, long)}: {@code gate} answers the refusal for a project
+     * ({@code null} = settled), {@code pause} sleeps for the given milliseconds and answers {@code false} when it
+     * was interrupted.
+     */
+    static List<String> awaitModelReload(java.util.Collection<IProject> projects, long timeoutMs,
+        java.util.function.Function<IProject, String> gate, java.util.function.LongPredicate pause)
+    {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(Math.max(0L, timeoutMs));
+        List<IProject> all = new ArrayList<>(projects);
+        while (true)
+        {
+            List<String> refused = new ArrayList<>();
+            for (IProject project : all)
+            {
+                if (gate.apply(project) != null)
+                {
+                    refused.add(project.getName());
+                }
+            }
+            if (refused.isEmpty())
+            {
+                return Collections.emptyList();
+            }
+            long leftMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+            if (leftMs <= 0 || !pause.test(Math.min(MODEL_RELOAD_POLL_MS, leftMs)))
+            {
+                return refused;
+            }
+        }
+    }
+
+    private static boolean pauseQuietly(long millis)
+    {
+        try
+        {
+            Thread.sleep(millis);
+            return true;
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     /**
      * Probes whether the platform's IMPORTANT (model and index) computations are complete, without
      * waiting for validation. See {@link #modelBuildingErrorOrNull(IProject)} for why this shape.
+     * <p>
+     * Ready means: no model synchronisation pending (see
+     * {@link #isModelSyncPending(IDerivedDataManager)}), the {@link #MODEL_SEGMENTS} computed, and
+     * still no synchronisation pending after that. The segment check is required in every case -
+     * an empty pipeline never stands in for it.
      *
      * @param ddManager the project's derived-data manager
      * @return {@code true} only when the important computations are proven complete
@@ -334,10 +971,9 @@ public final class ProjectStateChecker
     {
         try
         {
-            // An ACTIVE model synchronisation is tracked separately from the pipeline, so its model
-            // contexts may not be enqueued yet and the segments below would still read as computed
-            // for the PREVIOUS model.
-            if (isModelSyncActive(ddManager))
+            // A model synchronisation with scheduled work may have model contexts the segments below
+            // do not reflect yet, so they could still read as computed for the PREVIOUS model.
+            if (isModelSyncPending(ddManager))
             {
                 return false;
             }
@@ -351,7 +987,8 @@ public final class ProjectStateChecker
             {
                 return false;
             }
-            return !isModelSyncActive(ddManager);
+            // Asked again with the SAME predicate: a synchronisation that began during the probe.
+            return !isModelSyncPending(ddManager);
         }
         catch (RuntimeException e)
         {
@@ -363,23 +1000,51 @@ public final class ProjectStateChecker
     }
 
     /**
-     * Whether the model is being synchronised - or whether that cannot be established, which counts
-     * the same way. Synchronisation is tracked separately from the pipeline, so an active one means
-     * model and index contexts that are not enqueued yet.
+     * Whether a model synchronisation is pending - or whether that cannot be established, which
+     * counts the same way.
+     * <p>
+     * Pending means the CACHED {@code DerivedDataStatus.isModelSyncActive()} is {@code true} AND the
+     * live pipeline is not empty ({@code !isAllComputed()}). The flag alone is not enough (issue
+     * #699): the platform writes it only when derived-data work is scheduled, activated or
+     * recovered, or a computation ends or is unblocked, and the end of a background synchronisation
+     * does not refresh it - so after an import whose work finished while the synchronisation still
+     * counted as active, the flag stays {@code true} with nothing scheduled, and a gate on the flag
+     * alone refused every metadata write until something else scheduled derived-data work.
+     * Synchronisation work, once its contexts are scheduled into the pipeline, both refreshes the
+     * flag and makes the pipeline non-empty, so it is still refused.
+     * <p>
+     * The boundary, stated: the newly admitted window is "flag {@code true}, nothing scheduled in
+     * the pipeline". {@code isAllComputed()} sees only contexts already scheduled into the pipeline,
+     * not those still accumulated in the platform's context manager, so this window covers both a
+     * synchronisation that has not scheduled anything yet and the pauses BETWEEN batches of a
+     * running one (one batch computed, the next still accumulating). Both are the same class of
+     * state the gate already admitted before the flag flips (a synchronisation active with an empty
+     * pipeline). And {@code isAllComputed()} also
+     * covers the post-build validation (#495), so with a stale flag AND a long validation running
+     * the gate stays shut exactly as it did before this change - never worse than the flag alone.
+     * <p>
+     * Fail closed: a {@code null} status, a status read that throws, or a pipeline probe that throws
+     * all count as pending.
      *
      * @param ddManager the project's derived-data manager
-     * @return {@code true} when a synchronisation is active OR the status could not be read
+     * @return {@code true} when a synchronisation with scheduled work is active, OR the status or the
+     *     pipeline state could not be read
      */
-    private static boolean isModelSyncActive(IDerivedDataManager ddManager)
+    private static boolean isModelSyncPending(IDerivedDataManager ddManager)
     {
         try
         {
             DerivedDataStatus status = ddManager.getDerivedDataStatus();
-            return status == null || status.isModelSyncActive();
+            if (status == null)
+            {
+                return true;
+            }
+            return status.isModelSyncActive() && !ddManager.isAllComputed();
         }
         catch (RuntimeException e)
         {
-            Activator.logError("Cannot read the derived-data status; treating it as not ready", e); //$NON-NLS-1$
+            Activator.logError("Cannot read the derived-data status or the pipeline state; " //$NON-NLS-1$
+                + "treating it as not ready", e); //$NON-NLS-1$
             return true;
         }
     }
@@ -393,12 +1058,38 @@ public final class ProjectStateChecker
      */
     public static String checkReadyOrError(IProject project)
     {
-        ProjectStateResult result = checkProjectState(project);
+        return readyOrError(checkProjectState(project));
+    }
+
+    /**
+     * Retry advice is reserved for conditions that may clear without caller intervention. A
+     * {@code .project} description that could not be read is one of them: the read can fail
+     * transiently, and the same input was refused with retry advice before the reasons existed.
+     * Missing, closed, non-EDT and unstarted-context projects are refused without it.
+     */
+    static String readyOrError(ProjectStateResult result)
+    {
         if (result.isReady())
         {
             return null;
         }
-        return result.getMessage() + ". Please wait and retry.";
+        return withRetryRule(result.getReason(), result.getMessage());
+    }
+
+    private static String withRetryRule(NotReadyReason reason, String text)
+    {
+        switch (reason)
+        {
+            case BUILDING:
+            case BUILD_STATE_UNKNOWN:
+            case MANAGER_UNAVAILABLE:
+            case NATURE_UNREADABLE:
+            case CONTEXT_STARTING:
+            case CONTEXT_RESTARTING:
+                return text + ". Please wait and retry."; //$NON-NLS-1$
+            default:
+                return text + "."; //$NON-NLS-1$
+        }
     }
     
     /**
@@ -415,8 +1106,7 @@ public final class ProjectStateChecker
             return null; // No specific project, skip check
         }
         
-        IProject project = org.eclipse.core.resources.ResourcesPlugin.getWorkspace()
-            .getRoot().getProject(projectName);
+        IProject project = ProjectContext.of(projectName).project();
 
         return checkReadyOrError(project);
     }
@@ -431,18 +1121,45 @@ public final class ProjectStateChecker
      * ("Project not found: X"). Use this for a model-mutating or cascade pre-flight where
      * the only state worth refusing for is a transient in-progress build (running the
      * cascade against an incomplete index would silently miss references).
+     * <p>
+     * A registered context that EDT has not started yet needs no case here: the classifier
+     * keeps its derived-data verdict and text, so it is refused exactly while that reads
+     * building - {@code clean_project}, which recovers a stranded context, is gated here too.
      *
      * @param project the IProject to check
      * @return the building message with a retry hint, or {@code null} when not building
      */
     public static String buildingErrorOrNull(IProject project)
     {
-        ProjectStateResult result = checkProjectState(project);
+        return buildingErrorOrNull(checkProjectState(project));
+    }
+
+    /** The admission rule of {@link #buildingErrorOrNull(IProject)} on an already classified state. */
+    static String buildingErrorOrNull(ProjectStateResult result)
+    {
         if (result.getState() == ProjectState.BUILDING)
         {
             return result.getMessage() + ". Please wait and retry."; //$NON-NLS-1$
         }
         return null;
+    }
+
+    /**
+     * Whether {@code project} carries a nature of a project that can own a BM model.
+     *
+     * <p>The permanent, description-level answer to "is this an EDT project at all?", as opposed to
+     * {@link IDtProjectManager#getDtProject(IProject)}, which additionally requires EDT to have
+     * STARTED the project's context. The two together separate an un-started EDT project (nature
+     * yes, DtProject no - recoverable, and worth saying so) from a plain Eclipse project (nature
+     * no - not this plugin's business).
+     *
+     * @param project the project to inspect (may be {@code null})
+     * @return {@code TRUE}/{@code FALSE} when the natures could be read, and {@code null} when they
+     *     could NOT be determined at all - which is never the same statement as "no"
+     */
+    public static Boolean hasBmModelProjectNature(IProject project)
+    {
+        return ProjectContext.hasAnyNature(project, BM_MODEL_PROJECT_NATURES);
     }
 
     /**
@@ -488,8 +1205,7 @@ public final class ProjectStateChecker
         {
             return null;
         }
-        IProject project = org.eclipse.core.resources.ResourcesPlugin.getWorkspace()
-            .getRoot().getProject(projectName);
+        IProject project = ProjectContext.of(projectName).project();
         return settleBeforeCascadeOrError(project, settleTimeoutMs, CascadeEnvironment.DEFAULT,
             operationName, stateStatement);
     }
@@ -515,18 +1231,15 @@ public final class ProjectStateChecker
     static String settleBeforeCascadeOrError(IProject project, long settleTimeoutMs,
         CascadeEnvironment env, String operationName, String stateStatement)
     {
-        if (!project.exists() || !project.isOpen())
+        if (cannotSettle(project, env))
         {
-            // Nothing to drain, and asking anyway can block on a project EDT is still disposing.
-            // A missing / closed project is not this method's error to report either - the caller's
-            // own resolution names the value ("Project not found: X").
             return null;
         }
-        if (Boolean.FALSE.equals(env.hasBmModelProjectNature(project)))
+        // A cascade into a project this server just switched would run against the previous branch's model (#922).
+        String reload = env.checkoutReloadErrorOrNull(project);
+        if (reload != null)
         {
-            // This is permanently outside EDT; let the caller's project/configuration validation
-            // produce its established error instead of advising a retry that can never succeed.
-            return null;
+            return reload;
         }
         long deadline = System.currentTimeMillis() + settleTimeoutMs;
         // A cascade is not confined to the named project: a rename builds one refactoring per
@@ -552,6 +1265,11 @@ public final class ProjectStateChecker
                 env.waitForDerivedData(project, remaining);
             }
             List<IProject> participants = findParticipants(project, env);
+            String participantReload = participantReloadError(participants, env);
+            if (participantReload != null)
+            {
+                return participantReload;
+            }
             lastNewParticipant = rememberNewParticipants(participants,
                 discoveredParticipantNames);
             discoveredNewParticipantThisPass = lastNewParticipant != null;
@@ -622,6 +1340,17 @@ public final class ProjectStateChecker
             }
             List<IProject> unserved = findUnsettledParticipants(participants,
                 settledParticipantNames);
+            // The admission re-reads the reload state of the base AND of every participant: the base check before the
+            // loop is minutes old by now, and a switch of the base by this server meanwhile must not be admitted.
+            String refreshedReload = env.checkoutReloadErrorOrNull(project);
+            if (refreshedReload == null)
+            {
+                refreshedReload = participantReloadError(participants, env);
+            }
+            if (refreshedReload != null)
+            {
+                return refreshedReload;
+            }
             if (refreshedBuilding == null && unserved.isEmpty())
             {
                 return null;
@@ -892,9 +1621,8 @@ public final class ProjectStateChecker
                         // the two views disagree about is not classifiable at all.
                         return SearchDependenciesResult.undetermined();
                     }
-                    // An external-objects project is legitimately UNLINKED: create_project REJECTS
-                    // baseProjectName for that kind, so this is the state such a project is CREATED
-                    // in. Without a parent it has no base-configuration scope and can therefore hold
+                    // An external-objects project is legitimately UNLINKED when created without
+                    // baseProjectName. Without a parent it has no base-configuration scope and can therefore hold
                     // no reference to a base-configuration object, which makes it genuinely
                     // unrelated. Failing closed here instead would hand every workspace that merely
                     // has one open the workspace-wide scan this scoping exists to avoid.
@@ -1003,6 +1731,81 @@ public final class ProjectStateChecker
         }
     }
 
+    /**
+     * Waits within a caller-owned budget for every reference-search project to be ready.
+     * Must run outside the UI thread: derived-data work can need that thread to progress.
+     *
+     * @param projectName the base project name
+     * @param budgetMs the total polling budget in milliseconds
+     * @return the last dependency/readiness snapshot, including an incomplete one on expiry
+     */
+    public static SearchDependenciesResult awaitSearchScopeReady(String projectName, long budgetMs)
+    {
+        if (projectName == null || projectName.isEmpty())
+        {
+            return SearchDependenciesResult.undetermined();
+        }
+        IProject project;
+        try
+        {
+            project = ProjectContext.of(projectName).project();
+        }
+        catch (RuntimeException e)
+        {
+            // A name the workspace cannot even form a handle for is the caller's validation error to
+            // report; the settle runs before that validation and must not pre-empt it.
+            return SearchDependenciesResult.undetermined();
+        }
+        return awaitSearchScopeReady(project, budgetMs, CascadeEnvironment.DEFAULT);
+    }
+
+    /**
+     * Package-visible polling seam; the snapshot predicate itself never waits.
+     * <p>
+     * A base that can never become ready (missing, closed, or permanently outside EDT - see
+     * {@link #cannotSettle(IProject, CascadeEnvironment)}) gets one snapshot and no wait: the
+     * settle runs BEFORE the caller's project validation, so waiting here would only put the full
+     * budget in front of an error the caller reports instantly ("Project not found: X").
+     */
+    static SearchDependenciesResult awaitSearchScopeReady(IProject base, long budgetMs,
+        CascadeEnvironment env)
+    {
+        if (env == null || cannotSettle(base, env))
+        {
+            return determineSearchDependencies(base, env);
+        }
+        long deadline = System.currentTimeMillis() + Math.max(0L, budgetMs);
+        while (true)
+        {
+            SearchDependenciesResult snapshot = determineSearchDependencies(base, env);
+            if (snapshot.isAllReady())
+            {
+                return snapshot;
+            }
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0L || env == null
+                || !env.waitBeforeModelRetry(Math.min(MODEL_REGISTRATION_POLL_MS, remaining)))
+            {
+                return snapshot;
+            }
+        }
+    }
+
+    /**
+     * Whether waiting for {@code project} to settle is pointless because it can never become ready:
+     * it is missing, closed, or permanently outside EDT (its description carries no BM-model
+     * nature). An unreadable description ({@code null}) is not proof of "outside EDT", so such a
+     * project is still waited for. Asking a missing or closed project anyway can also block on a
+     * project EDT is still disposing. None of these is the settle's error to report: the caller's
+     * own resolution names the value ("Project not found: X") instead of advising a retry that can
+     * never succeed.
+     */
+    private static boolean cannotSettle(IProject project, CascadeEnvironment env)
+    {
+        return project == null || !project.exists() || !project.isOpen()
+            || Boolean.FALSE.equals(env.hasBmModelProjectNature(project));
+    }
+
     /** Immutable search membership, extension-subset, and readiness snapshot. */
     public static final class SearchDependenciesResult
     {
@@ -1084,6 +1887,26 @@ public final class ProjectStateChecker
             return extensionProjects != null ? extensionProjects : Collections.emptyList();
         }
 
+        /** @return captured readiness in snapshot order, or an empty map when undetermined */
+        public Map<String, ProjectState> getReadiness()
+        {
+            return readiness != null ? readiness : Collections.emptyMap();
+        }
+
+        /** @return only non-ready project names, in snapshot order; empty when undetermined */
+        public List<String> getNotReadyProjectNames()
+        {
+            List<String> names = new ArrayList<>();
+            for (Map.Entry<String, ProjectState> entry : getReadiness().entrySet())
+            {
+                if (entry.getValue() != ProjectState.READY)
+                {
+                    names.add(entry.getKey());
+                }
+            }
+            return names;
+        }
+
         /** @return captured project names, or an empty set when undetermined */
         public Set<String> getProjectNames()
         {
@@ -1109,6 +1932,23 @@ public final class ProjectStateChecker
             }
             return Collections.unmodifiableSet(names);
         }
+    }
+
+    /**
+     * The checkout-reload refusal for the first cascade participant this server just switched, or {@code null}: the
+     * refactoring writes into every participant, so each must have taken in its checkout (#922).
+     */
+    private static String participantReloadError(List<IProject> participants, CascadeEnvironment env)
+    {
+        for (IProject participant : participants)
+        {
+            String reload = env.checkoutReloadErrorOrNull(participant);
+            if (reload != null)
+            {
+                return "Project '" + participant.getName() + "' takes part in this cascade. " + reload; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        return null;
     }
 
     private static List<IProject> findParticipants(IProject base, CascadeEnvironment env)
@@ -1145,8 +1985,7 @@ public final class ProjectStateChecker
     private static List<IProject> getOpenNatureProjects(List<String> natureIds)
     {
         List<IProject> result = new ArrayList<>();
-        for (IProject candidate : org.eclipse.core.resources.ResourcesPlugin.getWorkspace()
-            .getRoot().getProjects())
+        for (IProject candidate : ProjectContext.allProjects())
         {
             if (!candidate.exists() || !candidate.isOpen())
             {
@@ -1266,6 +2105,15 @@ public final class ProjectStateChecker
         /** Waits before another BM-model resolution attempt; {@code false} means the wait was interrupted. */
         boolean waitBeforeModelRetry(long timeoutMs);
 
+        /**
+         * The checkout-reload refusal for {@code project} ({@link ProjectStateChecker#checkoutReloadErrorOrNull(IProject)}),
+         * or {@code null}.
+         */
+        default String checkoutReloadErrorOrNull(IProject project)
+        {
+            return ProjectStateChecker.checkoutReloadErrorOrNull(project);
+        }
+
         /** Delegates to the live, {@code Activator}-backed EDT services. */
         CascadeEnvironment DEFAULT = new CascadeEnvironment()
         {
@@ -1278,8 +2126,7 @@ public final class ProjectStateChecker
                 {
                     return result;
                 }
-                for (IProject candidate : org.eclipse.core.resources.ResourcesPlugin.getWorkspace()
-                    .getRoot().getProjects())
+                for (IProject candidate : ProjectContext.allProjects())
                 {
                     if (candidate.exists() && candidate.isOpen()
                         && dtProjectManager.getDtProject(candidate) != null)
@@ -1352,7 +2199,7 @@ public final class ProjectStateChecker
             @Override
             public Boolean hasBmModelProjectNature(IProject project)
             {
-                return ProjectContext.hasAnyNature(project, BM_MODEL_PROJECT_NATURES);
+                return ProjectStateChecker.hasBmModelProjectNature(project);
             }
 
             @Override
@@ -1392,8 +2239,7 @@ public final class ProjectStateChecker
         {
             return null;
         }
-        IProject project = org.eclipse.core.resources.ResourcesPlugin.getWorkspace()
-            .getRoot().getProject(projectName);
+        IProject project = ProjectContext.of(projectName).project();
         return buildingErrorOrNull(project);
     }
 }

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * MCP Server for EDT
  * Copyright (C) 2026 Diversus (https://github.com/Diversus23)
  * Licensed under AGPL-3.0-or-later
@@ -8,6 +8,7 @@ package com.ditrix.edt.mcp.server.utils;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
 import org.eclipse.emf.common.util.EMap;
@@ -31,8 +32,146 @@ public final class SubsystemUtils
      */
     private static final String SUBSYSTEM_TOKEN = "Subsystem"; //$NON-NLS-1$
 
+    /** The sentence {@link #addressingHint()} returns. */
+    private static final String ADDRESSING_HINT = "A top-level subsystem is addressed as 'Subsystem.<Name>' and " //$NON-NLS-1$
+        + "a nested one by its whole chain from a top-level subsystem, with a type token before every name " //$NON-NLS-1$
+        + "('Subsystem.<Parent>.Subsystem.<Child>', any depth; the tokens may be English or Russian) - " //$NON-NLS-1$
+        + "list_subsystems lists the existing ones in exactly that form"; //$NON-NLS-1$
+
     private SubsystemUtils()
     {
+    }
+
+    /**
+     * How a subsystem is addressed: the one sentence the subsystem refusals listed here share, so they
+     * cannot drift into teaching different forms (a command-interface refusal keeps its own text: it
+     * teaches a section address, not a subsystem). It is appended by
+     * {@code adopt_metadata_object}'s "not found", by {@code get_metadata_details}' rows for a missing
+     * and for a malformed chain, by {@code delete_metadata}'s nested-chain miss and its subsystem
+     * node-not-found, and by {@link #notFoundMessage} - the "subsystem not found" of
+     * {@code modify_metadata} and {@code get_subsystem_content}. It has no final period: each refusal
+     * ends it the way the rest of its own text ends.
+     *
+     * <p>Every clause holds wherever it is appended: each of those tools resolves a chain through
+     * {@link #parseSubsystemPath}, which takes a type token before every name in either language,
+     * and {@code list_subsystems} prints every chain in the canonical English form. It does NOT
+     * point at {@code get_metadata_objects}: that tool lists top-level subsystems only.</p>
+     *
+     * <p>A method, not a public constant, on purpose: a String constant is compiled INTO every class
+     * that reads it, so a consumer compiled before the sentence changed would go on refusing with the
+     * old text - one more copy, only in bytecode.</p>
+     *
+     * @return the sentence, without a final period
+     */
+    public static String addressingHint()
+    {
+        return ADDRESSING_HINT;
+    }
+
+    /**
+     * The refusal of a subsystem address that resolves to no subsystem: the address as the caller
+     * wrote it, then how subsystems are addressed ({@link #addressingHint()}). The one text of
+     * {@code modify_metadata}'s and {@code get_subsystem_content}'s "subsystem not found".
+     *
+     * @param fqn the requested address, as written
+     * @return the refusal message
+     */
+    public static String notFoundMessage(String fqn)
+    {
+        return "Subsystem not found: " + fqn + ". " + addressingHint() + "."; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /** How many same-named nested subsystems {@link #nestedNamesakesHint} spells out; the rest is counted. */
+    static final int MAX_NAMESAKES_LISTED = 5;
+
+    /**
+     * The sentence to append to a "not found" of a SHORT subsystem address ({@code Subsystem.<Name>}, either
+     * language) when no top-level subsystem carries the name but nested ones do: their whole chains, so the
+     * caller learns that the subsystem exists and how it is addressed (issue #929). The short address is
+     * never resolved to one of them - same-named subsystems can live under different parents, and a bare
+     * child name is not guessed ({@link #resolveInScope}).
+     *
+     * <p>Empty (never {@code null}) for anything else - an address that is not a short subsystem address,
+     * one that names a top-level subsystem, a root with no subsystem of that name, an external-objects
+     * project - so a caller appends it unconditionally. Names match by the descent's rule
+     * ({@link #nameMatches}); the walk follows each subsystem's {@code subsystems} list, stops at a proxy and
+     * at a repeat, so a broken, cyclic model cannot keep it going.</p>
+     *
+     * @param scope the resolution root (may be {@code null})
+     * @param fqn the normalized address that did not resolve (may be {@code null})
+     * @return the hint with a leading space, or an empty string
+     */
+    public static String nestedNamesakesHint(MetadataScope scope, String fqn)
+    {
+        String[] names = parseSubsystemPath(fqn);
+        if (names == null || names.length != 1 || scope == null || scope.isExternalObjects()
+            || scope.configuration() == null || resolveInScope(scope, names) != null)
+        {
+            return ""; //$NON-NLS-1$
+        }
+        // The yo-normalized (ye) reading too: create_metadata stores ye for yo by default, and the nested
+        // writes resolve that spelling (#929 review). A top-level subsystem it names is no miss to explain.
+        String yoName = MetadataNodeResolver.yoRetryFqn(names[0]);
+        if (yoName != null && resolveInScope(scope, new String[] { yoName }) != null)
+        {
+            return ""; //$NON-NLS-1$
+        }
+        List<String> chains = new ArrayList<>();
+        Set<Subsystem> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        int[] found = { 0 };
+        for (Subsystem top : scope.configuration().getSubsystems())
+        {
+            if (top != null && !top.eIsProxy() && seen.add(top))
+            {
+                List<String> path = new ArrayList<>();
+                path.add(top.getName());
+                collectNamesakes(top.getSubsystems(), names[0], yoName, path, seen, chains, found);
+            }
+        }
+        if (found[0] == 0)
+        {
+            return ""; //$NON-NLS-1$
+        }
+        StringBuilder sb = new StringBuilder(" No top-level subsystem is named '").append(names[0]) //$NON-NLS-1$
+            .append(found[0] == 1 ? "', but a nested one is: " : "', but nested ones are: ") //$NON-NLS-1$ //$NON-NLS-2$
+            .append(String.join(", ", chains)); //$NON-NLS-1$
+        if (found[0] > chains.size())
+        {
+            sb.append(" and ").append(found[0] - chains.size()).append(" more"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return sb.append(". Address a nested subsystem by its whole chain.").toString(); //$NON-NLS-1$
+    }
+
+    /**
+     * Depth-first: the chains of the subsystems below {@code path} named {@code name} - or its yo-normalized
+     * reading {@code yoName}, when there is one - the first few spelled. Every matching chain is counted;
+     * none is chosen.
+     */
+    private static void collectNamesakes(Iterable<Subsystem> level, String name, String yoName, List<String> path,
+        Set<Subsystem> seen, List<String> chains, int[] found)
+    {
+        if (level == null)
+        {
+            return;
+        }
+        for (Subsystem candidate : level)
+        {
+            if (candidate == null || candidate.eIsProxy() || !seen.add(candidate))
+            {
+                continue;
+            }
+            path.add(candidate.getName());
+            if (nameMatches(name, candidate.getName()) || nameMatches(yoName, candidate.getName()))
+            {
+                found[0]++;
+                if (chains.size() < MAX_NAMESAKES_LISTED)
+                {
+                    chains.add(chainFqn(path.toArray(new String[0]), path.size()));
+                }
+            }
+            collectNamesakes(candidate.getSubsystems(), name, yoName, path, seen, chains, found);
+            path.remove(path.size() - 1);
+        }
     }
 
     /**
@@ -174,6 +313,63 @@ public final class SubsystemUtils
     }
 
     /**
+     * Whether {@code fqn} is addressed AS a subsystem chain: a subsystem type token (either language)
+     * followed by more than its one name - whether or not the rest parses as a chain. This is the gate a
+     * write classifies an address by, deliberately independent of {@link #nestedChain}: an address
+     * that goes on past {@code Subsystem.<Name>} but is not a whole chain ({@code Subsystem.A..Subsystem.B},
+     * {@code Subsystem.A.Catalog.B}, {@code Subsystem.A.Subsystem}, a stray trailing '.') still asks for
+     * a subsystem below {@code A}, and must be refused by naming what is wrong with it
+     * ({@link #malformedChainError}) rather than reach a generic "not found" - or, through a tolerant
+     * lookup, act on {@code A} itself.
+     *
+     * <p>Below a subsystem nothing but a nested subsystem has an address, with one exception: its
+     * command interface ({@code Subsystem.<Name>(.Subsystem.<Name>)*.CommandInterface}, see
+     * {@link CommandInterfaceAddress}), which is therefore not a chain request.</p>
+     *
+     * @param fqn the requested address (may be {@code null})
+     * @return {@code true} for an address that asks for a subsystem below a top-level one
+     */
+    public static boolean isChainRequest(String fqn)
+    {
+        if (fqn == null)
+        {
+            return false;
+        }
+        String[] segments = fqn.split("\\.", -1); //$NON-NLS-1$
+        return segments.length > 2 && isSubsystemTypeToken(segments[0]) && CommandInterfaceAddress.parse(fqn) == null;
+    }
+
+    /**
+     * The refusal of a subsystem chain request ({@link #isChainRequest}) that is not a well-formed chain,
+     * or {@code null} for a well-formed chain and for any address that is not a chain request. One rule
+     * for every write that takes a chain: an empty or padded segment is refused by
+     * {@link #malformedSegmentError}; any other request that does not parse as a whole chain - a foreign
+     * kind token at a level, a level without its name - is refused as not a subsystem address.
+     *
+     * @param fqn the requested address (may be {@code null})
+     * @return the refusal message naming what is wrong, or {@code null}
+     */
+    public static String malformedChainError(String fqn)
+    {
+        if (!isChainRequest(fqn))
+        {
+            return null; // NOSONAR null is a deliberate signal (omit/sentinel), not an empty collection
+        }
+        String segment = malformedSegmentError(fqn);
+        if (segment != null)
+        {
+            return segment;
+        }
+        if (nestedChain(fqn) != null)
+        {
+            return null; // NOSONAR null is a deliberate signal (omit/sentinel), not an empty collection
+        }
+        return "The address '" + fqn + "' is not a subsystem address: below a subsystem only a nested " //$NON-NLS-1$ //$NON-NLS-2$
+            + "subsystem has an address, and every level carries its own type token and name. " //$NON-NLS-1$
+            + addressingHint() + "."; //$NON-NLS-1$
+    }
+
+    /**
      * Resolves the subsystem addressed by the FIRST {@code depth} names of a parsed chain.
      *
      * <p>The PREFIX overload exists so a caller that has to address the PARENT of a chain - a
@@ -227,6 +423,166 @@ public final class SubsystemUtils
             sb.append(SUBSYSTEM_TOKEN).append('.').append(names[i]);
         }
         return sb.toString();
+    }
+
+    /**
+     * The subsystem a parsed chain addresses in a project's resolution root: the subsystem at the
+     * chain's LAST level, or {@code null} when any level is missing - never one of its parents. A
+     * single name addresses a top-level subsystem only: same-named children can live under different
+     * parents, so a bare child name is not guessed.
+     *
+     * <p>Asked of the SCOPE because an external-objects project holds no subsystems: the
+     * configuration its scope carries is the linked BASE one, which is never a resolution root there
+     * (issue #309), so a chain resolves to nothing rather than to a subsystem of another project.</p>
+     *
+     * @param scope the resolution root (may be {@code null})
+     * @param names the parsed chain of subsystem names (see {@link #parseSubsystemPath})
+     * @return the subsystem, or {@code null} when the chain does not resolve in this root
+     */
+    public static Subsystem resolveInScope(MetadataScope scope, String[] names)
+    {
+        if (scope == null || scope.isExternalObjects() || names == null)
+        {
+            return null;
+        }
+        return resolveByPath(scope.configuration(), names, names.length);
+    }
+
+    /**
+     * Walks up from a subsystem along its own {@code parentSubsystem} references - the persisted
+     * back-reference EDT keeps on a nested subsystem (a top-level one has none) - and returns what a
+     * caller reads off that one walk: the subsystems above it, the canonical chain that names it, and
+     * whether an address is that chain ({@link Lineage#spells}).
+     *
+     * <p>The walk stops at an unresolved proxy (it is no attached object to ask anything) and at a
+     * repeat, so a broken, cyclic model cannot keep it going. Only a walk that ran out of parents
+     * reached a top-level subsystem: one cut short has seen part of the chain, and the levels it did
+     * see would spell some other, shorter address - so it names nothing.</p>
+     *
+     * <p>Even a walk that reached the top reads the back-references, not the parents' own
+     * {@code subsystems} lists an address is resolved DOWN by, and in a broken model the two can
+     * disagree. A caller that names a subsystem it resolved by an address therefore uses the chain
+     * only when the lineage spells that address ({@link Lineage#spells}).</p>
+     *
+     * @param leaf the subsystem (may be {@code null})
+     * @return the lineage, never {@code null}
+     */
+    public static Lineage lineage(Subsystem leaf)
+    {
+        if (leaf == null)
+        {
+            return new Lineage(Collections.emptyList(), null, null);
+        }
+        List<Subsystem> ancestors = new ArrayList<>();
+        Set<Subsystem> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        seen.add(leaf);
+        Subsystem parent = leaf.getParentSubsystem();
+        while (parent != null && !parent.eIsProxy() && seen.add(parent))
+        {
+            ancestors.add(parent);
+            parent = parent.getParentSubsystem();
+        }
+        String[] names = null;
+        String chain = null;
+        if (parent == null)
+        {
+            names = new String[ancestors.size() + 1];
+            for (int i = 0; i < ancestors.size(); i++)
+            {
+                names[ancestors.size() - 1 - i] = ancestors.get(i).getName();
+            }
+            names[ancestors.size()] = leaf.getName();
+            chain = chainFqn(names, names.length);
+        }
+        return new Lineage(Collections.unmodifiableList(ancestors), names, chain);
+    }
+
+    /**
+     * What {@link #lineage} read off a subsystem: the subsystems above it and, when the walk reached
+     * a top-level subsystem, the STORED name of every level, top first.
+     */
+    public static final class Lineage
+    {
+        private final List<Subsystem> ancestors;
+        /** The stored names of the levels, top first; {@code null} when the walk was cut short. */
+        private final String[] storedNames;
+        private final String chainFqn;
+
+        private Lineage(List<Subsystem> ancestors, String[] storedNames, String chainFqn)
+        {
+            this.ancestors = ancestors;
+            this.storedNames = storedNames;
+            this.chainFqn = chainFqn;
+        }
+
+        /**
+         * The subsystems above the leaf, nearest first; empty for a top-level subsystem, and short
+         * of the top when the walk was cut short (see {@link SubsystemUtils#lineage}).
+         *
+         * @return the ancestors, unmodifiable; never {@code null}
+         */
+        public List<Subsystem> ancestors()
+        {
+            return ancestors;
+        }
+
+        /**
+         * The leaf's canonical address - {@code Subsystem.<Top>...Subsystem.<Leaf>}, every level by
+         * its STORED name and the English token, exactly what {@code list_subsystems} prints - or
+         * {@code null} when the walk did not reach a top-level subsystem. It is the leaf's address
+         * only as far as the back-references are right: a caller that resolved the leaf by an
+         * address asks {@link #spells} before it names the leaf by this chain.
+         *
+         * @return the chain FQN, or {@code null}
+         */
+        public String chainFqn()
+        {
+            return chainFqn;
+        }
+
+        /**
+         * Whether the walk spells the address {@code names}: it reached a top-level subsystem, it has
+         * as many levels as {@code names}, and the STORED name of every level - the top one and the
+         * leaf included - matches the addressed name at the same depth by the one rule the descent
+         * ({@link SubsystemUtils#resolveByPath}) matches a level with: surrounding whitespace of the
+         * addressed name ignored, letter case ignored. A level that stores no name matches no
+         * addressed name.
+         *
+         * <p>An address resolves DOWN by name, along each parent's {@code subsystems} list; this walk
+         * read the levels back UP, along the {@code parentSubsystem} back-references. In a sound model
+         * the two are one path. In a broken one a back-reference can name another subsystem of the
+         * same depth - {@code Sales} lists {@code Stray}, whose parent link is {@code Planning} - and
+         * the chain then spells another address, which names a different subsystem or none. The
+         * level count cannot tell the two apart; the names it walked through can.</p>
+         *
+         * <p>It compares names, not subsystems: whether the walk met the very objects the descent did
+         * is not asked. Under matching names the walk can still have passed through another object -
+         * a sibling whose name differs in letter case alone (a clash 1C does not allow), or a
+         * same-named subsystem the parent's {@code subsystems} list does not hold - and the chain
+         * still resolves back to this subsystem: it is spelled by names, at every level the descent
+         * takes the first listed sibling that matches, and a stored name that matches the addressed
+         * one matches the same siblings it does.</p>
+         *
+         * @param names the addressed names, top first (see {@link SubsystemUtils#parseSubsystemPath});
+         *     may be {@code null}
+         * @return {@code true} when {@link #chainFqn()} is the canonical spelling of that very
+         *     address; {@code false} otherwise - always for a walk cut short and for {@code null}
+         */
+        public boolean spells(String[] names)
+        {
+            if (storedNames == null || names == null || names.length != storedNames.length)
+            {
+                return false;
+            }
+            for (int i = 0; i < storedNames.length; i++)
+            {
+                if (!nameMatches(names[i], storedNames[i]))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
     }
 
     /**
@@ -446,14 +802,28 @@ public final class SubsystemUtils
         {
             return null;
         }
-        String trimmed = name.trim();
         for (Subsystem child : children)
         {
-            if (trimmed.equalsIgnoreCase(child.getName()))
+            if (nameMatches(name, child.getName()))
             {
                 return child;
             }
         }
         return null;
+    }
+
+    /**
+     * The ONE rule by which a subsystem's stored Name matches a level of an address: the addressed
+     * name without its surrounding whitespace, letter case ignored. The descent ({@link #findChild})
+     * and the check of the walk back up ({@link Lineage#spells}) both match a level by it, so they
+     * cannot drift apart: a level the descent walked through is a level the check accepts.
+     *
+     * @param addressed the name as the address carries it (may be {@code null})
+     * @param stored the Name the subsystem stores (may be {@code null})
+     * @return whether they name the same level; {@code false} when either is {@code null}
+     */
+    private static boolean nameMatches(String addressed, String stored)
+    {
+        return addressed != null && addressed.trim().equalsIgnoreCase(stored);
     }
 }

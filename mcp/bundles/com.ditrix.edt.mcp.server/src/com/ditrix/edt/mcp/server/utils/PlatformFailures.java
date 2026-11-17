@@ -13,6 +13,7 @@ import java.util.regex.Pattern;
 
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IStatus;
+import org.eclipse.debug.core.DebugException;
 
 import com.e1c.g5.dt.applications.ApplicationException;
 
@@ -40,13 +41,14 @@ import com.e1c.g5.dt.applications.ApplicationException;
  * returns the first non-blank message it finds. When the whole failure genuinely carries no text
  * it says so, naming the exception type and the status severity, because "CANCEL, no message" is
  * itself the diagnosis: something aborted the operation rather than failing it.
+ * Debug failures prefer the status's own exception message before the wrapper or child text.
  *
  * <p>{@link #rootCause(Throwable)} answers a separate, complementary question: after
  * {@code describe} has selected the headline, what does the deepest distinct bounded
  * {@code getCause()} hop say? Child statuses are aggregate detail and are interpreted only by the
- * per-hop selection rule at their owning throwable. Callers that need both compose them explicitly;
- * the root-cause helper does not change {@code describe}'s established selection rule or invent an
- * ordering among aggregate statuses.
+ * per-hop selection rule at their owning throwable. {@link #describeStatus(IStatus)} composes both
+ * for status callers without changing {@code describe}'s selection rule or inventing an ordering
+ * among aggregate statuses.
  *
  * <p>{@link #withoutObjectIdentity(String)} answers a SEPARATE question and is meant to be
  * COMPOSED with {@code describe}, never substituted for it. {@code describe} selects the most
@@ -148,8 +150,8 @@ public final class PlatformFailures
      * {@code getCause()} chain. As a known limitation, a plain {@code MultiStatus} with no exception of
      * its own contributes no cause clause, even when its children carry one.
      *
-     * <p>This method returns only the diagnosis. A caller that displays both messages should compose
-     * English prose such as {@code describe(failure) + " Caused by: " + rootCause(failure)}.
+     * <p>This method returns only the diagnosis; {@link #describeStatus(IStatus)} composes it with
+     * the headline for status callers.
      *
      * @param failure the exception to inspect (may be {@code null})
      * @return the deepest distinct diagnosis, or the empty string when there is no additional text
@@ -180,6 +182,31 @@ public final class PlatformFailures
             current = current.getCause();
         }
         return deepest;
+    }
+
+    /** Describes a failure and appends its deepest distinct cause when one exists. */
+    public static String describeWithRootCause(Throwable failure)
+    {
+        String headline = describe(failure);
+        String cause = rootCause(failure);
+        return appendRootCause(headline, cause);
+    }
+
+    /** Describes a status and appends its deepest distinct cause when one exists. */
+    public static String describeStatus(IStatus status)
+    {
+        if (status == null)
+        {
+            return describe((Throwable)null);
+        }
+        return describeWithRootCause(new CoreException(status));
+    }
+
+    /** Appends a cause only when it adds information beyond the headline. */
+    private static String appendRootCause(String headline, String cause)
+    {
+        return cause.isEmpty() || headline.equals(cause)
+            ? headline : headline + " Caused by: " + cause; //$NON-NLS-1$
     }
 
     /**
@@ -218,6 +245,15 @@ public final class PlatformFailures
             boolean allowNonFailingChildren)
     {
         IStatus status = statusOf(failure);
+        if (failure instanceof DebugException && status != null)
+        {
+            Throwable carried = status.getException();
+            String carriedMessage = carried == null ? null : trimToNull(carried.getMessage());
+            if (carriedMessage != null)
+            {
+                return new FailureMessage(carriedMessage, null);
+            }
+        }
         if (hasChildren(status))
         {
             String fromChildren = statusMessage(status, 0, allowNonFailingChildren);
@@ -344,6 +380,12 @@ public final class PlatformFailures
         // loop, and recursing into it here could bounce between a status and its exception.
         String carriedMessage = carried == null ? null : trimToNull(carried.getMessage());
         return carriedMessage != null && filter.test(carriedMessage) ? carriedMessage : null;
+    }
+
+    /** Returns whether the entire text is one Java object identity. */
+    public static boolean isObjectIdentity(String text)
+    {
+        return text != null && OBJECT_IDENTITY.matcher(text).matches();
     }
 
     /**

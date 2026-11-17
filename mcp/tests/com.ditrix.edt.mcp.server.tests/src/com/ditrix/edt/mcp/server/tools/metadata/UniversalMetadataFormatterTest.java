@@ -8,11 +8,14 @@ package com.ditrix.edt.mcp.server.tools.metadata;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import com._1c.g5.v8.dt.mcore.CommandGroupCategory;
 import com._1c.g5.v8.dt.mcore.McoreFactory;
+import com._1c.g5.v8.dt.mcore.StandardCommandGroup;
 import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.metadata.mdclass.Catalog;
@@ -20,9 +23,11 @@ import com._1c.g5.v8.dt.metadata.mdclass.CatalogAttribute;
 import com._1c.g5.v8.dt.metadata.mdclass.CatalogCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.CatalogForm;
 import com._1c.g5.v8.dt.metadata.mdclass.CatalogTabularSection;
+import com._1c.g5.v8.dt.metadata.mdclass.CommandGroup;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonAttribute;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonAttributeContentItem;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonAttributeUse;
+import com._1c.g5.v8.dt.metadata.mdclass.CommonCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.FormType;
 import com._1c.g5.v8.dt.metadata.mdclass.Indexing;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassFactory;
@@ -107,10 +112,10 @@ public class UniversalMetadataFormatterTest
     // ==================== format() null / header guards ====================
 
     @Test
-    public void testFormatNullReturnsErrorString()
+    public void testFormatNullReturnsTypedFailure()
     {
-        // The null guard must return a stable error sentinel, never NPE.
-        assertEquals("Error: MdObject is null", f.format(null, false, EN)); //$NON-NLS-1$
+        assertEquals("MdObject is null", f.formatOutcome(null, false, EN).error());
+        org.junit.Assert.assertThrows(IllegalArgumentException.class, () -> f.format(null, false, EN)); //$NON-NLS-1$
     }
 
     @Test
@@ -149,7 +154,7 @@ public class UniversalMetadataFormatterTest
             md.contains("| Name | Synonym | Type |")); //$NON-NLS-1$
         assertTrue("compact table has a 3-col separator", md.contains("|---|---|---|\n")); //$NON-NLS-1$
         assertTrue("the Price row shows its type name", md.contains("| Price | Price | Number |")); //$NON-NLS-1$
-        assertTrue("the Note row shows its type name", md.contains("| Note | Note | String |")); //$NON-NLS-1$
+        assertTrue("the Note row shows its type name", md.contains("| Note | Note | String(unlimited) |")); //$NON-NLS-1$
         // No extended columns in compact mode.
         assertFalse("compact mode must not emit the Indexing column", md.contains("Indexing")); //$NON-NLS-1$
     }
@@ -256,6 +261,102 @@ public class UniversalMetadataFormatterTest
             md.contains("| Refill | Refill | - |")); //$NON-NLS-1$
     }
 
+    // A command's group is printed as modify_metadata takes it (issue #733), not as the group's first
+    // enum attribute: that is a configuration group's objectBelonging (Native) and a standard group's
+    // category, which every group of one panel shares.
+
+    /** A catalog with one command {@code Refill} placed in {@code group}. */
+    private static Catalog catalogWithCommandIn(com._1c.g5.v8.dt.mcore.CommandGroup group)
+    {
+        Catalog cat = MdClassFactory.eINSTANCE.createCatalog();
+        cat.setName("Cat"); //$NON-NLS-1$
+        CatalogCommand cmd = MdClassFactory.eINSTANCE.createCatalogCommand();
+        cmd.setName("Refill"); //$NON-NLS-1$
+        cmd.getSynonym().put(EN, "Refill"); //$NON-NLS-1$
+        cmd.setGroup(group);
+        cat.getCommands().add(cmd);
+        return cat;
+    }
+
+    private static StandardCommandGroup standardGroup(String name, CommandGroupCategory category)
+    {
+        StandardCommandGroup group = McoreFactory.eINSTANCE.createStandardCommandGroup();
+        group.setName(name);
+        group.setCategory(category);
+        return group;
+    }
+
+    @Test
+    public void testCommandsTablePrintsAConfigurationGroupByItsFqn()
+    {
+        CommandGroup sales = MdClassFactory.eINSTANCE.createCommandGroup();
+        sales.setName("Sales"); //$NON-NLS-1$
+
+        for (boolean full : new boolean[] { false, true })
+        {
+            String md = f.format(catalogWithCommandIn(sales), full, EN);
+            assertTrue("a configuration group is its CommandGroup.<Name> FQN (full=" + full + "):\n" + md, //$NON-NLS-1$ //$NON-NLS-2$
+                md.contains("| Refill | Refill | CommandGroup.Sales |")); //$NON-NLS-1$
+            assertFalse("not the group's objectBelonging (full=" + full + "):\n" + md, //$NON-NLS-1$ //$NON-NLS-2$
+                md.contains("| Refill | Refill | Native |")); //$NON-NLS-1$
+        }
+    }
+
+    @Test
+    public void testCommandsTablePrintsAStandardGroupByItsName()
+    {
+        // ActionsPanelTools and ActionsPanelCreate share the ActionsPanel category: only the name
+        // tells them apart.
+        String tools = f.format(catalogWithCommandIn(
+            standardGroup("ActionsPanelTools", CommandGroupCategory.ACTIONS_PANEL)), false, EN); //$NON-NLS-1$
+        String create = f.format(catalogWithCommandIn(
+            standardGroup("ActionsPanelCreate", CommandGroupCategory.ACTIONS_PANEL)), true, EN); //$NON-NLS-1$
+
+        assertTrue(tools, tools.contains("| Refill | Refill | ActionsPanelTools |")); //$NON-NLS-1$
+        assertTrue(create, create.contains("| Refill | Refill | ActionsPanelCreate |")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testCommandsTablePrintsAnUnresolvedStandardGroupByTheNameInItsUri()
+    {
+        // modify_metadata writes the platform's unresolved proxy; its category is the default
+        // literal, so only the URI fragment (the loader's "/" + name) says which group it is.
+        StandardCommandGroup proxy = McoreFactory.eINSTANCE.createStandardCommandGroup();
+        ((org.eclipse.emf.ecore.InternalEObject)proxy).eSetProxyURI(org.eclipse.emf.common.util.URI
+            .createURI("v8:/CommandGroup/Std/v8.3.15").appendFragment("/ActionsPanelTools")); //$NON-NLS-1$ //$NON-NLS-2$
+
+        for (boolean full : new boolean[] { false, true })
+        {
+            String md = f.format(catalogWithCommandIn(proxy), full, EN);
+            assertTrue("full=" + full + ":\n" + md, //$NON-NLS-1$ //$NON-NLS-2$
+                md.contains("| Refill | Refill | ActionsPanelTools |")); //$NON-NLS-1$
+        }
+    }
+
+    @Test
+    public void testCommandsTablePrintsTheCategoryOfANamelessStandardGroup()
+    {
+        String md = f.format(catalogWithCommandIn(
+            standardGroup(null, CommandGroupCategory.NAVIGATION_PANEL)), false, EN);
+
+        assertTrue("a group with no name still says its category:\n" + md, //$NON-NLS-1$
+            md.contains("| Refill | Refill | " + CommandGroupCategory.NAVIGATION_PANEL.getName() + " |")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testFullModePrintsACommonCommandsStandardGroupByItsName()
+    {
+        CommonCommand command = MdClassFactory.eINSTANCE.createCommonCommand();
+        command.setName("Refill"); //$NON-NLS-1$
+        command.setGroup(standardGroup("ActionsPanelTools", CommandGroupCategory.ACTIONS_PANEL)); //$NON-NLS-1$
+
+        String md = f.format(command, true, EN);
+        assertTrue("the group property is the standard group's name:\n" + md, //$NON-NLS-1$
+            md.contains("| Group | ActionsPanelTools |")); //$NON-NLS-1$
+        assertFalse("not its category:\n" + md, //$NON-NLS-1$
+            md.contains("| Group | " + CommandGroupCategory.ACTIONS_PANEL.getName() + " |")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     // ==================== CommonAttribute content ====================
 
     @Test
@@ -302,7 +403,7 @@ public class UniversalMetadataFormatterTest
         TypeDescription composite = McoreFactory.eINSTANCE.createTypeDescription();
         composite.getTypes().add(newType("String")); //$NON-NLS-1$
         composite.getTypes().add(newType("Number")); //$NON-NLS-1$
-        assertEquals("String, Number", f.formatType(composite)); //$NON-NLS-1$
+        assertEquals("String(unlimited), Number", f.formatType(composite)); //$NON-NLS-1$
 
         assertEquals("-", f.formatType(McoreFactory.eINSTANCE.createTypeDescription())); //$NON-NLS-1$
         assertEquals("-", f.formatType(null)); //$NON-NLS-1$
@@ -385,4 +486,61 @@ public class UniversalMetadataFormatterTest
         assertFalse("no Commands section for a command-less catalog", //$NON-NLS-1$
             md.contains("### Commands")); //$NON-NLS-1$
     }
+
+    // ==================== a stored field prints as its address (issue #740) ====================
+
+    @Test
+    public void testFullModePrintsAStoredFieldByItsAddress()
+    {
+        Catalog cat = MdClassFactory.eINSTANCE.createCatalog();
+        cat.setName("Goods"); //$NON-NLS-1$
+        com._1c.g5.v8.dt.mcore.Field code = McoreFactory.eINSTANCE.createField();
+        code.setName("Code"); //$NON-NLS-1$
+        code.setNameRu("\u041A\u043E\u0434"); //$NON-NLS-1$
+        code.setFieldIdPrefix("StandardAttribute"); //$NON-NLS-1$
+        cat.getFields().add(code);
+        cat.getInputByString().add(code);
+
+        String md = f.format(cat, true, EN);
+        assertTrue(md, md.contains("Catalog.Goods.StandardAttribute.Code")); //$NON-NLS-1$
+        assertFalse("the stored address, not the field's EClass name: " + md, md.contains("Field.Code")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testPaletteColorStoredColorIsVisibleInBasicAndFullDetails()
+    {
+        var item = MdClassFactory.eINSTANCE.createPaletteColor();
+        item.setName("Accent");
+        var color = McoreFactory.eINSTANCE.createColorDef();
+        color.setRed(12);
+        color.setGreen(34);
+        color.setBlue(56);
+        item.setColor(color);
+        assertNull("appearanceItem is derived, not the stored color", item.getAppearanceItem());
+        for (boolean full : new boolean[] {false, true})
+        {
+            String md = f.format(item, full, EN);
+            assertTrue(md, md.contains("PaletteColor: Accent"));
+            assertTrue(md, md.contains("| Color | RGB(12, 34, 56) |"));
+        }
+    }
+
+
+    @Test public void typedFlagsAndTabularSectionValuesAreRendered() throws Exception
+    {
+        var catalog = MdClassFactory.eINSTANCE.createCatalog(); catalog.setName("Test");
+        var attribute = MdClassFactory.eINSTANCE.createCatalogAttribute(); attribute.setName("Text");
+        attribute.setPasswordMode(true); attribute.setMultiLine(true);
+        catalog.getAttributes().add(attribute);
+        var flags = new StringBuilder();
+        var method = UniversalMetadataFormatter.class.getDeclaredMethod("formatAttributesExtended",
+            StringBuilder.class, java.util.Collection.class, boolean.class, String.class);
+        method.setAccessible(true);
+        method.invoke(f, flags, catalog.getAttributes(), false, EN);
+        assertTrue(flags.toString(), flags.toString().contains("| Yes | Yes |"));
+        var section = MdClassFactory.eINSTANCE.createCatalogTabularSection(); section.setName("Lines");
+        section.setLineNumberLength(7); catalog.getTabularSections().add(section);
+        assertTrue(f.format(catalog, false, EN).contains("| Line Number Length | 7 |"));
+    }
+
 }

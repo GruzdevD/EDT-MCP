@@ -17,19 +17,18 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.jobs.Job;
 import org.osgi.framework.Bundle;
-import org.osgi.framework.BundleContext;
-import org.osgi.framework.ServiceReference;
 
 import com._1c.g5.v8.dt.common.Pair;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager;
-import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAssociationSettings;
+import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAssociationContext;
 import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseReferences;
 import com._1c.g5.v8.dt.platform.services.core.operations.IInfobaseCreationOperation;
 import com._1c.g5.v8.dt.platform.services.model.FileConnectionString;
@@ -44,10 +43,18 @@ import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.McpKeys;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.ApplicationSupport;
+import com.ditrix.edt.mcp.server.utils.ApplicationDefaultChange;
+import com.ditrix.edt.mcp.server.utils.InfobaseBindings;
+import com.ditrix.edt.mcp.server.utils.BoundedJob;
 import com.ditrix.edt.mcp.server.utils.InfobaseAccessSupport;
+import com.ditrix.edt.mcp.server.utils.InfobaseTarget;
+import com.ditrix.edt.mcp.server.utils.InfobaseReferenceFactory;
+import com.ditrix.edt.mcp.server.utils.InfobaseRegistration;
 import com.ditrix.edt.mcp.server.utils.McpJobs;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
+import com.ditrix.edt.mcp.server.utils.ServerInfobaseTarget;
 import com.ditrix.edt.mcp.server.utils.StandaloneServerSupport;
 import com.e1c.g5.dt.applications.ApplicationException;
 import com.e1c.g5.dt.applications.ApplicationUpdateState;
@@ -57,6 +64,7 @@ import com.e1c.g5.dt.applications.IApplicationType;
 import com.e1c.g5.dt.applications.infobases.IInfobaseApplication;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 /**
  * Creates a new FILE infobase (1C:Enterprise database) and binds it to a configuration
@@ -82,8 +90,8 @@ import com.google.gson.JsonObject;
  * is submitted — if no 1C platform runtime is registered the tool fails immediately with an
  * actionable message instead of hanging.
  *
- * <p><strong>Scope: FILE infobases only.</strong> SERVER and WEB infobases require additional
- * DBMS / cluster parameters and are rejected with a clear "not yet supported" message.
+ * <p>Creates file infobases or registers existing file/cluster infobases. Cluster registration
+ * uses EDT's typed server reference; EDT may connect while associating when a runtime is installed.
  */
 public class CreateInfobaseTool implements IMcpTool
 {
@@ -135,6 +143,9 @@ public class CreateInfobaseTool implements IMcpTool
     /** Input/output key: absolute path to the infobase directory. */
     private static final String KEY_INFOBASE_FILE = "infobaseFile"; //$NON-NLS-1$
 
+    private static final String KEY_INFOBASE_SERVER = "infobaseServer"; //$NON-NLS-1$
+    private static final String KEY_INFOBASE_REF = "infobaseRef"; //$NON-NLS-1$
+
     /** Input/output key: display name of the infobase. */
     private static final String KEY_INFOBASE_NAME = "infobaseName"; //$NON-NLS-1$
 
@@ -143,6 +154,12 @@ public class CreateInfobaseTool implements IMcpTool
 
     /** Input key: authentication kind (INFOBASE / OS) for the stored credentials (#194). */
     private static final String KEY_ACCESS = "access"; //$NON-NLS-1$
+
+    /** Output key: consumer-facing credential read-back conclusion. */
+    private static final String KEY_VERIFICATION = "verification"; //$NON-NLS-1$
+
+    /** Output key: why credential read-back mismatched or could not prove persistence. */
+    private static final String KEY_VERIFICATION_REASON = "verificationReason"; //$NON-NLS-1$
 
     /** Common prefix of a standalone-server create/register failure message. */
     private static final String STANDALONE_SERVER_MSG_PREFIX = "Standalone-server "; //$NON-NLS-1$
@@ -167,15 +184,6 @@ public class CreateInfobaseTool implements IMcpTool
     private static final String STANDALONE_SERVER_WST_CORE_BUNDLE_ID =
         "com.e1c.g5.v8.dt.platform.standaloneserver.wst.core"; //$NON-NLS-1$
 
-    /**
-     * FQN of the standalone-server service interface. The standalone-server bundles are resolved
-     * REFLECTIVELY (not a MANIFEST Require-Bundle): they pull in a transitive dependency (snakeyaml)
-     * that a minimal headless EDT does not ship, so a hard dependency would make THIS plugin fail to
-     * resolve there. Reflection keeps the plugin loadable everywhere; the standalone-server path then
-     * fails fast with an actionable error when the feature is absent.
-     */
-    private static final String STANDALONE_SERVER_SERVICE_CLASS =
-        "com.e1c.g5.v8.dt.platform.standaloneserver.wst.core.IStandaloneServerService"; //$NON-NLS-1$
     /** FQN of the StandaloneServerInfobase type (the Pair's second element; getInfobaseUrl's argument). */
     private static final String STANDALONE_SERVER_INFOBASE_CLASS =
         "com.e1c.g5.v8.dt.platform.standaloneserver.wst.core.StandaloneServerInfobase"; //$NON-NLS-1$
@@ -215,10 +223,11 @@ public class CreateInfobaseTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Prepare an infobase for an EDT project by creating a database or registering an existing " //$NON-NLS-1$
-            + "one. IDEMPOTENT: when an infobase is already registered with EDT at infobaseFile, nothing " //$NON-NLS-1$
+        return "Create a file infobase or register an existing file/cluster infobase and bind it to an EDT project. " //$NON-NLS-1$
+            + "IDEMPOTENT: when an infobase is already registered with EDT at infobaseFile, nothing " //$NON-NLS-1$
             + "is created - action='alreadyExists' and the existing reference is (re)associated with the " //$NON-NLS-1$
-            + "project. Passing user/password/access STORES those credentials in EDT's infobase settings - " //$NON-NLS-1$
+            + "project. EDT may open a Designer connection during binding when a runtime is installed. " //$NON-NLS-1$
+            + "Passing user/password/access STORES those credentials in EDT's infobase settings - " //$NON-NLS-1$
             + "the secret PERSISTS beyond this call and is reused by later connections. Parameters and " //$NON-NLS-1$
             + "examples: get_tool_guide('create_infobase')."; //$NON-NLS-1$
     }
@@ -231,14 +240,20 @@ public class CreateInfobaseTool implements IMcpTool
                 "EDT configuration project to bind the new infobase to (required).", true) //$NON-NLS-1$
             .enumProperty("mode", //$NON-NLS-1$
                 "'create' (default) = make a new file infobase at infobaseFile (launches the 1C " //$NON-NLS-1$
-                + "platform); 'register' = add an EXISTING infobase already present at infobaseFile " //$NON-NLS-1$
+                + "platform); 'register' = add an EXISTING infobase at infobaseFile or " //$NON-NLS-1$
+                + "infobaseServer + infobaseRef " //$NON-NLS-1$
                 + "(no platform launch). With applicationKind='standaloneServer', mode='register' " //$NON-NLS-1$
                 + "wraps an EXISTING file infobase (a 1Cv8.1CD must be present) with a standalone " //$NON-NLS-1$
                 + "server instead of creating a new one.", //$NON-NLS-1$
                 "create", "register") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty(KEY_INFOBASE_FILE,
-                "Absolute path to the infobase directory. FILE infobases only - server/web are rejected.", //$NON-NLS-1$
-                true)
+                "Absolute file-infobase directory. Required unless infobaseServer + infobaseRef are given.") //$NON-NLS-1$
+            .stringProperty(KEY_INFOBASE_SERVER,
+                "Existing cluster address, e.g. localhost:1541. Requires infobaseRef and mode='register'; " //$NON-NLS-1$
+                + "mutually exclusive with infobaseFile. Does not create a server database.") //$NON-NLS-1$
+            .stringProperty(KEY_INFOBASE_REF,
+                "Existing infobase name on infobaseServer. Server registration requires " //$NON-NLS-1$
+                + "applicationKind='infobase'; web URLs and connection strings are not accepted.") //$NON-NLS-1$
             .stringProperty(KEY_INFOBASE_NAME,
                 "Display name for the new infobase. If omitted, a name is auto-generated by EDT.") //$NON-NLS-1$
             .stringProperty("platform", //$NON-NLS-1$
@@ -248,7 +263,7 @@ public class CreateInfobaseTool implements IMcpTool
                 "Set the new infobase as the default application for the project after creation " //$NON-NLS-1$
                 + "(default false).") //$NON-NLS-1$
             .enumProperty(KEY_APPLICATION_KIND,
-                "'infobase' (default) = a plain file infobase via the configurator; " //$NON-NLS-1$
+                "'infobase' (default) = a file infobase or existing cluster infobase; " //$NON-NLS-1$
                 + "'standaloneServer' = an autonomous (standalone) server that creates and serves a " //$NON-NLS-1$
                 + "new file infobase and exposes a web URL for HTTP testing (requires a registered 1C " //$NON-NLS-1$
                 + "standalone-server runtime, platform >= 8.3.23). With mode='register' the server " //$NON-NLS-1$
@@ -289,6 +304,8 @@ public class CreateInfobaseTool implements IMcpTool
                 "'infobase' or 'standaloneServer' — the kind of application created.") //$NON-NLS-1$
             .stringProperty(McpKeys.PROJECT, "Name of the configuration project.") //$NON-NLS-1$
             .stringProperty(KEY_INFOBASE_FILE, "Path of the created infobase directory.") //$NON-NLS-1$
+            .stringProperty(KEY_INFOBASE_SERVER, "Registered cluster address; server infobases only.") //$NON-NLS-1$
+            .stringProperty(KEY_INFOBASE_REF, "Registered cluster infobase name; server infobases only.") //$NON-NLS-1$
             .stringProperty(KEY_INFOBASE_NAME, "Display name of the created infobase.") //$NON-NLS-1$
             .stringProperty("webUrl", //$NON-NLS-1$
                 "applicationKind='standaloneServer' only: the infobase web URL for HTTP testing. " //$NON-NLS-1$
@@ -315,6 +332,15 @@ public class CreateInfobaseTool implements IMcpTool
                 + "is unverified: call get_applications to confirm it.") //$NON-NLS-1$
             .stringProperty(McpKeys.APPLICATION_ID,
                 "ID of the newly created application (for chaining into update_database).") //$NON-NLS-1$
+            .stringProperty("registrationId", //$NON-NLS-1$
+                "Fresh global launcher UUID for a file/cluster infobase, also returned on failed registration rollback. " //$NON-NLS-1$
+                + "Use with exact infobaseName for explicit delete_infobase registration cleanup; not an applicationId.") //$NON-NLS-1$
+            .enumProperty(KEY_VERIFICATION,
+                "Credential read-back outcome when credentials were requested: verified, " //$NON-NLS-1$
+                    + "mismatched, or not_verifiable.", //$NON-NLS-1$
+                "verified", "mismatched", "not_verifiable") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            .stringProperty(KEY_VERIFICATION_REASON,
+                "Why credential read-back mismatched or could not prove a stored entry exists.") //$NON-NLS-1$
             .stringProperty(McpKeys.MESSAGE, "Human-readable status message.") //$NON-NLS-1$
             .build();
     }
@@ -345,10 +371,18 @@ public class CreateInfobaseTool implements IMcpTool
         {
             return err;
         }
-        String errFile = JsonUtils.requireArgument(params, KEY_INFOBASE_FILE);
-        if (errFile != null)
+        String infobaseServer = JsonUtils.extractStringArgument(params, KEY_INFOBASE_SERVER);
+        String infobaseRef = JsonUtils.extractStringArgument(params, KEY_INFOBASE_REF);
+        boolean serverTarget = ServerInfobaseTarget.specified(infobaseServer)
+            || ServerInfobaseTarget.specified(infobaseRef);
+        if (!serverTarget)
         {
-            return errFile;
+            String errFile = JsonUtils.requireArgument(params, KEY_INFOBASE_FILE,
+                " (or infobaseServer + infobaseRef with mode='register' for an existing cluster infobase)"); //$NON-NLS-1$
+            if (errFile != null)
+            {
+                return errFile;
+            }
         }
 
         String projectName = JsonUtils.extractStringArgument(params, McpKeys.PROJECT_NAME);
@@ -387,6 +421,24 @@ public class CreateInfobaseTool implements IMcpTool
             return mode.error;
         }
         boolean register = mode.value;
+
+        String targetError = ServerInfobaseTarget.validationError(infobaseServer, infobaseRef,
+            infobaseFileStr, register, standaloneServer);
+        if (targetError != null)
+        {
+            return ToolResult.error(targetError).toJson();
+        }
+        if (serverTarget)
+        {
+            String building = ProjectStateChecker.buildingErrorOrNull(projectName);
+            if (building != null)
+            {
+                return ToolResult.error(building).toJson();
+            }
+            return prepareInfobase(projectName,
+                new InfobaseTarget(null, new ServerInfobaseTarget(infobaseServer, infobaseRef)),
+                infobaseName, null, setDefault, true, credentials);
+        }
 
         // Credentials (#194) always apply to a FILE infobase's access settings. A newly created
         // standalone server (mode='create') has no existing infobase reference to store them
@@ -448,7 +500,7 @@ public class CreateInfobaseTool implements IMcpTool
                 setDefault, register, credentials);
         }
 
-        return createInfobase(projectName, infobaseDir, infobaseName, platform, setDefault, register,
+        return prepareInfobase(projectName, new InfobaseTarget(infobaseDir, null), infobaseName, platform, setDefault, register,
             credentials);
     }
 
@@ -544,90 +596,211 @@ public class CreateInfobaseTool implements IMcpTool
         }
     }
 
-    private String createInfobase(String projectName, Path infobaseDir,
+    private String prepareInfobase(String projectName, InfobaseTarget target,
             String infobaseName, String platform, boolean setDefault, boolean register,
             Credentials credentials)
     {
-        // --- 1-2. Resolve project + services ---
         CreateContext context = resolveCreateContext(projectName);
         if (context.error != null)
         {
             return context.error;
         }
-        IProject project = context.project;
-        IApplicationManager appManager = context.appManager;
-        IInfobaseManager ibManager = context.ibManager;
-        IInfobaseAssociationManager assocManager = context.assocManager;
-
-        // --- 3. Auto-generate infobase name if omitted ---
-        if (infobaseName == null || infobaseName.isEmpty())
+        InfobaseAssociationContext associationContext;
+        try
         {
-            infobaseName = generateDefaultInfobaseName(ibManager, projectName);
+            associationContext = InfobaseRegistration.currentContext(context.project);
         }
+        catch (Exception e)
+        {
+            return ToolResult.error("Could not resolve the project's current infobase context: " //$NON-NLS-1$
+                + e.getClass().getSimpleName() + ". Ensure EDT platform-services are running.").toJson(); //$NON-NLS-1$
+        }
+        return prepareInfobase(context, associationContext, projectName, target, infobaseName,
+            platform, setDefault, register, credentials);
+    }
 
-        // --- 3b. Idempotency: an infobase already registered with EDT at this path is NOT an
+    /** Common pipeline after read-only context resolution; kept separate for regression tests. */
+    String prepareInfobase(CreateContext context, InfobaseAssociationContext associationContext,
+            String projectName, InfobaseTarget target, String infobaseName, String platform,
+            boolean setDefault, boolean register, Credentials credentials)
+    {
+        return prepareInfobase(context, associationContext, projectName, target, infobaseName,
+            platform, setDefault, register, credentials,
+            () -> InfobaseRegistration.currentContext(context.project));
+    }
+
+    /** The provider seam keeps branch-change regressions on the production pipeline. */
+    String prepareInfobase(CreateContext context, InfobaseAssociationContext associationContext,
+            String projectName, InfobaseTarget target, String infobaseName, String platform,
+            boolean setDefault, boolean register, Credentials credentials,
+            Supplier<InfobaseAssociationContext> currentContext)
+    {
+        return captureBindings(context.appManager).run(() -> prepareWithBindings(context, associationContext,
+            projectName, target, infobaseName, platform, setDefault, register, credentials, currentContext),
+            projectName, setDefault, false);
+    }
+
+    InfobaseBindings captureBindings(IApplicationManager manager)
+    {
+        return InfobaseBindings.capture(manager);
+    }
+
+    private String prepareWithBindings(CreateContext context, InfobaseAssociationContext associationContext,
+            String projectName, InfobaseTarget target, String infobaseName, String platform,
+            boolean setDefault, boolean register, Credentials credentials,
+            Supplier<InfobaseAssociationContext> currentContext)
+    {
+        Runnable contextGuard = () -> {
+            boolean matches;
+            try
+            {
+                matches = associationContext.equals(currentContext.get());
+            }
+            catch (Exception unavailable)
+            {
+                matches = false;
+            }
+            if (!matches)
+            {
+                throw new ContextChangedException();
+            }
+        };
+        // --- Idempotency: an infobase already registered with EDT at this path is NOT an
         // error and must not be re-created (a re-run of an environment setup used to fail or
         // duplicate). The existing reference is (re)associated with the project and reported.
-        InfobaseReference existing = findExistingInfobaseByPath(ibManager, infobaseDir);
-        if (existing != null)
+        if (target.file() != null)
         {
-            Activator.logInfo("create_infobase: infobase at " + infobaseDir //$NON-NLS-1$
-                + " already registered as '" + existing.getName() + "' - skipping creation"); //$NON-NLS-1$ //$NON-NLS-2$
-            String associateError = associateInfobase(assocManager, project, existing,
-                infobaseDir, projectName, register);
-            if (associateError != null)
+            InfobaseReference existing = findExistingInfobaseByPath(context.ibManager, target.file());
+            if (existing != null)
             {
-                return associateError;
+                Activator.logInfo("create_infobase: infobase at " + target.file() //$NON-NLS-1$
+                    + " already registered as '" + existing.getName() + "' - skipping creation"); //$NON-NLS-1$ //$NON-NLS-2$
+                String associateError = associateInfobase(context.assocManager, context.project,
+                    existing, target.file().toString(), projectName, register, associationContext);
+                if (associateError != null)
+                {
+                    return associateError;
+                }
+                CredentialStoreReport credReport =
+                    storeCredentialsIfRequested(existing, credentials, register);
+                ResultContext rc = new ResultContext(projectName, target.file(), existing.getName(),
+                    context.appManager, context.project);
+                return buildExistingInfobaseResult(rc, existing, setDefault,
+                    credReport == null ? null : credReport.note);
             }
-            String credNote = storeCredentialsIfRequested(existing, credentials, register);
-            ResultContext rc = new ResultContext(projectName, infobaseDir, existing.getName(),
-                appManager, project);
-            return buildExistingInfobaseResult(rc, existing, setDefault, credNote);
         }
-
-        // --- 4. Prepare the directory ---
-        String prepareError = prepareInfobaseDirectory(infobaseDir, register);
-        if (prepareError != null)
+        if (infobaseName == null || infobaseName.isBlank())
         {
-            return prepareError;
+            infobaseName = generateDefaultInfobaseName(context.ibManager, projectName);
         }
-
-        // --- 5. Build the FILE infobase reference ---
-        InfobaseReference ibRef = buildInfobaseReference(infobaseDir, infobaseName);
-
-        // --- 6. Create the database (create) or register the existing one (register) ---
+        if (target.file() != null)
+        {
+            String prepareError = prepareInfobaseDirectory(target.file(), register);
+            if (prepareError != null)
+            {
+                return prepareError;
+            }
+        }
+        InfobaseReference reference = target.reference(infobaseName);
+        ResultContext resultContext = new ResultContext(projectName, target.file(), infobaseName,
+            context.appManager, context.project, target.server());
+        ApplicationDefaultChange defaultChange = setDefault
+            ? captureDefaultChange(context.appManager, context.project) : null;
         String databaseError = register
-            ? registerExistingInfobase(ibManager, ibRef, infobaseDir)
-            : createNewInfobase(ibRef, platform, infobaseName, infobaseDir);
+            ? registerExistingInfobase(context.ibManager, reference, target.location())
+            : createNewInfobase(reference, platform, infobaseName, target.file());
         if (databaseError != null)
         {
-            return databaseError;
+            JsonObject failure = JsonParser.parseString(databaseError).getAsJsonObject();
+            resultContext.putRegistrationIdentity(failure, reference);
+            return failure.toString();
         }
-
-        // --- 7. Associate with the project ---
-        String associateError =
-            associateInfobase(assocManager, project, ibRef, infobaseDir, projectName, register);
-        if (associateError != null)
+        String result;
+        try
         {
-            return associateError;
+            contextGuard.run();
+            // EDT's association listener can open a Designer session: persist access settings first.
+            CredentialStoreReport credentialStore = storeCredentialsIfRequested(reference, credentials, register);
+            contextGuard.run();
+            String error = associateInfobase(context.assocManager, context.project, reference,
+                target.location(), projectName, register, associationContext);
+            result = error == null
+                ? buildSuccessResult(resultContext, reference, setDefault, register, credentialStore, contextGuard, defaultChange)
+                : error;
+            contextGuard.run();
         }
+        catch (ContextChangedException contextFailure)
+        {
+            result = ToolResult.error("The project's infobase context changed or could not be verified " //$NON-NLS-1$
+                + "during creation; refresh get_applications and retry in the intended branch.").toJson(); //$NON-NLS-1$
+        }
+        JsonObject json = JsonParser.parseString(result).getAsJsonObject();
+        resultContext.putRegistrationIdentity(json, reference);
+        if (!json.get("success").getAsBoolean()) //$NON-NLS-1$
+        {
+            ApplicationDefaultChange.Restoration defaultRestoration = defaultChange == null
+                ? ApplicationDefaultChange.Restoration.NOT_CHANGED : defaultChange.restore();
+            boolean retainDefault = defaultRestoration == ApplicationDefaultChange.Restoration.UNVERIFIED
+                || defaultRestoration == ApplicationDefaultChange.Restoration.PENDING;
+            // Retain the application handle if we cannot establish whether it is still default.
+            // Removing it now would create the very stale-default pointer compensation must avoid.
+            InfobaseRegistration.Rollback rollback = retainDefault
+                ? new InfobaseRegistration.Rollback(false, false, false)
+                : InfobaseRegistration.rollback(context.assocManager, context.ibManager, context.project,
+                    reference, associationContext, this::clearRegistrationCredentials);
+            String message = json.get("error").getAsString() + " " + rollback.message() //$NON-NLS-1$ //$NON-NLS-2$
+                + (register ? "" : " The newly created database files were kept; inspect them before retrying create."); //$NON-NLS-1$ //$NON-NLS-2$
+            ToolResult failed = ToolResult.error(message);
+            for (var entry : json.entrySet())
+            {
+                if (!entry.getKey().equals("error") && !entry.getKey().equals("message")) //$NON-NLS-1$ //$NON-NLS-2$
+                {
+                    failed.put(entry.getKey(), entry.getValue());
+                }
+            }
+            resultContext.putLocation(failed);
+            rollback.put(failed);
+            if (defaultRestoration != ApplicationDefaultChange.Restoration.NOT_CHANGED)
+            {
+                failed.put("defaultRollback", defaultRestoration.name()); //$NON-NLS-1$
+                failed.put("defaultWriteInProgress", //$NON-NLS-1$
+                    defaultRestoration == ApplicationDefaultChange.Restoration.PENDING);
+                if (retainDefault)
+                {
+                    failed.put("rollbackCompleted", false); //$NON-NLS-1$
+                    failed.put("error", json.get("error").getAsString() //$NON-NLS-1$ //$NON-NLS-2$
+                        + (defaultRestoration == ApplicationDefaultChange.Restoration.PENDING
+                            ? " Default restoration is still in progress: an admitted native write may complete after this response. The owned application, association, registration and database files were retained. Wait for EDT's default-restoration operation to finish, or restart EDT if it is stuck, before inspecting/changing the default or retrying cleanup from the original branch." //$NON-NLS-1$
+                            : " Default restoration could not be verified. The owned application, association, registration and database files were retained; inspect the project's default in EDT, then retry cleanup from the original branch.")); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            return failed.toJson();
+        }
+        return json.toString();
+    }
 
-        // --- 8. Optionally store infobase connection credentials (#194) ---
-        String credNote = storeCredentialsIfRequested(ibRef, credentials, register);
+    ApplicationDefaultChange captureDefaultChange(IApplicationManager manager, IProject project)
+    {
+        return ApplicationDefaultChange.capture(manager, project);
+    }
 
-        // --- 9. Read back, apply setDefault to what the read-back FOUND, and return ---
-        // setDefault is applied AFTER the read-back on purpose (issue #412): it used to run its own
-        // one-shot lookup BEFORE the bounded re-poll, so it could report "could not be set as default"
-        // for an application the re-poll then found. One observation feeds one report.
-        ResultContext rc = new ResultContext(projectName, infobaseDir, infobaseName, appManager, project);
-        return buildSuccessResult(rc, ibRef, setDefault, register, credNote);
+    private static final class ContextChangedException extends IllegalStateException
+    {
+        private static final long serialVersionUID = 1L;
+    }
+
+    /** Clear through the shared bounded credential operation before removing the UUID handle. */
+    void clearRegistrationCredentials(InfobaseReference reference,
+            InfobaseAccessSupport.CredentialWriteGuard guard) throws Exception
+    {
+        InfobaseAccessSupport.clearCredentials(reference, guard);
     }
 
     /**
      * Stores infobase connection credentials on the freshly-built {@code ibRef} when the caller
-     * supplied any of {@code user}/{@code password}/{@code access} (#194), returning a note to append
-     * to the result message — a success note, a non-fatal WARNING when the store failed, or
-     * {@code null} when no credentials were requested. Credential storage never fails the
+     * supplied any of {@code user}/{@code password}/{@code access} (#194), returning the note and
+     * three-state verification to add to the create result — or {@code null} when no credentials
+     * were requested. Credential storage never fails the
      * infobase creation itself (the base is already created; whether it is BOUND is established
      * later, by the read-back).
      *
@@ -635,31 +808,21 @@ public class CreateInfobaseTool implements IMcpTool
      * @param credentials the requested connection credentials (any field may be {@code null}/empty)
      * @param register {@code true} for mode='register' (an existing base that already has users),
      *            {@code false} for mode='create' (a brand-new empty base with no users yet)
-     * @return a message note, or {@code null} when no credentials were requested
+     * @return the note and verification, or {@code null} when no credentials were requested
      */
-    private static String storeCredentialsIfRequested(InfobaseReference ibRef, Credentials credentials,
+    CredentialStoreReport storeCredentialsIfRequested(InfobaseReference ibRef,
+            Credentials credentials,
             boolean register)
     {
         if (!credentials.any())
         {
             return null;
         }
-        String error = storeSafely(() -> InfobaseAccessSupport.storeCredentials(ibRef, credentials.user,
-            credentials.password, InfobaseAccessSupport.parseAccess(credentials.access)));
-        if (error != null)
-        {
-            return " WARNING: connection credentials were NOT stored: " + error; //$NON-NLS-1$
-        }
-        // mode='create' makes a brand-new EMPTY infobase with NO users, so credentials for a named
-        // user authenticate only once a MATCHING user is added (via the configurator / БСЛ
-        // ПользователиИнформационнойБазы). Surface that so the caller is not surprised when a later
-        // update prompts for credentials (which the MCP server now auto-cancels).
-        String userNote = register
-            ? "" //$NON-NLS-1$
-            : " NOTE: a newly created infobase has no users yet — these credentials authenticate " //$NON-NLS-1$
-                + "only after a matching infobase user is added."; //$NON-NLS-1$
-        return " Stored connection credentials for user '" + (credentials.user == null ? "" : credentials.user) //$NON-NLS-1$ //$NON-NLS-2$
-            + "' (change them later with set_infobase_credentials)." + userNote; //$NON-NLS-1$
+        return storeSafely((publish, writeCommitted, writeAllowed) -> publish.accept(
+            InfobaseAccessSupport.storeCredentials(ibRef, credentials.user,
+                credentials.password, InfobaseAccessSupport.parseAccess(credentials.access),
+                writeCommitted, writeAllowed)),
+            credentials, register);
     }
 
     /**
@@ -671,21 +834,145 @@ public class CreateInfobaseTool implements IMcpTool
      * secure storage refusing, would otherwise turn a completed creation into an internal tool error.
      * Here it is structural (and logged, so a real failure stays visible).
      *
-     * @param store the store call, returning its own error text or {@code null} on success
-     * @return the error text to report, or {@code null} when the credentials were stored
+     * @param store the store call, returning its write and read-back result
+     * @return the non-fatal note and any verification conclusion
      */
-    private static String storeSafely(java.util.function.Supplier<String> store)
+    static CredentialStoreReport storeSafely(
+            InfobaseAccessSupport.BoundedStoreWork<InfobaseAccessSupport.StoreResult> store,
+            Credentials credentials, boolean register)
+    {
+        return storeSafely(store, credentials, register,
+            InfobaseAccessSupport.CREDENTIAL_STORE_TIMEOUT_MS);
+    }
+
+    /** Testable deadline form of the shared bounded credential store/read-back. */
+    static CredentialStoreReport storeSafely(
+            InfobaseAccessSupport.BoundedStoreWork<InfobaseAccessSupport.StoreResult> store,
+            Credentials credentials, boolean register, long timeoutMs)
     {
         try
         {
-            return store.get();
+            InfobaseAccessSupport.BoundedStoreResult<InfobaseAccessSupport.StoreResult> storeRun =
+                InfobaseAccessSupport.runBoundedCredentialStore(
+                    register ? "registered infobase" : "new infobase", timeoutMs, store); //$NON-NLS-1$ //$NON-NLS-2$
+            BoundedJob.Result bounded = storeRun.boundedResult();
+            if (storeRun.publishedResult() != null)
+            {
+                return credentialStoreReport(storeRun.publishedResult(), credentials, register);
+            }
+            if (BoundedJob.isInconclusive(bounded.getOutcome())
+                || bounded.getOutcome() == BoundedJob.Outcome.TIMED_OUT_BEFORE_START)
+            {
+                String interruption = bounded.getOutcome() == BoundedJob.Outcome.INTERRUPTED
+                    ? " was interrupted before it finished" //$NON-NLS-1$
+                    : " did not finish within " + formatCredentialStoreDeadline(timeoutMs); //$NON-NLS-1$
+                return new CredentialStoreReport(" The infobase WAS " //$NON-NLS-1$
+                    + (register ? "registered" : "created") //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", but credential storage" + interruption //$NON-NLS-1$
+                    + "; credential state is UNDETERMINED. Run set_infobase_credentials to " //$NON-NLS-1$
+                    + "settle it.", null); //$NON-NLS-1$
+            }
+            if (bounded.getFailure() != null)
+            {
+                return failedCredentialStoreReport(bounded.getFailure());
+            }
+            return new CredentialStoreReport(
+                " WARNING: connection credentials were NOT stored because the bounded store " //$NON-NLS-1$
+                    + "operation never ran (" + bounded.getOutcome() + ").", null); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception e)
         {
-            Activator.logError("create_infobase: storing the connection credentials failed", e); //$NON-NLS-1$
-            String reason = e.getMessage();
-            return (reason != null && !reason.trim().isEmpty()) ? reason : e.getClass().getSimpleName();
+            return failedCredentialStoreReport(e);
         }
+    }
+
+    /** Reports a store failure by type only, so an exception can never echo credential text. */
+    private static CredentialStoreReport failedCredentialStoreReport(Throwable failure)
+    {
+        String failureType = failure == null ? "unknown failure" //$NON-NLS-1$
+            : failure.getClass().getSimpleName();
+        Activator.logError("create_infobase: storing the connection credentials failed (" //$NON-NLS-1$
+            + failureType + ")", null); //$NON-NLS-1$
+        return new CredentialStoreReport(
+            " WARNING: connection credentials were NOT stored because the store operation failed " //$NON-NLS-1$
+                + "(" + failureType + "). Run set_infobase_credentials to retry.", null); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Human-readable form used only in the non-secret timeout note. */
+    private static String formatCredentialStoreDeadline(long timeoutMs)
+    {
+        return timeoutMs % 1000L == 0L
+            ? (timeoutMs / 1000L) + " seconds" : timeoutMs + "ms"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Message plus the structured conclusion of an optional credential store/read-back. */
+    static final class CredentialStoreReport
+    {
+        final String note;
+        final InfobaseAccessSupport.StoreResult storeResult;
+
+        CredentialStoreReport(String note, InfobaseAccessSupport.StoreResult storeResult)
+        {
+            this.note = note;
+            this.storeResult = storeResult;
+        }
+    }
+
+    /**
+     * Converts the shared three-state store result into create_infobase's non-fatal note and
+     * structured verification fields. Package-visible so all three states are unit-testable without
+     * secure storage.
+     */
+    static CredentialStoreReport credentialStoreReport(InfobaseAccessSupport.StoreResult result,
+            Credentials credentials, boolean register)
+    {
+        if (result.error() != null)
+        {
+            return new CredentialStoreReport(
+                " WARNING: connection credentials were NOT stored: " + result.error(), result); //$NON-NLS-1$
+        }
+        if (InfobaseAccessSupport.StoreResult.Verification.MISMATCHED == result.verification())
+        {
+            // Preserve the existing create contract: a mismatch is a warning and does not undo the
+            // database creation/registration that already committed.
+            return new CredentialStoreReport(
+                " WARNING: connection credentials were NOT stored: " //$NON-NLS-1$
+                    + result.verificationReason(), result);
+        }
+
+        String user = credentials.user == null ? "" : credentials.user; //$NON-NLS-1$
+        // mode='create' makes a brand-new EMPTY infobase with NO users, so credentials for a named
+        // user authenticate only once a MATCHING user is added (via the configurator / БСЛ
+        // ПользователиИнформационнойБазы). Surface that so the caller is not surprised when a later
+        // update prompts for credentials (which the MCP server now auto-cancels).
+        String userNote = register
+            ? "" //$NON-NLS-1$
+            : " NOTE: a newly created infobase has no users yet — these credentials authenticate " //$NON-NLS-1$
+                + "only after a matching infobase user is added."; //$NON-NLS-1$
+        if (InfobaseAccessSupport.StoreResult.Verification.NOT_VERIFIABLE == result.verification())
+        {
+            return new CredentialStoreReport(
+                " EDT accepted the connection-credentials update for user '" + user //$NON-NLS-1$
+                    + "', but read-back could not verify a stored entry: " //$NON-NLS-1$
+                    + result.verificationReason()
+                    + " Change the settings later with set_infobase_credentials." + userNote, //$NON-NLS-1$
+                result);
+        }
+        return new CredentialStoreReport(" Stored connection credentials for user '" + user //$NON-NLS-1$
+            + "' (change them later with set_infobase_credentials)." + userNote, result); //$NON-NLS-1$
+    }
+
+    /** Adds credential verification only when a credential store reached read-back. */
+    private static void putCredentialVerification(ToolResult result,
+            CredentialStoreReport credentialStore)
+    {
+        if (credentialStore == null || credentialStore.storeResult == null
+            || credentialStore.storeResult.verification() == null)
+        {
+            return;
+        }
+        result.put(KEY_VERIFICATION, credentialStore.storeResult.verificationName())
+            .put(KEY_VERIFICATION_REASON, credentialStore.storeResult.verificationReason());
     }
 
     /**
@@ -722,18 +1009,22 @@ public class CreateInfobaseTool implements IMcpTool
      * tool-result JSON on the SAME failure case the inline code produced, else {@code null}.
      */
     private static String registerExistingInfobase(IInfobaseManager ibManager, InfobaseReference ibRef,
-            Path infobaseDir)
+            String infobaseDir)
     {
         try
         {
-            ibManager.add(ibRef, null);
+            String duplicate = InfobaseRegistration.add(ibManager, ibRef);
+            if (duplicate != null)
+            {
+                return ToolResult.error(duplicate).toJson();
+            }
         }
         catch (Exception e)
         {
             Activator.logError("create_infobase: register failed for " + infobaseDir, e); //$NON-NLS-1$
             return ToolResult.error("Could not register the infobase at '" + infobaseDir //$NON-NLS-1$
                 + "': " + e.getMessage() //$NON-NLS-1$
-                + ". Ensure it is a valid file infobase that is not already registered.").toJson(); //$NON-NLS-1$
+                + ". Check EDT launcher-list write permissions and retry.").toJson(); //$NON-NLS-1$
         }
         Activator.logInfo("create_infobase: registered existing infobase at " + infobaseDir); //$NON-NLS-1$
         return null;
@@ -747,7 +1038,7 @@ public class CreateInfobaseTool implements IMcpTool
      * the SAME early-return cases (no runtime / timeout / interrupted / job error) the inline code
      * produced, else {@code null}.
      */
-    private static String createNewInfobase(InfobaseReference ibRef, String platform,
+    String createNewInfobase(InfobaseReference ibRef, String platform,
             String infobaseName, Path infobaseDir)
     {
         IInfobaseCreationOperation creationOp = resolveCreationOperation();
@@ -774,7 +1065,7 @@ public class CreateInfobaseTool implements IMcpTool
             {
                 try
                 {
-                    finalOp.perform(descriptor, monitor);
+                    InfobaseBindings.mutate(monitor, nativeMonitor -> finalOp.perform(descriptor, nativeMonitor));
                 }
                 catch (Exception e)
                 {
@@ -815,23 +1106,34 @@ public class CreateInfobaseTool implements IMcpTool
      */
     private static String awaitCreateJob(Job createJob, Path infobaseDir)
     {
+        return awaitCreationJob(createJob, () -> "Infobase creation timed out after " //$NON-NLS-1$
+            + CREATE_TIMEOUT_SECONDS + " seconds. The 1cv8 process may still be running. " //$NON-NLS-1$
+            + "Check the EDT log and the target directory '" + infobaseDir //$NON-NLS-1$
+            + "' for partial results.", () -> "Infobase creation was interrupted."); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static String awaitCreationJob(Job createJob, Supplier<String> timeoutMessage,
+            Supplier<String> interruptedMessage)
+    {
+        return awaitCreationJob(createJob, TimeUnit.SECONDS.toMillis(CREATE_TIMEOUT_SECONDS),
+            timeoutMessage, interruptedMessage);
+    }
+
+    private static String awaitCreationJob(Job createJob, long timeoutMs, Supplier<String> timeoutMessage,
+            Supplier<String> interruptedMessage)
+    {
         try
         {
-            boolean finished = createJob.join(
-                TimeUnit.SECONDS.toMillis(CREATE_TIMEOUT_SECONDS), null);
-            if (!finished)
+            if (!createJob.join(timeoutMs, null))
             {
                 createJob.cancel();
-                return ToolResult.error("Infobase creation timed out after " //$NON-NLS-1$
-                    + CREATE_TIMEOUT_SECONDS + " seconds. The 1cv8 process may still be running. " //$NON-NLS-1$
-                    + "Check the EDT log and the target directory '" + infobaseDir //$NON-NLS-1$
-                    + "' for partial results.").toJson(); //$NON-NLS-1$
+                return ToolResult.error(timeoutMessage.get()).toJson();
             }
         }
-        catch (InterruptedException e)
+        catch (InterruptedException interrupted)
         {
             Thread.currentThread().interrupt();
-            return ToolResult.error("Infobase creation was interrupted.").toJson(); //$NON-NLS-1$
+            return ToolResult.error(interruptedMessage.get()).toJson();
         }
         return null;
     }
@@ -847,11 +1149,12 @@ public class CreateInfobaseTool implements IMcpTool
      * more than that here.
      */
     private static String associateInfobase(IInfobaseAssociationManager assocManager, IProject project,
-            InfobaseReference ibRef, Path infobaseDir, String projectName, boolean register)
+            InfobaseReference ibRef, String infobaseDir, String projectName, boolean register,
+            InfobaseAssociationContext associationContext)
     {
         try
         {
-            assocManager.associate(project, ibRef, InfobaseAssociationSettings.notSynchronized());
+            InfobaseRegistration.associate(assocManager, project, ibRef, associationContext);
         }
         catch (Exception e)
         {
@@ -874,6 +1177,15 @@ public class CreateInfobaseTool implements IMcpTool
      *
      * <p>Every note here is about {@code setDefault} ONLY. The reason there is no application to set —
      * and whether that is even established — is reported by the caller, not blamed on this flag.
+     *
+     * <p><b>This write has a racing partner (#622).</b> {@code setDefaultApplication} is an
+     * unconditional store, and EDT's own default-application RESOLUTION clears a default it finds
+     * stale with an equally unconditional {@code setDefaultApplication(project, null)} remove — no
+     * compare-and-set on either side. A bounded default-application read that somebody else
+     * abandoned at its deadline keeps running and can land that clear AFTER this store, erasing
+     * the default just set. So a caller that reported a default as "unknown" and then set one must
+     * RE-READ it before trusting it; the window used to be microseconds inside a synchronous call
+     * and now outlives the call that opened it.
      */
     private static String applySetDefault(IApplicationManager appManager, IProject project,
             ApplicationReadBack readBack)
@@ -889,7 +1201,7 @@ public class CreateInfobaseTool implements IMcpTool
         }
         try
         {
-            appManager.setDefaultApplication(project, readBack.app);
+            ApplicationDefaultChange.write(appManager, project, readBack.app);
         }
         catch (Exception e)
         {
@@ -901,6 +1213,35 @@ public class CreateInfobaseTool implements IMcpTool
         return null;
     }
 
+    private record ApplicationContext(IProject project, IApplicationManager manager, String error) { }
+
+    private static ApplicationContext resolveApplicationContext(String projectName)
+    {
+        ProjectContext context = ProjectContext.of(projectName);
+        return resolveApplicationContext(projectName, context.exists() ? context.project() : null,
+            () -> Activator.getDefault().getApplicationManager());
+    }
+
+    private static ApplicationContext resolveApplicationContext(String projectName, IProject project,
+            Supplier<IApplicationManager> managerLookup)
+    {
+        if (project == null)
+        {
+            return new ApplicationContext(null, null,
+                ToolResult.error(ProjectContext.notFoundMessage(projectName)).toJson());
+        }
+        if (!project.isOpen())
+        {
+            return new ApplicationContext(null, null, ToolResult.error("Project is closed: " + projectName //$NON-NLS-1$
+                + ". Open the project in EDT first.").toJson()); //$NON-NLS-1$
+        }
+        IApplicationManager manager = managerLookup.get();
+        return manager == null
+            ? new ApplicationContext(null, null,
+                ToolResult.error(ApplicationSupport.MANAGER_UNAVAILABLE).toJson()) //$NON-NLS-1$
+            : new ApplicationContext(project, manager, null);
+    }
+
     /**
      * Resolves the configuration project and the platform services needed for a file-infobase
      * creation (read-only). Returns a {@link CreateContext} whose {@code error} field carries the
@@ -910,23 +1251,10 @@ public class CreateInfobaseTool implements IMcpTool
      */
     private static CreateContext resolveCreateContext(String projectName)
     {
-        ProjectContext ctx = ProjectContext.of(projectName);
-        if (!ctx.exists())
+        ApplicationContext application = resolveApplicationContext(projectName);
+        if (application.error() != null)
         {
-            return CreateContext.failed(
-                ToolResult.error(ProjectContext.notFoundMessage(projectName)).toJson());
-        }
-        if (!ctx.isOpen())
-        {
-            return CreateContext.failed(ToolResult.error("Project is closed: " + projectName //$NON-NLS-1$
-                + ". Open the project in EDT first.").toJson()); //$NON-NLS-1$
-        }
-
-        IApplicationManager appManager = Activator.getDefault().getApplicationManager();
-        if (appManager == null)
-        {
-            return CreateContext.failed(
-                ToolResult.error("IApplicationManager service is not available").toJson()); //$NON-NLS-1$
+            return CreateContext.failed(application.error());
         }
 
         IInfobaseManager ibManager = Activator.getDefault().getInfobaseManager();
@@ -945,7 +1273,7 @@ public class CreateInfobaseTool implements IMcpTool
                 + "Ensure EDT platform-services are running.").toJson()); //$NON-NLS-1$
         }
 
-        return CreateContext.of(ctx.project(), appManager, ibManager, assocManager);
+        return CreateContext.of(application.project(), application.manager(), ibManager, assocManager);
     }
 
     /**
@@ -983,20 +1311,6 @@ public class CreateInfobaseTool implements IMcpTool
     }
 
     /**
-     * Builds the FILE {@link InfobaseReference} for the new infobase (read-only construction). The
-     * reference MUST carry a UUID before {@code perform()}: the creation operation locks the infobase
-     * by its UUID very early ({@code LockManager.getLock}), which NPEs on a null id.
-     */
-    private static InfobaseReference buildInfobaseReference(Path infobaseDir, String infobaseName)
-    {
-        InfobaseReference ibRef =
-            InfobaseReferences.newFileInfobaseReference(infobaseDir.toAbsolutePath().toString());
-        ibRef.setName(infobaseName);
-        ibRef.setUuid(java.util.UUID.randomUUID());
-        return ibRef;
-    }
-
-    /**
      * Builds the {@link IInfobaseCreationOperation.Descriptor} for the create Job (read-only
      * construction — no platform call is made here). The optional platform mask is applied only when
      * non-empty, identical to the inline builder.
@@ -1021,7 +1335,7 @@ public class CreateInfobaseTool implements IMcpTool
      * When {@code error} is non-null it carries a ready tool-result JSON and the other fields are unset;
      * otherwise {@code error} is {@code null} and the fields are populated.
      */
-    private static final class CreateContext
+    static final class CreateContext
     {
         final String error;
         final IProject project;
@@ -1095,6 +1409,14 @@ public class CreateInfobaseTool implements IMcpTool
         {
             return sctx.error;
         }
+        IApplicationManager appManager = sctx.appManager;
+        return captureBindings(appManager).run(() -> createStandaloneWithBindings(sctx, projectName,
+            infobaseDir, infobaseName, platform, setDefault, register, credentials), projectName, setDefault, false);
+    }
+
+    private String createStandaloneWithBindings(StandaloneContext sctx, String projectName, Path infobaseDir,
+            String infobaseName, String platform, boolean setDefault, boolean register, Credentials credentials)
+    {
         IProject project = sctx.project;
         IApplicationManager appManager = sctx.appManager;
         Object serverService = sctx.serverService;
@@ -1113,8 +1435,7 @@ public class CreateInfobaseTool implements IMcpTool
         // --- 5. Build the FILE infobase reference for the new IB ---
         InfobaseReference ibRef =
             InfobaseReferences.newFileInfobaseReference(infobaseDir.toAbsolutePath().toString());
-        ibRef.setName(infobaseName);
-        ibRef.setUuid(java.util.UUID.randomUUID());
+        InfobaseReferenceFactory.named(ibRef, infobaseName);
 
         // --- 6. Defaults for the standalone-server-specific arguments ---
         // EDT does NOT honour a requested port for a FILE-backed standalone server (the FILE branch of
@@ -1143,28 +1464,30 @@ public class CreateInfobaseTool implements IMcpTool
             {
                 try
                 {
-                    Object pair = ssCreateServerWithInfobase(finalService, createArgs, monitor);
-                    // createServerWithInfobase registers the server with the module's create flag = false,
-                    // so the served file infobase (1Cv8.1CD) is never physically written.
-                    if (pair instanceof Pair)
-                    {
-                        if (register)
+                    InfobaseBindings.mutate(monitor, nativeMonitor -> {
+                        Object pair = ssCreateServerWithInfobase(finalService, createArgs, monitor);
+                        // createServerWithInfobase registers the server with the module's create flag = false,
+                        // so the served file infobase (1Cv8.1CD) is never physically written.
+                        if (pair instanceof Pair)
                         {
-                            // mode='register': the 1Cv8.1CD already exists on disk (validated up front),
-                            // so do NOT materialize a new DB — that would fail / overwrite. Best-effort
-                            // mark the module as existing (mirrors the EDT wizard's existing-infobase
-                            // branch; a no-op if the API lacks setExist). Never call setCreate(true).
-                            markInfobaseExisting(((Pair<?, ?>)pair).getSecond());
+                            if (register)
+                            {
+                                // mode='register': the 1Cv8.1CD already exists on disk (validated up front),
+                                // so do NOT materialize a new DB — that would fail / overwrite. Best-effort
+                                // mark the module as existing (mirrors the EDT wizard's existing-infobase
+                                // branch; a no-op if the API lacks setExist). Never call setCreate(true).
+                                markInfobaseExisting(((Pair<?, ?>)pair).getSecond());
+                            }
+                            else
+                            {
+                                // mode='create': the server would otherwise fail to start ("Информационная база
+                                // не обнаружена"), so materialize the DB now (same step the EDT wizard performs).
+                                ssMaterializeInfobase(finalService, ((Pair<?, ?>)pair).getFirst(),
+                                    ((Pair<?, ?>)pair).getSecond(), monitor);
+                            }
                         }
-                        else
-                        {
-                            // mode='create': the server would otherwise fail to start ("Информационная база
-                            // не обнаружена"), so materialize the DB now (same step the EDT wizard performs).
-                            ssMaterializeInfobase(finalService, ((Pair<?, ?>)pair).getFirst(),
-                                ((Pair<?, ?>)pair).getSecond(), monitor);
-                        }
-                    }
-                    jobResult.set(pair);
+                        jobResult.set(pair);
+                    });
                 }
                 catch (Exception e)
                 {
@@ -1285,26 +1608,14 @@ public class CreateInfobaseTool implements IMcpTool
      */
     private static StandaloneContext resolveStandaloneContext(String projectName)
     {
-        ProjectContext ctx = ProjectContext.of(projectName);
-        if (!ctx.exists())
+        ApplicationContext application = resolveApplicationContext(projectName);
+        if (application.error() != null)
         {
-            return StandaloneContext.failed(
-                ToolResult.error(ProjectContext.notFoundMessage(projectName)).toJson());
-        }
-        if (!ctx.isOpen())
-        {
-            return StandaloneContext.failed(ToolResult.error("Project is closed: " + projectName //$NON-NLS-1$
-                + ". Open the project in EDT first.").toJson()); //$NON-NLS-1$
+            return StandaloneContext.failed(application.error());
         }
 
-        IApplicationManager appManager = Activator.getDefault().getApplicationManager();
-        if (appManager == null)
-        {
-            return StandaloneContext.failed(
-                ToolResult.error("IApplicationManager service is not available").toJson()); //$NON-NLS-1$
-        }
-
-        Object serverService = acquireStandaloneServerService();
+        Object serverService = StandaloneServerSupport.acquireService("create_infobase", //$NON-NLS-1$
+            "create_infobase: could not start standalone-server bundle"); //$NON-NLS-1$
         if (serverService == null)
         {
             return StandaloneContext.failed(ToolResult.error("Standalone-server service is not available; the EDT " //$NON-NLS-1$
@@ -1313,7 +1624,7 @@ public class CreateInfobaseTool implements IMcpTool
                 .toJson());
         }
 
-        return StandaloneContext.of(ctx.project(), appManager, serverService);
+        return StandaloneContext.of(application.project(), application.manager(), serverService);
     }
 
     /**
@@ -1327,30 +1638,14 @@ public class CreateInfobaseTool implements IMcpTool
      */
     private static String awaitStandaloneJob(Job createJob, Path infobaseDir, boolean register)
     {
-        try
-        {
-            boolean finished = createJob.join(
-                TimeUnit.SECONDS.toMillis(CREATE_TIMEOUT_SECONDS), null);
-            if (!finished)
-            {
-                createJob.cancel();
-                String verb = register ? VERB_REGISTRATION : VERB_CREATION;
-                String proc = register
-                    ? "The server-registration step may still be running. " //$NON-NLS-1$
-                    : "The ibcmd process may still be running. "; //$NON-NLS-1$
-                return ToolResult.error(STANDALONE_SERVER_MSG_PREFIX + verb + " timed out after " //$NON-NLS-1$
-                    + CREATE_TIMEOUT_SECONDS + " seconds. " + proc //$NON-NLS-1$
-                    + "Check the EDT log and the directory '" + infobaseDir //$NON-NLS-1$
-                    + "'.").toJson(); //$NON-NLS-1$
-            }
-        }
-        catch (InterruptedException e)
-        {
-            Thread.currentThread().interrupt();
-            String verb = register ? VERB_REGISTRATION : VERB_CREATION;
-            return ToolResult.error(STANDALONE_SERVER_MSG_PREFIX + verb + " was interrupted.").toJson(); //$NON-NLS-1$
-        }
-        return null;
+        String verb = register ? VERB_REGISTRATION : VERB_CREATION;
+        return awaitCreationJob(createJob, () -> {
+            String process = register ? "The server-registration step may still be running. " //$NON-NLS-1$
+                : "The ibcmd process may still be running. "; //$NON-NLS-1$
+            return STANDALONE_SERVER_MSG_PREFIX + verb + " timed out after " //$NON-NLS-1$
+                + CREATE_TIMEOUT_SECONDS + " seconds. " + process //$NON-NLS-1$
+                + "Check the EDT log and the directory '" + infobaseDir + "'."; //$NON-NLS-1$ //$NON-NLS-2$
+        }, () -> STANDALONE_SERVER_MSG_PREFIX + verb + " was interrupted."); //$NON-NLS-1$
     }
 
     /**
@@ -1384,52 +1679,6 @@ public class CreateInfobaseTool implements IMcpTool
                 Object serverService)
         {
             return new StandaloneContext(null, project, appManager, serverService);
-        }
-    }
-
-    /**
-     * Acquires the standalone-server service ({@code IStandaloneServerService}) from the OSGi service
-     * registry BY CLASS NAME (reflectively, so this plugin has no compile/bundle dependency on the
-     * standalone-server feature — see {@link #STANDALONE_SERVER_SERVICE_CLASS}). It is published via the
-     * {@code com._1c.g5.wiring.serviceProvider} wiring of the standalone-server WST bundle. Returns
-     * {@code null} (the caller fails gracefully) when the bundle or service is unavailable.
-     *
-     * @return the service object (call it reflectively), or {@code null} when unavailable
-     */
-    private static Object acquireStandaloneServerService()
-    {
-        try
-        {
-            Bundle bundle = Platform.getBundle(STANDALONE_SERVER_WST_CORE_BUNDLE_ID);
-            if (bundle == null)
-            {
-                Activator.logError("create_infobase: bundle '" //$NON-NLS-1$
-                    + STANDALONE_SERVER_WST_CORE_BUNDLE_ID
-                    + "' not found — the EDT standalone-server feature is not installed", null); //$NON-NLS-1$
-                return null;
-            }
-            BundleContext context = bundle.getBundleContext();
-            if (context == null)
-            {
-                // The bundle is not active yet — start it transiently so its services register.
-                if (startBundleTransiently(bundle,
-                    "create_infobase: could not start standalone-server bundle")) //$NON-NLS-1$
-                {
-                    context = bundle.getBundleContext();
-                }
-            }
-            if (context == null)
-            {
-                return null;
-            }
-            // Look up by class NAME (String) — no compile-time reference to the service interface.
-            ServiceReference<?> ref = context.getServiceReference(STANDALONE_SERVER_SERVICE_CLASS);
-            return ref != null ? context.getService(ref) : null;
-        }
-        catch (Throwable t)
-        {
-            Activator.logError("create_infobase: could not acquire the standalone-server service", t); //$NON-NLS-1$
-            return null;
         }
     }
 
@@ -1581,7 +1830,7 @@ public class CreateInfobaseTool implements IMcpTool
             throw new IllegalStateException("Standalone-server behaviour delegate is not available; " //$NON-NLS-1$
                 + "the served infobase could not be created."); //$NON-NLS-1$
         }
-        Method create = ssMethod(delegate.getClass(), "createStandaloneServerInfobase", 2); //$NON-NLS-1$
+        Method create = StandaloneServerSupport.findMethod(delegate.getClass(), "createStandaloneServerInfobase", 2); //$NON-NLS-1$
         if (create == null)
         {
             throw new IllegalStateException("createStandaloneServerInfobase was not found on the standalone-" //$NON-NLS-1$
@@ -1606,7 +1855,7 @@ public class CreateInfobaseTool implements IMcpTool
     private static Object ssInvoke(Object target, String name, int argCount, Object... args)
         throws Exception // NOSONAR propagates checked exceptions across the reflective boundary by design
     {
-        Method m = ssMethod(target.getClass(), name, argCount);
+        Method m = StandaloneServerSupport.findMethod(target.getClass(), name, argCount);
         if (m == null)
         {
             return null;
@@ -1626,18 +1875,6 @@ public class CreateInfobaseTool implements IMcpTool
         }
     }
 
-    /** First public method on {@code cls} (incl. inherited) with the given name and parameter count. */
-    private static Method ssMethod(Class<?> cls, String name, int paramCount)
-    {
-        for (Method m : cls.getMethods())
-        {
-            if (m.getName().equals(name) && m.getParameterCount() == paramCount)
-            {
-                return m;
-            }
-        }
-        return null;
-    }
 
     /**
      * First public method on {@code cls} (incl. inherited) matching any of {@code names} (tried in
@@ -1651,7 +1888,7 @@ public class CreateInfobaseTool implements IMcpTool
     {
         for (String name : names)
         {
-            Method m = ssMethod(cls, name, paramCount);
+            Method m = StandaloneServerSupport.findMethod(cls, name, paramCount);
             if (m != null)
             {
                 return m;
@@ -2020,9 +2257,11 @@ public class CreateInfobaseTool implements IMcpTool
         // the READ-BACK wst-server IApplication (not the FILE ibRef built earlier for the create
         // call) — InfobaseAccessSupport.storeCredentials(IApplication, ...) adapts IT to the
         // InfobaseReference that EDT's own launch path (ServerApplicationBehaviourDelegate) resolves.
-        String credNote = register ? storeStandaloneCredentialsIfRequested(readBack.app, credentials) : null;
+        CredentialStoreReport credentialStore = register
+            ? storeStandaloneCredentialsIfRequested(readBack.app, credentials) : null;
 
-        String note = concatNotes(setDefaultNote, credNote);
+        String note = concatNotes(setDefaultNote,
+            credentialStore == null ? null : credentialStore.note);
         String verb = register ? ACTION_REGISTERED : ACTION_CREATED;
         String subject = standaloneServerSubject(rc.infobaseName, rc.infobaseDir, register);
 
@@ -2034,23 +2273,13 @@ public class CreateInfobaseTool implements IMcpTool
                 notBoundMessage(subject, rc.projectName, register) + note)
                     .put(KEY_APPLICATION_KIND, KIND_STANDALONE_SERVER);
             putStandaloneEndpoint(error, actualPort, webUrl);
+            putCredentialVerification(error, credentialStore);
             return error.toJson();
         }
 
-        ToolResult result = ToolResult.success()
-            .put(McpKeys.ACTION, verb)
-            .put(KEY_APPLICATION_KIND, KIND_STANDALONE_SERVER)
-            .put(McpKeys.PROJECT, rc.projectName)
-            .put(KEY_INFOBASE_FILE, rc.infobaseDir.toAbsolutePath().toString())
-            .put(KEY_INFOBASE_NAME, rc.infobaseName);
-        putApplications(result, readBack);
-
+        ToolResult result = creationResult(rc, verb, readBack, credentialStore)
+            .put(KEY_APPLICATION_KIND, KIND_STANDALONE_SERVER);
         putStandaloneEndpoint(result, actualPort, webUrl);
-        String newAppId = readBack.appId();
-        if (newAppId != null)
-        {
-            result.put(McpKeys.APPLICATION_ID, newAppId);
-        }
 
         String message;
         if (readBack.outcome == BindingOutcome.BOUND)
@@ -2112,7 +2341,7 @@ public class CreateInfobaseTool implements IMcpTool
     /**
      * Stores infobase connection credentials against the READ-BACK wst-server application (issue
      * #275) when the caller supplied any of {@code user}/{@code password}/{@code access}, returning
-     * a note to append to the result message — a success note, a non-fatal WARNING when the store
+     * a report to append to the result — a success note, a non-fatal WARNING when the store
      * failed (or the read-back produced no application to store them against), or
      * {@code null} when no credentials were requested. Credential storage never fails the
      * standalone-server registration itself (the server itself is already registered). Mirrors
@@ -2122,9 +2351,9 @@ public class CreateInfobaseTool implements IMcpTool
      * @param application the read-back wst-server application ({@code null} when the read-back
      *            produced none — measured absent, unreadable or interrupted)
      * @param credentials the requested connection credentials (any field may be {@code null}/empty)
-     * @return a message note, or {@code null} when no credentials were requested
+     * @return the note and verification, or {@code null} when no credentials were requested
      */
-    private static String storeStandaloneCredentialsIfRequested(IApplication application,
+    private static CredentialStoreReport storeStandaloneCredentialsIfRequested(IApplication application,
             Credentials credentials)
     {
         if (!credentials.any())
@@ -2135,18 +2364,17 @@ public class CreateInfobaseTool implements IMcpTool
         {
             // Why it was not available (measured absent, unreadable, interrupted) is the read-back's
             // story, told by the message this note is appended to — do not restate it as a fact here.
-            return " WARNING: connection credentials were NOT stored: the new standalone-server " //$NON-NLS-1$
-                + "application was not available from the read-back - check get_applications and " //$NON-NLS-1$
-                + "store them with set_infobase_credentials."; //$NON-NLS-1$
+            return new CredentialStoreReport(
+                " WARNING: connection credentials were NOT stored: the new standalone-server " //$NON-NLS-1$
+                    + "application was not available from the read-back - check get_applications and " //$NON-NLS-1$
+                    + "store them with set_infobase_credentials.", null); //$NON-NLS-1$
         }
-        String error = storeSafely(() -> InfobaseAccessSupport.storeCredentials(application,
-            credentials.user, credentials.password, InfobaseAccessSupport.parseAccess(credentials.access)));
-        if (error != null)
-        {
-            return " WARNING: connection credentials were NOT stored: " + error; //$NON-NLS-1$
-        }
-        return " Stored connection credentials for user '" + (credentials.user == null ? "" : credentials.user) //$NON-NLS-1$ //$NON-NLS-2$
-            + "' (change them later with set_infobase_credentials)."; //$NON-NLS-1$
+        return storeSafely((publish, writeCommitted, writeAllowed) -> publish.accept(
+            InfobaseAccessSupport.storeCredentials(application,
+                credentials.user, credentials.password,
+                InfobaseAccessSupport.parseAccess(credentials.access), writeCommitted,
+                writeAllowed)),
+            credentials, true);
     }
 
     /**
@@ -2228,15 +2456,58 @@ public class CreateInfobaseTool implements IMcpTool
         final String infobaseName;
         final IApplicationManager appManager;
         final IProject project;
+        final ServerInfobaseTarget serverTarget;
 
         ResultContext(String projectName, Path infobaseDir, String infobaseName,
                 IApplicationManager appManager, IProject project)
+        {
+            this(projectName, infobaseDir, infobaseName, appManager, project, null);
+        }
+
+        ResultContext(String projectName, Path infobaseDir, String infobaseName,
+                IApplicationManager appManager, IProject project, ServerInfobaseTarget serverTarget)
         {
             this.projectName = projectName;
             this.infobaseDir = infobaseDir;
             this.infobaseName = infobaseName;
             this.appManager = appManager;
             this.project = project;
+            this.serverTarget = serverTarget;
+        }
+
+        String location()
+        {
+            return serverTarget == null ? infobaseDir.toAbsolutePath().toString() : serverTarget.presentation();
+        }
+
+        void putLocation(ToolResult result)
+        {
+            if (serverTarget == null)
+            {
+                result.put(KEY_INFOBASE_FILE, infobaseDir.toAbsolutePath().toString());
+            }
+            else
+            {
+                result.put(KEY_INFOBASE_SERVER, serverTarget.server())
+                    .put(KEY_INFOBASE_REF, serverTarget.infobase());
+            }
+        }
+
+        /** Include the exact cleanup address even when registration or association failed. */
+        void putRegistrationIdentity(JsonObject result, InfobaseReference reference)
+        {
+            result.addProperty("registrationId", reference.getUuid().toString()); //$NON-NLS-1$
+            result.addProperty("project", projectName); //$NON-NLS-1$
+            result.addProperty(KEY_INFOBASE_NAME, infobaseName);
+            if (serverTarget == null)
+            {
+                result.addProperty(KEY_INFOBASE_FILE, infobaseDir.toAbsolutePath().toString());
+            }
+            else
+            {
+                result.addProperty(KEY_INFOBASE_SERVER, serverTarget.server());
+                result.addProperty(KEY_INFOBASE_REF, serverTarget.infobase());
+            }
         }
     }
 
@@ -2479,33 +2750,47 @@ public class CreateInfobaseTool implements IMcpTool
     static String buildSuccessResult(ResultContext rc, InfobaseReference ibRef, boolean setDefault,
             boolean register, String credNote)
     {
+        return buildSuccessResult(rc, ibRef, setDefault, register,
+            credNote == null ? null : new CredentialStoreReport(credNote, null));
+    }
+
+    static String buildSuccessResult(ResultContext rc, InfobaseReference ibRef, boolean setDefault,
+            boolean register, CredentialStoreReport credentialStore)
+    {
+        return buildSuccessResult(rc, ibRef, setDefault, register, credentialStore, () -> { }, null);
+    }
+
+    private static String buildSuccessResult(ResultContext rc, InfobaseReference ibRef, boolean setDefault,
+            boolean register, CredentialStoreReport credentialStore, Runnable contextGuard,
+            ApplicationDefaultChange defaultChange)
+    {
+        contextGuard.run();
         ApplicationReadBack readBack = pollForNewApplication(rc.appManager, rc.project,
             app -> isMatchingNewInfobaseApp(app, ibRef));
 
-        String setDefaultNote = setDefault ? applySetDefault(rc.appManager, rc.project, readBack) : null;
-        String note = concatNotes(setDefaultNote, credNote);
+        contextGuard.run();
+        String setDefaultNote = setDefault
+            ? defaultChange != null && readBack.app != null
+                ? defaultChange.applyAfterInfobaseWrite(readBack.app, contextGuard)
+                : applySetDefault(rc.appManager, rc.project, readBack)
+            : null;
+        contextGuard.run();
+        String note = concatNotes(setDefaultNote,
+            credentialStore == null ? null : credentialStore.note);
         String verb = register ? ACTION_REGISTERED : ACTION_CREATED;
         String subject = "Infobase '" + rc.infobaseName + "' " + verb + " at '" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + rc.infobaseDir.toAbsolutePath() + "'"; //$NON-NLS-1$
+            + rc.location() + "'"; //$NON-NLS-1$
 
         if (readBack.outcome == BindingOutcome.NOT_BOUND)
         {
-            return notBoundResult(rc, verb, readBack, subject,
-                notBoundMessage(subject, rc.projectName, register) + note).toJson();
+            ToolResult error = notBoundResult(rc, verb, readBack, subject,
+                notBoundMessage(subject, rc.projectName, register) + note);
+            putCredentialVerification(error, credentialStore);
+            return error.toJson();
         }
 
-        ToolResult result = ToolResult.success()
-            .put(McpKeys.ACTION, verb)
-            .put(McpKeys.PROJECT, rc.projectName)
-            .put(KEY_INFOBASE_FILE, rc.infobaseDir.toAbsolutePath().toString())
-            .put(KEY_INFOBASE_NAME, rc.infobaseName);
-        putApplications(result, readBack);
-
+        ToolResult result = creationResult(rc, verb, readBack, credentialStore);
         String newAppId = readBack.appId();
-        if (newAppId != null)
-        {
-            result.put(McpKeys.APPLICATION_ID, newAppId);
-        }
 
         String message;
         if (readBack.outcome == BindingOutcome.BOUND)
@@ -2708,6 +2993,11 @@ public class CreateInfobaseTool implements IMcpTool
         String[] newAppIdHolder = new String[1];
         boolean readCompleted = false;
         boolean cutShort = false;
+        // The DEADLINE reason, when a bounded read expired: that story is not the FAILED one. An
+        // abandoned listing keeps running, and this listing initialises every application it
+        // reaches - which for one with no port yet means binding sockets and PERSISTING a debug
+        // port. So it cannot be reported as "nothing happened".
+        String[] deadlineFailure = new String[1];
 
         // Short bounded re-poll: the provision-delegate listener fires asynchronously after
         // associate(), so the new application may not be visible on the first read.
@@ -2718,8 +3008,15 @@ public class CreateInfobaseTool implements IMcpTool
             newAppIdHolder[0] = null;
 
             undecidable[0] = false;
-            readCompleted = readBackApplications(appManager, project, matcher, attempt, newAppHolder,
-                newAppIdHolder, undecidable);
+            ReadBackAttempt attemptOutcome = readBackApplications(appManager, project, matcher,
+                attempt, newAppHolder, newAppIdHolder, undecidable, deadlineFailure);
+            readCompleted = attemptOutcome == ReadBackAttempt.COMPLETED;
+            if (attemptOutcome == ReadBackAttempt.INTERRUPTED)
+            {
+                // The bounded read's WAIT was cut short (#622): the budget was not spent and
+                // nothing failed, so this is the same story the sleep below tells.
+                cutShort = true;
+            }
             if (readCompleted || newAppHolder[0] != null)
             {
                 // Keep the snapshot the answer actually came from. A listing that failed AFTER
@@ -2748,18 +3045,25 @@ public class CreateInfobaseTool implements IMcpTool
             return new ApplicationReadBack(appsArray, newAppHolder[0], newAppIdHolder[0],
                 BindingOutcome.BOUND, null);
         }
-        if (!readCompleted)
-        {
-            return new ApplicationReadBack(appsArray, null, null, BindingOutcome.UNVERIFIED,
-                "the application read-back could not be completed - the failure is in the EDT " //$NON-NLS-1$
-                    + "error log"); //$NON-NLS-1$
-        }
         if (cutShort)
         {
             // Interrupted: the reads that DID run saw no application, but the budget that absorbs the
             // listener race was not spent — and nothing failed, so there is no log entry to point at.
+            // Checked BEFORE the read-failure branch: an interrupted read is also an incomplete one,
+            // and pointing at a log entry nobody wrote would be the wrong story.
             return new ApplicationReadBack(appsArray, null, null, BindingOutcome.UNVERIFIED,
                 "the read-back was interrupted before its budget was spent"); //$NON-NLS-1$
+        }
+        if (!readCompleted)
+        {
+            if (deadlineFailure[0] != null)
+            {
+                return new ApplicationReadBack(appsArray, null, null, BindingOutcome.UNVERIFIED,
+                    readBackDeadlineReason(deadlineFailure[0]));
+            }
+            return new ApplicationReadBack(appsArray, null, null, BindingOutcome.UNVERIFIED,
+                "the application read-back could not be completed - the failure is in the EDT " //$NON-NLS-1$
+                    + "error log"); //$NON-NLS-1$
         }
         if (undecidable[0])
         {
@@ -2770,6 +3074,25 @@ public class CreateInfobaseTool implements IMcpTool
                     + "(an identity could not be read)"); //$NON-NLS-1$
         }
         return new ApplicationReadBack(appsArray, null, null, BindingOutcome.NOT_BOUND, null);
+    }
+
+    /**
+     * The UNVERIFIED reason for a read-back whose bounded listing expired.
+     *
+     * <p>Kept apart from the plain read-failure sentence for one reason: this listing is not a
+     * passive read. {@code getApplications} initialises every application it reaches, and one with
+     * no debug port yet gets a port ASSIGNED and PERSISTED — so an abandoned poll can still change
+     * this project's applications after {@code create_infobase} has answered. Saying only "could
+     * not be completed" would let the caller believe nothing happened.
+     *
+     * @param deadlineFailure the bounded read's own diagnosis
+     * @return the reason sentence, never {@code null}
+     */
+    static String readBackDeadlineReason(String deadlineFailure)
+    {
+        return deadlineFailure + " - the listing may still be running, and EDT assigns a debug " //$NON-NLS-1$
+            + "port while it lists, so the project's applications MAY STILL BE CHANGED after this " //$NON-NLS-1$
+            + "answer; re-read them with get_applications"; //$NON-NLS-1$
     }
 
     /**
@@ -2793,11 +3116,23 @@ public class CreateInfobaseTool implements IMcpTool
         ToolResult result = ToolResult.error(errorText)
             .put(McpKeys.ACTION, verb)
             .put(McpKeys.PROJECT, rc.projectName)
-            .put(KEY_INFOBASE_FILE, rc.infobaseDir.toAbsolutePath().toString())
             .put(KEY_INFOBASE_NAME, rc.infobaseName)
             .put(KEY_BOUND_TO_PROJECT, false);
+        rc.putLocation(result);
         putApplications(result, readBack);
         return result;
+    }
+
+    private static ToolResult creationResult(ResultContext context, String verb,
+            ApplicationReadBack readBack, CredentialStoreReport credentials)
+    {
+        ToolResult result = ToolResult.success().put(McpKeys.ACTION, verb)
+            .put(McpKeys.PROJECT, context.projectName).put(KEY_INFOBASE_NAME, context.infobaseName);
+        context.putLocation(result);
+        putApplications(result, readBack);
+        putCredentialVerification(result, credentials);
+        String id = readBack.appId();
+        return id == null ? result : result.put(McpKeys.APPLICATION_ID, id);
     }
 
     /**
@@ -2867,23 +3202,47 @@ public class CreateInfobaseTool implements IMcpTool
      * application the {@code matcher} accepts in {@code newAppHolder[0]}, with its echoed id in
      * {@code newAppIdHolder[0]} (both left {@code null} when not yet visible). Read-only.
      *
-     * @return {@code true} if the read produced a snapshot to inspect (whether or not the new
-     *         application was in it), {@code false} if reading the applications failed or produced no
-     *         snapshot at all (already logged) so the caller stops re-polling and reports UNVERIFIED
+     * @return {@link ReadBackAttempt#COMPLETED} if the read produced a snapshot to inspect (whether
+     *         or not the new application was in it); {@link ReadBackAttempt#FAILED} if reading the
+     *         applications failed or produced no snapshot at all (already logged);
+     *         {@link ReadBackAttempt#INTERRUPTED} if the WAIT was interrupted, which failed nothing.
+     *         The caller stops re-polling on anything but COMPLETED and reports UNVERIFIED.
      */
-    private static boolean readBackApplications(IApplicationManager appManager, IProject project,
+    private static ReadBackAttempt readBackApplications(IApplicationManager appManager, IProject project, // NOSONAR parameter list is the existing out-holder shape; a parameter object would rename it, not shorten it
             ApplicationMatcher matcher, JsonArray appsArray, IApplication[] newAppHolder,
-            String[] newAppIdHolder, boolean[] undecidable)
+            String[] newAppIdHolder, boolean[] undecidable, String[] deadlineFailure)
     {
+        // Bounded (#622). An expired deadline is one more read that established nothing, so it takes
+        // the existing "read failed" path — logged, then reported as UNVERIFIED, never as a MEASURED
+        // absence. The re-poll stops on anything but COMPLETED, so at most one deadline is paid.
+        // The reason is carried out because THIS listing is the one that mutates: it initialises
+        // every application it reaches, and an application with no port yet gets one assigned by a
+        // scan that binds sockets and then flushes the preference store. An abandoned poll can do
+        // all of that after create_infobase has already answered UNVERIFIED.
+        ApplicationSupport.BoundedRead<List<IApplication>> read =
+            ApplicationSupport.getApplicationsBounded(appManager, project,
+                ApplicationSupport.LOOKUP_TIMEOUT_MS);
+        if (!read.concluded())
+        {
+            if (read.interrupted())
+            {
+                // The caller's own wait was cut short; nothing failed, so nothing is logged.
+                return ReadBackAttempt.INTERRUPTED;
+            }
+            Activator.logError("create_infobase: application read-back did not conclude — " //$NON-NLS-1$
+                + read.deadlineFailure(), null);
+            deadlineFailure[0] = read.deadlineFailure();
+            return ReadBackAttempt.FAILED;
+        }
         try
         {
-            List<IApplication> applications = appManager.getApplications(project);
+            List<IApplication> applications = read.valueOrRethrow();
             if (applications == null)
             {
                 // No snapshot at all is not the same as an empty one: it establishes nothing, so it
                 // must not be counted as a read that MEASURED the application to be absent.
                 Activator.logError("create_infobase: application read-back returned no list", null); //$NON-NLS-1$
-                return false;
+                return ReadBackAttempt.FAILED;
             }
             for (IApplication app : applications)
             {
@@ -2893,7 +3252,7 @@ public class CreateInfobaseTool implements IMcpTool
                     undecidable[0] = true;
                 }
             }
-            return true;
+            return ReadBackAttempt.COMPLETED;
         }
         catch (Exception e)
         {
@@ -2903,8 +3262,23 @@ public class CreateInfobaseTool implements IMcpTool
             // a completed read. A single unreadable application does NOT come through here - it is
             // confined by readOneApplication, which keeps the rest of the snapshot.
             Activator.logError("create_infobase: error reading back applications", e); //$NON-NLS-1$
-            return false;
+            return ReadBackAttempt.FAILED;
         }
+    }
+
+    /**
+     * How ONE application read-back attempt ended. {@link #FAILED} and {@link #INTERRUPTED} both
+     * stop the re-poll, but only FAILED has an EDT log entry behind it — an interrupted WAIT is
+     * the caller's own doing and failed nothing, so the two must not share a message.
+     */
+    private enum ReadBackAttempt
+    {
+        /** The read produced a snapshot to inspect. */
+        COMPLETED,
+        /** The read failed or produced no snapshot at all; already logged. */
+        FAILED,
+        /** The caller's wait was interrupted before the read concluded; nothing failed. */
+        INTERRUPTED
     }
 
     /**
@@ -3010,27 +3384,20 @@ public class CreateInfobaseTool implements IMcpTool
     }
 
     /**
-     * Checks whether two infobase references point to the same FILE infobase by
-     * comparing their connection-string file path. A miss is what makes the read-back report
+     * Checks whether two references identify the same registered infobase by UUID. A miss is what makes the read-back report
      * NOT_BOUND (it no longer merely skips the applicationId echo), so a comparison that could not be
-     * made - an absent or unreadable connection string, or a failure while reading one - returns
+     * made - an absent or unreadable UUID, or a failure while reading one - returns
      * {@link MatchResult#UNDECIDABLE} rather than a confident "different".
      */
     private static MatchResult matchesRef(InfobaseReference a, InfobaseReference b)
     {
         try
         {
-            if (a.getConnectionString() == null || b.getConnectionString() == null)
+            if (a.getUuid() == null || b.getUuid() == null)
             {
                 return MatchResult.UNDECIDABLE;
             }
-            String ca = a.getConnectionString().asConnectionString();
-            String cb = b.getConnectionString().asConnectionString();
-            if (ca == null || cb == null)
-            {
-                return MatchResult.UNDECIDABLE;
-            }
-            return ca.equalsIgnoreCase(cb) ? MatchResult.MATCH : MatchResult.NO_MATCH;
+            return a.getUuid().equals(b.getUuid()) ? MatchResult.MATCH : MatchResult.NO_MATCH;
         }
         catch (Exception e)
         {

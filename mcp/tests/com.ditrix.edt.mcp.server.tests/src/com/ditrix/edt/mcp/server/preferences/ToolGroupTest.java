@@ -164,6 +164,7 @@ public class ToolGroupTest
         assertTrue(tools.contains("get_configuration_properties"));
         assertTrue(tools.contains("export_configuration_to_xml"));
         assertTrue(tools.contains("import_configuration_from_xml"));
+        assertTrue(tools.contains("import_project_from_file")); //$NON-NLS-1$
         assertTrue(tools.contains("delete_project"));
         assertTrue(tools.contains("resync_to_disk"));
         assertTrue(tools.contains("create_project"));
@@ -173,9 +174,10 @@ public class ToolGroupTest
         assertTrue(tools.contains("enable_toolset")); //$NON-NLS-1$
         assertTrue(tools.contains("get_event_log")); //$NON-NLS-1$
         assertTrue(tools.contains("get_mcp_history")); //$NON-NLS-1$
+        assertTrue(tools.contains("import_project")); //$NON-NLS-1$
         assertTrue(tools.contains("plugin_check_for_update")); //$NON-NLS-1$
         assertTrue(tools.contains("plugin_update")); //$NON-NLS-1$
-        assertEquals(19, tools.size());
+        assertEquals(21, tools.size());
     }
 
     @Test
@@ -190,7 +192,10 @@ public class ToolGroupTest
         // The workspace-wide break-on-error switch sits in the same group as the line
         // breakpoints it complements: whoever may set one may set the other.
         assertTrue(tools.contains("set_error_breakpoint")); //$NON-NLS-1$
-        assertEquals(15, tools.size());
+        // Pausing a running session is the counterpart of resume, so it rides the same group.
+        assertTrue(tools.contains("debug_pause")); //$NON-NLS-1$
+        assertTrue(tools.contains("manage_profiling_results")); //$NON-NLS-1$
+        assertEquals(17, tools.size());
     }
 
     @Test
@@ -216,6 +221,14 @@ public class ToolGroupTest
     }
 
     @Test
+    public void testApplicationsGroupIncludesInfobaseSessions()
+    {
+        assertTrue(ToolGroup.APPLICATIONS.getToolNames().contains("infobase_sessions")); //$NON-NLS-1$
+        assertEquals(ToolGroup.APPLICATIONS,
+            ToolGroup.getGroupForTool("infobase_sessions")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testRefactoringGroupContents()
     {
         List<String> tools = ToolGroup.REFACTORING.getToolNames();
@@ -230,6 +243,7 @@ public class ToolGroupTest
         // add_form_*/set_form_item_property/delete_form_item tools were folded into
         // create/modify/delete_metadata and removed in F4b).
         assertTrue(tools.contains("modify_metadata"));
+        assertTrue(tools.contains("clone_metadata_object")); //$NON-NLS-1$
         assertTrue(tools.contains("adopt_metadata_object")); //$NON-NLS-1$
         assertTrue(tools.contains("dcs")); //$NON-NLS-1$
         assertFalse(tools.contains("add_form_attribute"));
@@ -237,6 +251,7 @@ public class ToolGroupTest
         assertFalse(tools.contains("add_form_command"));
         assertFalse(tools.contains("delete_form_item"));
         assertFalse(tools.contains("add_form_item"));
-        assertEquals(6, tools.size());
+        assertTrue(tools.contains("sort_metadata"));
+        assertEquals(9, tools.size());
     }
 }

@@ -55,7 +55,7 @@ tests/e2e/
 4. **`kind="write-metadata"` tools get extra isolation** (the orchestrator does this, not you): immediately after such a test it runs `reset_fixture()` **then** `reset_model()`. Why: these tools mutate EDT's in-memory BM model, EDT may **async-autosave** it to disk, and a git reset alone cannot undo an *unsaved model* change — `reset_model()` (calls `clean_project`, which refreshes the model from the just-reset clean disk) discards it before the next test.
 5. **After the whole run** the final `git status TestConfiguration/` MUST be empty. A run that leaves the project dirty is a failed run.
 
-**Metadata writes now persist to disk** (since commit `71a48ba` — fix-card `metadata-writes-not-persisted-to-disk`, see [[project_metadata_write_persistence]]). `create_metadata` / `modify_metadata` now `forceExport` the mutated top object(s) to `.mdo` after the write; `delete_metadata`/`rename_metadata_object` always did (via the refactoring service); `write_module_source` flushes `.bsl` synchronously. Since #406 the write tools that extend `AbstractMetadataWriteTool` also WAIT for that export QUEUE to drain before answering (`rename_metadata_object` and `build_external_objects` do not extend it and still lag). That wait is ordered with the export only when the SAME call submitted it. Since #408 the generic `delete_metadata` path submits too, but only for the CONTAINER of the deleted node (its `Configuration.mdo` / owner `.mdo`); the deleted object's OWN file cannot be resubmitted at all (EDT builds a save task by looking the FQN up in the transaction, and a deleted FQN yields none), so poll for that one. Where the call did submit, a drained queue means nothing of that call is still pending - it does NOT prove the bytes are right (EDT logs a per-file write failure and completes the computation anyway), and the wait is skipped where the export state cannot be observed. So still ASSERT the bytes; you just no longer need to wait for them. **Consequence:** verify a metadata-write BOTH ways — a **MODEL READ-BACK** (semantic: a read tool sees the change in the model) AND the **on-disk structure**. For a call that SUBMITTED its own export (create/modify, and the specialized delete branches) assert the disk directly (`assert_disk_lacks` / `assert_disk_path_gone` / `read_disk`) and do it BEFORE any other MCP round trip. Poll instead for a file whose export the call did NOT submit — for the generic `delete_metadata` path that is the deleted object's own file, while its container's file is asserted immediately (§ the comment in `test_delete_metadata.py`, and #408). `rename_metadata_object` / `build_external_objects` poll for the separate reason that they do not inherit the barrier at all. The orchestrator reverts the on-disk `.mdo` via `reset_fixture` (git) and re-syncs the model via `reset_model()`.
+**Verify metadata writes in disk and model.** `create_metadata` / `modify_metadata` submit top-object exports; `delete_metadata` / `rename_metadata_object` also use EDT refactoring, and `write_module_source` flushes `.bsl` synchronously. `AbstractMetadataWriteTool` and `dcs` share `tools/base/WriteExportBarrier`, which waits off SWT and outside the BM transaction for the exports submitted by this call. The metadata base retains a fallback when export state is unobservable; `dcs` refuses success for pending or unobservable export with `mutationCommitted:true`, and successful DCS writes report `Export drained: true`. A drained queue does not prove correct bytes: EDT can log a per-file failure and still finish the computation. Assert submitted exports DIRECTLY (`read_disk`, `assert_disk_lacks`, `assert_disk_path_gone`) BEFORE another MCP call, then read back the model. Generic `delete_metadata` submits its container's export (`Configuration.mdo` / owner `.mdo`), so assert that immediately; poll the deleted object's own file, whose removal cannot be resubmitted by FQN. `rename_metadata_object` / `build_external_objects` do not use this barrier and need polling. The orchestrator restores disk with `reset_fixture` and synchronizes the model with `reset_model()`.
 
 ---
 
@@ -73,6 +73,8 @@ tests/e2e/
 **Ground truth depends on the tool:** a **file-write** is proven by the git diff; a **metadata-write** by the model read-back (semantic) AND the on-disk structure (asserting the specific element - directly when the call submitted its own export, polled when it did not; see §3). Always assert WHAT changed (the structural element), never merely that *a* diff exists or that the bare name appears somewhere; and never use `assert_no_diff()` as the *only* assertion (it must accompany a real content/sentinel check).
 
 ---
+
+For collection order use `metadata_collection_state(project, fqn)` for the observed EList and autosort policy, or `metadata_collection_order` for Names only; presentation listings do not prove order. Compare the parsed `.mdo` sequence and print actual parsed order on failure. Run manual modes on ungoverned lists; when an `autosort` block is present, validate it with `assert_autosort_notice`, assert the refusal and the allowed native-comparator sort. Default creation must also carry the notice. Never change user preferences to pass tests. `mode:list` is tracked as read-only even on transport failure.
 
 ## 5. Negative coverage is MANDATORY (not just happy paths)
 
@@ -128,6 +130,10 @@ A separate **anti-cheat verifier subagent** will read every test and rule REAL o
 
 ## 7. Harness API (the contract — call these, do not re-implement)
 
+Use `call()` for tool calls. It validates successful, present `structuredContent` against that tool's `outputSchema`, cached from paginated `tools/list` and refreshed after toolset calls, reinitialization or a cache miss; failures name the tool, JSON path and schema rule. A tool missing from the refreshed catalogue fails discovery; only advertised tools without a schema skip validation. Error payloads and negotiated text-only responses bypass this success-schema check. Keep model and disk assertions: schema validity does not prove the effect.
+
+The stdlib validator supports `type` (including unions), `properties`, `items`, `required`, `enum`, `additionalProperties`, `oneOf` and `anyOf`. Extend it and its `runner_tests/test_output_schema.py` tests before emitting another validation keyword; do not add a dependency. Runner tests mocking `_post` must supply the catalogue or seed `_OUTPUT_SCHEMAS` with each advertised tool name (use `None` for no schema).
+
 ```python
 from harness import (
     call,                                                     # tools/call (the orchestrator does the initialize handshake once)
@@ -136,13 +142,24 @@ from harness import (
     assert_no_diff, assert_diff_contains, assert_diff_paths,  # on-disk truth (git)
     read_disk, diff,                                          # rarely needed (prefer the asserts above)
     e2e_test, PROJECT,                                        # PROJECT == "TestConfiguration"
+    snapshot_application_bindings,                           # (effective default ID, sorted RuntimeClient name/ID pairs)
 )
 # NOTE: reset_fixture() and reset_model() also exist but the ORCHESTRATOR calls them
 # for you (reset_fixture before every test; reset_fixture+reset_model after every
 # write-metadata test). Do NOT call them in a test unless you genuinely need an
 # intermediate reset.
 #
-# Gated live-infobase helpers (used ONLY by tools/test_live_roundtrip.py, see §8.1):
+# A test that WRITES INTO THE EXTENSION fixture (TESTS_PROJECT) restores it itself, in a
+# finally block, with the one shared restore - never a local copy:
+#   restore_extension_fixture(ctx)   # revert, clean_project, settle, revert, settle; every step checked
+# and polls a file of a NON-BASE fixture with the same poll the base uses:
+#   poll_disk_contains_all(rel_path, needles, ctx=..., fixture_rel=TESTS_PROJECT_REL)
+#
+# Infobase refusal/write checks compare snapshot_application_bindings(PROJECT) before/after.
+# Verify bindings independently of the operation's recovery report; check sharing projects too
+# after global deregistration. The effective default may be inferred, so also verify the explicit
+# default selection in EDT for live acceptance.
+# Gated live-infobase helpers (see §8.1; infobase mutation probes also use this gate):
 #   requires_live_infobase(reason)   # first line; raises E2ESkip unless EDT_MCP_LIVE_INFOBASE=1
 #   parse_yaxunit_counts(text)       # YAXUnit Markdown summary -> {total,passed,failed,errors,skipped,result}
 #   extract_application_id(text)     # pull applicationId out of a debug-launch handle
@@ -244,6 +261,33 @@ python tests/e2e/run_all.py --project TestConfiguration --junit-xml tests/e2e/e2
 - **Filter:** `--filter <substr>` runs only tests whose name/tool matches (useful while iterating).
 - **Per-test timeout / hang protection:** each test runs under a wall-clock timeout (`--test-timeout`, default **600s**, env `MCP_TEST_TIMEOUT`; the per-CALL HTTP timeout is `MCP_CALL_TIMEOUT`, default 180s). If a test exceeds it, EDT is almost certainly **hung** (the classic case: `clean_project` → `ProjectRestartJob` wedges and the call never returns). That test is reported **`[TIMEOUT]` = a FAILURE** (`<failure type="timeout">` in JUnit) with a clear message, and **every remaining test is `[SKIP]`ped** — a wedged EDT would make them all hang too, so the run aborts fast instead of stalling for minutes. There is **no auto-relaunch**: restart EDT and re-run (optionally `--filter` from where it stopped). Keep the timeout comfortably above the slowest legit test — a `write-metadata` unit chains the test call + `clean_project` + `wait_for_project_ready` (each ≤ `MCP_CALL_TIMEOUT`), so the default 600 sits well above that ~3× budget. **Gotcha:** do not start a full run right after a `-clean` relaunch — let the project finish indexing first, or an early `clean_project` can legitimately run long.
 - **Clean tree at session end (`final_cleanup`):** a run STARTS and ENDS with `harness.final_cleanup()` so `git status` is empty afterward — "no diff" is the visible "the session passed and left nothing behind" signal. It reverts **BOTH** fixtures (base `tests/TestConfiguration` + extension `tests/tests`) and `clean_project`s both so EDT's in-memory model is re-synced from the clean disk; without that model sync, a stale model (a manual edit made in the EDT editor, or an unflushed metadata write) would **autosave the change back after the run** and silently re-dirty the tree. The final cleanliness gate is `all_fixtures_status()` (covers both fixtures). NB it WILL wipe an uncommitted manual experiment under either fixture — that is intentional (a session must end clean). On a timeout-abort it reverts git-only (EDT is wedged; model-sync would hang), so post-abort cleanliness is point-in-time only. **Per-test** `assert_no_diff` stays base-scoped (tests only mutate the base, read the extension) — if you ever add an extension-MUTATING tool, give it its own extension-scoped diff assertion, since the per-test gate won't see extension dirt (only the final gate will).
+
+### Launch-preset tools/list checks
+
+`tools/test_preset_launch.py` checks read-only presets selected at EDT startup through
+`EDT_MCP_TOOL_PRESET=analysis-only` or `EDT_MCP_TOOL_PRESET=code-review`. Pass the same
+variable to the test process and launch EDT with `EDT_MCP_PROGRESSIVE_DISCLOSURE=false`.
+The launch preset is session-only; stored Tools preferences are untouched by its resolution
+and registry reads, including migration state. IDs are case-insensitive and trimmed. The value
+is resolved once on first use, including bridge calls and manual starts without early startup.
+Predefined override IDs are `all-tools`, `analysis-only`, `code-review`, and `development`.
+Unknown IDs produce one WARNING listing only those IDs and the stored-selection hint, then
+are ignored. Missing/blank values and `custom` use the stored selection; explicit `custom`
+logs one INFO line explaining that there is no launch override. The wire tests report a clear
+skip without a selected read-only preset. The Tools tab edits saved settings and shows a
+read-only launch-preset note; its normal migrations still run. Unchanged OK/Apply preserves
+the saved selection and preset ID; deliberate edits apply on a launch without the override.
+Use a fresh workspace for CI launches: wire checks prove the catalogue, and unit tests prove
+that the launch override is not persisted.
+
+From `tests/e2e`, run `EDT_MCP_TOOL_PRESET=analysis-only python -m tools.test_preset_launch`;
+restart EDT with `code-review` and repeat with that value. This module's read-only entry
+point uses the shared handshake, transport and cleanliness helpers. It checks the complete
+`tools/list` annotations, the three explicit keep-list tools, all six #641 writers and a
+preset-specific source-reading control. It requires clean fixtures and verifies them at
+both ends without calling a writer. Do not use `run_all.py` for a read-only launch: its
+mandatory `clean_project` setup/cleanup is disabled by these presets. See
+[`tests/TESTING.md`](../TESTING.md#launch-preset-wire-checks) for the full recipe.
 
 ### 8.1 The gated live-infobase round-trip suite (`tools/test_live_roundtrip.py`)
 

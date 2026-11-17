@@ -14,19 +14,30 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
+import java.util.function.Function;
+import java.util.function.LongConsumer;
 import java.util.function.Predicate;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
+import org.eclipse.debug.core.ILaunch;
+import org.eclipse.debug.core.model.IProcess;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 
 import com.ditrix.edt.mcp.server.Activator;
+import com.e1c.g5.dt.applications.ApplicationException;
 import com.e1c.g5.dt.applications.IApplication;
+import com.e1c.g5.dt.applications.IApplicationManager;
 
 /**
  * Reflective access to the EDT WST standalone-server feature, shared by the standalone-server
@@ -50,6 +61,33 @@ public final class StandaloneServerSupport
 {
     /** Application type id of a standalone (WST) server application. */
     public static final String WST_SERVER_APP_TYPE = "com.e1c.g5.dt.applications.type.wst-server"; //$NON-NLS-1$
+
+    /** Start and stop share this bound because both are self-contained EDT server operations. */
+    public static final long SERVER_OPERATION_TIMEOUT_MS = 60_000L;
+
+    /** Hard cap for retaining a start's targeted dialog guard after an inconclusive wait. */
+    public static final long INCONCLUSIVE_START_GUARD_CAP_MS = 300_000L;
+
+    /**
+     * How long an explicit stop waits for the {@code ibsrv} process to exit after EDT reports
+     * the server STOPPED. EDT's own process wait gives up after 6 seconds and then reports
+     * STOPPED anyway, so this bound sits well above it.
+     */
+    public static final long PROCESS_EXIT_TIMEOUT_MS = 20_000L;
+
+    /** How often {@link #awaitProcessExit} re-reads whether the process is still alive. */
+    public static final long PROCESS_EXIT_POLL_MS = 250L;
+
+    /**
+     * Bound on reading the server process id. EDT's process {@code terminate()} holds the same
+     * monitor {@code proceedSessionCleanup} takes for its whole process wait, so the read can
+     * block while somebody else is stopping the server.
+     */
+    public static final long PID_READ_TIMEOUT_MS = 10_000L;
+
+    /** Internal EDT interface matched by name to keep the WST implementation package optional. */
+    private static final String STANDALONE_SERVER_PROCESS_INTERFACE =
+        "com.e1c.g5.v8.dt.internal.platform.standaloneserver.wst.core.IStandaloneServerProcess"; //$NON-NLS-1$
 
     /** Symbolic name of the bundle that owns the standalone-server WST service. */
     private static final String WST_CORE_BUNDLE_ID =
@@ -87,33 +125,155 @@ public final class StandaloneServerSupport
         FAILED
     }
 
+    /**
+     * Result of one bounded standalone-application lookup, including every attribution value the
+     * following start needs. Keeping the resolved server and names here prevents callers from
+     * performing another synchronous {@code IApplicationManager} lookup outside the deadline.
+     */
+    public static record ApplicationLookup(IApplication application, Object server,
+        String infobaseName, String serverName, String failure)
+    {
+    }
+
+    /** Resolves one complete application snapshot; the caller supplies any required deadline. */
+    public static ApplicationLookup lookupApplication(IApplicationManager manager, IProject project,
+        String applicationId) throws ApplicationException
+    {
+        IApplication application = manager.getApplication(project, applicationId).orElse(null);
+        if (application == null)
+        {
+            return new ApplicationLookup(null, null, null, null, null);
+        }
+        Object server = serverOfApplication(application);
+        return new ApplicationLookup(application, server,
+            LaunchLifecycleUtils.conflictAttributionName(application), nameOfServer(server), null);
+    }
+
+    /** Complete snapshot of one guarded, bounded standalone-server start. */
+    public static final class GuardedStartResult
+    {
+        private final BoundedJob.Result bounded;
+        private final IStatus status;
+        private final String conflictFailure;
+        private final boolean portsReassigned;
+        private final boolean portReassignmentOutcomeUnknown;
+        private final long accessDialogsBefore;
+        private final long accessDialogsAfter;
+        private final long timeoutMs;
+
+        private GuardedStartResult(BoundedJob.Result bounded, IStatus status,
+            String conflictFailure, boolean portsReassigned,
+            boolean portReassignmentOutcomeUnknown, long accessDialogsBefore,
+            long accessDialogsAfter, long timeoutMs)
+        {
+            this.bounded = bounded;
+            this.status = status;
+            this.conflictFailure = conflictFailure;
+            this.portsReassigned = portsReassigned;
+            this.portReassignmentOutcomeUnknown = portReassignmentOutcomeUnknown;
+            this.accessDialogsBefore = accessDialogsBefore;
+            this.accessDialogsAfter = accessDialogsAfter;
+            this.timeoutMs = timeoutMs;
+        }
+
+        /** Whether the underlying Job has definitely ended. */
+        public boolean conclusive()
+        {
+            return !BoundedJob.isInconclusive(bounded.getOutcome());
+        }
+
+        /**
+         * Whether the start may still run: the wait was cut short, or the start never entered its
+         * work while a suspended Job manager may still hold it ({@link BoundedJob.Outcome#NOT_RUN}).
+         */
+        public boolean mayStillRun()
+        {
+            return !BoundedJob.provablyEnded(bounded)
+                && bounded.getOutcome() != BoundedJob.Outcome.TIMED_OUT_BEFORE_START;
+        }
+
+        /** Known persistent port rewrite after a conclusive start. */
+        public boolean portsReassigned()
+        {
+            return portsReassigned;
+        }
+
+        /** Whether an in-flight REASSIGN start may still rewrite the server configuration. */
+        public boolean portReassignmentOutcomeUnknown()
+        {
+            return portReassignmentOutcomeUnknown;
+        }
+
+        /**
+         * The start failure, preferring the captured port conflict and appending the repository's
+         * established actionable explanation when an access-settings dialog was auto-cancelled.
+         */
+        public String failure()
+        {
+            String failure = conflictFailure;
+            if (failure == null)
+            {
+                if (bounded.isSuccess())
+                {
+                    failure = status == null
+                        ? "EDT returned no status from the standalone-server start" //$NON-NLS-1$
+                        : status.isOK() ? null : PlatformFailures.describeStatus(status);
+                }
+                else
+                {
+                    failure = startFailureReason(bounded, timeoutMs);
+                }
+            }
+            if (failure == null)
+            {
+                return null;
+            }
+            String note = InfobaseAuthDialogSuppressor.accessSettingsDialogFailureNote(
+                accessDialogsBefore, accessDialogsAfter);
+            return note.isEmpty() ? failure : failure + " " + note; //$NON-NLS-1$
+        }
+    }
+
     private StandaloneServerSupport()
     {
     }
 
     /**
      * Acquires the {@code IStandaloneServerService} from the OSGi registry BY CLASS NAME (reflectively).
-     * Mirrors {@code CreateInfobaseTool.acquireStandaloneServerService()} so the delete path has no
-     * compile/bundle dependency on the standalone-server feature. Returns {@code null} when the bundle or
+     * Shared by creation and lifecycle tools without a compile/bundle dependency on the feature.
+     * Returns {@code null} when the bundle or
      * service is unavailable (the caller then fails gracefully with an actionable error).
      *
      * @return the service object (call it reflectively), or {@code null} when unavailable
      */
     public static Object acquireService()
     {
+        return acquireService("standalone-server", //$NON-NLS-1$
+            "standalone-server: could not start the standalone-server bundle"); //$NON-NLS-1$
+    }
+
+    /** Acquires the same service while retaining the caller's diagnostic prefix and startup message. */
+    public static Object acquireService(String diagnosticPrefix, String startupFailureMessage)
+    {
+        return acquireService(diagnosticPrefix, startupFailureMessage, Platform::getBundle);
+    }
+
+    static Object acquireService(String diagnosticPrefix, String startupFailureMessage,
+            Function<String, Bundle> bundleLookup)
+    {
         try
         {
-            Bundle bundle = Platform.getBundle(WST_CORE_BUNDLE_ID);
+            Bundle bundle = bundleLookup.apply(WST_CORE_BUNDLE_ID);
             if (bundle == null)
             {
-                Activator.logError("standalone-server: bundle '" + WST_CORE_BUNDLE_ID //$NON-NLS-1$
+                Activator.logError(diagnosticPrefix + ": bundle '" + WST_CORE_BUNDLE_ID //$NON-NLS-1$
                     + "' not found — the EDT standalone-server feature is not installed", null); //$NON-NLS-1$
                 return null;
             }
             BundleContext context = bundle.getBundleContext();
             if (context == null)
             {
-                context = startAndGetContext(bundle);
+                context = startAndGetContext(bundle, startupFailureMessage);
             }
             if (context == null)
             {
@@ -124,7 +284,7 @@ public final class StandaloneServerSupport
         }
         catch (Throwable t)
         {
-            Activator.logError("standalone-server: could not acquire the standalone-server service", t); //$NON-NLS-1$
+            Activator.logError(diagnosticPrefix + ": could not acquire the standalone-server service", t); //$NON-NLS-1$
             return null;
         }
     }
@@ -137,7 +297,7 @@ public final class StandaloneServerSupport
      * @param bundle the standalone-server bundle whose context was not yet available
      * @return the bundle context after the start attempt, or {@code null} when it is still unavailable
      */
-    private static BundleContext startAndGetContext(Bundle bundle)
+    private static BundleContext startAndGetContext(Bundle bundle, String failureMessage)
     {
         try
         {
@@ -146,8 +306,7 @@ public final class StandaloneServerSupport
         }
         catch (Exception startEx)
         {
-            Activator.logError("standalone-server: could not start the standalone-server bundle", //$NON-NLS-1$
-                startEx);
+            Activator.logError(failureMessage, startEx);
             return null;
         }
     }
@@ -189,6 +348,514 @@ public final class StandaloneServerSupport
         }
     }
 
+    /** Reflectively calls the standalone-server service's three-argument start operation. */
+    public static IStatus startServer(Object service, Object server, String launchMode,
+        IProgressMonitor monitor) throws Exception
+    {
+        Method start = findMethod(service.getClass(), "startServer", 3); //$NON-NLS-1$
+        if (start == null)
+        {
+            Activator.logError("standalone-server: IStandaloneServerService.startServer not found", null); //$NON-NLS-1$
+            return new Status(IStatus.ERROR, PLUGIN_ID,
+                "IStandaloneServerService.startServer(IServer, String, IProgressMonitor) was not " //$NON-NLS-1$
+                    + "found in this EDT — the standalone-server API may have changed."); //$NON-NLS-1$
+        }
+        try
+        {
+            Object status = start.invoke(service, server, launchMode, monitor);
+            return (status instanceof IStatus) ? (IStatus)status : null;
+        }
+        catch (InvocationTargetException ite)
+        {
+            Throwable cause = ite.getCause();
+            if (cause instanceof Exception)
+            {
+                throw (Exception)cause;
+            }
+            if (cause instanceof Error)
+            {
+                throw (Error)cause;
+            }
+            throw new IllegalStateException(cause != null ? cause : ite);
+        }
+    }
+
+    /**
+     * Hands the live {@code ibsrv} process id of a running standalone server to {@code consumer}
+     * through EDT's public {@code IStandaloneServerProcess.proceedSessionCleanup(LongConsumer)},
+     * which calls back synchronously and only while the process still exists.
+     *
+     * <p>The process interface is matched by NAME, so the WST implementation package stays an
+     * optional dependency. The callback runs under EDT's process monitor; keep it short.
+     *
+     * @param server the WST server object (never {@code null})
+     * @param consumer receives the pid at most once
+     * @return {@code true} when the server's launch carries a standalone-server process and EDT
+     *     was asked for its pid; {@code false} when there is no live launch or no such process
+     * @throws Exception the real failure of a platform accessor or of the callback
+     */
+    public static boolean proceedAtLivePid(Object server, LongConsumer consumer) throws Exception
+    {
+        Object launchObject = invokeNoArg(server, "getLaunch"); //$NON-NLS-1$
+        if (!(launchObject instanceof ILaunch))
+        {
+            return false;
+        }
+        IProcess[] processes = ((ILaunch)launchObject).getProcesses();
+        if (processes == null)
+        {
+            return false;
+        }
+        for (IProcess process : processes)
+        {
+            Class<?> processInterface = namedInterface(process == null ? null : process.getClass(),
+                STANDALONE_SERVER_PROCESS_INTERFACE);
+            if (processInterface == null)
+            {
+                continue;
+            }
+            try
+            {
+                Method proceed = processInterface.getMethod("proceedSessionCleanup", //$NON-NLS-1$
+                    LongConsumer.class);
+                proceed.invoke(process, consumer);
+            }
+            catch (InvocationTargetException e)
+            {
+                throwUnwrapped(e.getCause() != null ? e.getCause() : e);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * The live {@code ibsrv} process of a standalone server, read under
+     * {@link #PID_READ_TIMEOUT_MS}.
+     *
+     * <p>The {@link ProcessHandle} is taken INSIDE EDT's callback, while EDT confirms the process
+     * exists, and the caller keeps polling that one handle. A handle remembers its process's
+     * start time, so it does not read a later, unrelated process that reuses the pid as alive -
+     * which a fresh {@code ProcessHandle.of(pid)} per poll would.
+     *
+     * @param server the WST server object (may be {@code null})
+     * @return the handle, or empty when no live server process is known or the read did not finish
+     */
+    public static Optional<ProcessHandle> liveProcess(Object server)
+    {
+        if (server == null)
+        {
+            return Optional.empty();
+        }
+        AtomicReference<ProcessHandle> captured = new AtomicReference<>();
+        BoundedJob.Result result = BoundedJob.run("Read standalone-server process id", //$NON-NLS-1$
+            PID_READ_TIMEOUT_MS, monitor -> proceedAtLivePid(server,
+                pid -> ProcessHandle.of(pid).ifPresent(handle -> captured.compareAndSet(null, handle))));
+        ProcessHandle handle = captured.get();
+        if (!result.isSuccess() || handle == null)
+        {
+            if (result.getFailure() != null)
+            {
+                Activator.logError("standalone-server: the server process id could not be read", //$NON-NLS-1$
+                    result.getFailure());
+            }
+            return Optional.empty();
+        }
+        return Optional.of(handle);
+    }
+
+    /**
+     * Waits, bounded, for a process to exit.
+     *
+     * @param alive answers whether the process is still running (never {@code null})
+     * @param timeoutMs the bound on the wait
+     * @param pollMs how often {@code alive} is asked
+     * @return {@code true} when the process was observed gone before the bound elapsed
+     */
+    public static boolean awaitProcessExit(BooleanSupplier alive, long timeoutMs, long pollMs)
+    {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, timeoutMs));
+        while (true)
+        {
+            if (!alive.getAsBoolean())
+            {
+                return true;
+            }
+            if (System.nanoTime() - deadline >= 0L)
+            {
+                return false;
+            }
+            try
+            {
+                Thread.sleep(Math.max(1L, pollMs));
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                return !alive.getAsBoolean();
+            }
+        }
+    }
+
+    /**
+     * Reflective {@code IStandaloneServerService.getInfobaseUrl(StandaloneServerInfobase)}: the URL
+     * clients connect to. Best-effort.
+     *
+     * @param service the standalone-server service (may be {@code null})
+     * @param module the application's {@code StandaloneServerInfobase} module (may be {@code null})
+     * @return the URL text, or {@code null} when it could not be read
+     */
+    public static String infobaseUrlOf(Object service, Object module)
+    {
+        if (service == null || module == null)
+        {
+            return null;
+        }
+        try
+        {
+            Method getUrl = findMethod(service.getClass(), "getInfobaseUrl", 1); //$NON-NLS-1$
+            Object url = getUrl == null ? null : getUrl.invoke(service, module);
+            return url == null ? null : url.toString();
+        }
+        catch (Exception | LinkageError e) // NOSONAR best-effort report field, never a precondition
+        {
+            return null;
+        }
+    }
+
+    /** Invokes a public no-argument accessor and unwraps the platform's real failure. */
+    private static Object invokeNoArg(Object target, String methodName) throws Exception
+    {
+        try
+        {
+            return target.getClass().getMethod(methodName).invoke(target);
+        }
+        catch (InvocationTargetException e)
+        {
+            // As the session commands always read this accessor: an Exception passes through,
+            // anything else (an Error) is wrapped, never rethrown bare.
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception)
+            {
+                throw (Exception)cause;
+            }
+            throw new IllegalStateException(cause != null ? cause : e);
+        }
+    }
+
+    /** Rethrows a reflective failure as itself. */
+    private static void throwUnwrapped(Throwable failure) throws Exception
+    {
+        if (failure instanceof Exception)
+        {
+            throw (Exception)failure;
+        }
+        if (failure instanceof Error)
+        {
+            throw (Error)failure;
+        }
+        throw new IllegalStateException(failure);
+    }
+
+    /** Finds an implemented interface recursively by its fully qualified name. */
+    private static Class<?> namedInterface(Class<?> type, String interfaceName)
+    {
+        if (type == null)
+        {
+            return null;
+        }
+        for (Class<?> candidate : type.getInterfaces())
+        {
+            if (interfaceName.equals(candidate.getName()))
+            {
+                return candidate;
+            }
+            Class<?> nested = namedInterface(candidate, interfaceName);
+            if (nested != null)
+            {
+                return nested;
+            }
+        }
+        return namedInterface(type.getSuperclass(), interfaceName);
+    }
+
+    /**
+     * Resolves an EDT application without letting its synchronous UI-thread hop hold the caller
+     * beyond {@code timeoutMs}.
+     *
+     * <p>Use this when the caller does not already own a larger bounded preparation phase.
+     *
+     * <p>A PENDING interrupt is left for the PLATFORM to act on rather than taken and restored:
+     * this entry point calls {@code BoundedJob.run} exactly as it did before the read moved into
+     * {@code ApplicationSupport}, so a cancelled {@code build_external_objects} recovery keeps
+     * whatever abort behaviour it had. What that behaviour is depends on the runtime's
+     * {@code LockListener} (see {@code ApplicationSupport.readBounded}), which is precisely why
+     * the decision is left where it was instead of being changed on this consumer's behalf.
+     */
+    public static ApplicationLookup lookupApplicationBounded(IApplicationManager manager,
+        IProject project, String applicationId, long timeoutMs)
+    {
+        ApplicationSupport.BoundedRead<ApplicationLookup> read = ApplicationSupport.readBounded(
+            "Resolve standalone-server application: " + applicationId, //$NON-NLS-1$
+            ApplicationSupport.applicationTarget(applicationId), timeoutMs,
+            () -> lookupApplication(manager, project, applicationId), false);
+        if (!read.concluded())
+        {
+            return failedApplicationLookup(read.deadlineFailure());
+        }
+        if (read.failure() != null)
+        {
+            return failedApplicationLookup("the application could not be resolved: " //$NON-NLS-1$
+                + PlatformFailures.describe(read.failure()));
+        }
+        return read.valueOrRethrow();
+    }
+
+    /**
+     * Retains the established lookup-timeout wording for callers with a larger bounded phase.
+     *
+     * @param applicationId the application the lookup was for
+     * @param timeoutMs the deadline that expired
+     * @param result the bounded outcome
+     * @return the shared diagnosis sentence
+     */
+    public static String applicationLookupFailure(String applicationId, long timeoutMs,
+        BoundedJob.Result result)
+    {
+        return ApplicationSupport.lookupDeadlineFailure(
+            ApplicationSupport.applicationTarget(applicationId), timeoutMs, result);
+    }
+
+    /** Describes a larger bounded precondition phase that did not complete. */
+    public static String boundedPhaseFailure(String target, long timeoutMs,
+        BoundedJob.Result result)
+    {
+        String deadline = timeoutMs % 1000L == 0L
+            ? (timeoutMs / 1000L) + "s" : timeoutMs + "ms"; //$NON-NLS-1$ //$NON-NLS-2$
+        if (result.getOutcome() == BoundedJob.Outcome.TIMED_OUT)
+        {
+            return target + " did not finish within " + deadline //$NON-NLS-1$
+                + " and may still be running"; //$NON-NLS-1$
+        }
+        if (result.getOutcome() == BoundedJob.Outcome.INTERRUPTED)
+        {
+            return "the wait for " + target + " was interrupted; it may still be running"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (result.getOutcome() == BoundedJob.Outcome.TIMED_OUT_BEFORE_START)
+        {
+            return target + " did not start within " + deadline //$NON-NLS-1$
+                + "; retry when EDT's background Job queue is responsive"; //$NON-NLS-1$
+        }
+        return target + " never ran (" + result.getOutcome() + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static ApplicationLookup failedApplicationLookup(String failure)
+    {
+        return new ApplicationLookup(null, null, null, null, failure);
+    }
+
+    /** Best-effort reflective {@code IServer.getName()} for an already-resolved server. */
+    public static String nameOfServer(Object server)
+    {
+        if (server == null)
+        {
+            return null;
+        }
+        try
+        {
+            Object name = server.getClass().getMethod("getName").invoke(server); //$NON-NLS-1$
+            if (name == null)
+            {
+                return null;
+            }
+            String trimmed = name.toString().trim();
+            return trimmed.isEmpty() ? null : trimmed;
+        }
+        catch (Exception | LinkageError e) // NOSONAR best-effort attribution, never a precondition
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Arms every unattended guard required by a bounded standalone-server start and ties all of
+     * them to the underlying Job's lifetime.
+     *
+     * <p>The port-conflict confirmer, its conflict watch, and the nested infobase-auth suppression
+     * count are one lifecycle here. A conclusive result releases them before returning; a timeout
+     * or interruption keeps every one armed until {@code completion} reports the Job finished, or
+     * until the shared safety cap expires. Keeping this composition in one helper prevents direct
+     * starts and restoration starts from drifting apart again.
+     */
+    public static GuardedStartResult startServerGuarded(Object service, Object server,
+        String operationName, String launchMode, String infobaseName, String serverName,
+        StandaloneServerPortConflictPolicy portPolicy, long timeoutMs, long cleanupCapMs)
+    {
+        return startServerGuarded(service, server, operationName, launchMode, infobaseName,
+            serverName, portPolicy, timeoutMs, cleanupCapMs, null, null);
+    }
+
+    /** Same guarded start with another operation claim tied to the Job's exact lifecycle. */
+    public static GuardedStartResult startServerGuarded(Object service, Object server,
+        String operationName, String launchMode, String infobaseName, String serverName,
+        StandaloneServerPortConflictPolicy portPolicy, long timeoutMs, long cleanupCapMs,
+        Runnable operationCleanup, Runnable cleanupInstalled)
+    {
+        return startServerGuarded(service, server, operationName, launchMode, infobaseName,
+            serverName, portPolicy, timeoutMs, cleanupCapMs, operationCleanup, cleanupInstalled,
+            false);
+    }
+
+    /**
+     * Same guarded start; with {@code operationUntilJobFinished} the operation claim is released
+     * only on the start Job's terminal notification (never by {@code cleanupCapMs}), while the
+     * unattended dialog guards keep their cap. For an explicit start whose claim must outlive an
+     * inconclusive wait for as long as the start can still run.
+     */
+    public static GuardedStartResult startServerGuarded(Object service, Object server, // NOSONAR one argument per independent concern
+        String operationName, String launchMode, String infobaseName, String serverName,
+        StandaloneServerPortConflictPolicy portPolicy, long timeoutMs, long cleanupCapMs,
+        Runnable operationCleanup, Runnable cleanupInstalled, boolean operationUntilJobFinished)
+    {
+        long accessDialogsBefore = InfobaseAuthDialogSuppressor.accessSettingsAutoCancelCount();
+        LaunchUpdateDialogAutoConfirmer.ConflictWatch conflicts = portPolicy == null
+            ? null : LaunchUpdateDialogAutoConfirmer.beginConflictWatch(infobaseName, serverName);
+        boolean autoConfirmerArmed = LaunchUpdateDialogAutoConfirmer.arm(false, false, false, null,
+            infobaseName, portPolicy, serverName);
+        InfobaseAuthDialogSuppressor.markActivityStart();
+        Runnable guardsCleanup = () -> {
+            try
+            {
+                if (autoConfirmerArmed)
+                {
+                    LaunchUpdateDialogAutoConfirmer.disarm(false, false, false, null, infobaseName,
+                        portPolicy, serverName);
+                }
+            }
+            finally
+            {
+                try
+                {
+                    if (conflicts != null)
+                    {
+                        conflicts.close();
+                    }
+                }
+                finally
+                {
+                    InfobaseAuthDialogSuppressor.markActivityEnd();
+                }
+            }
+        };
+        boolean separateOperation = operationUntilJobFinished && operationCleanup != null;
+        Runnable cleanup = operationCleanup == null || separateOperation ? guardsCleanup : () -> {
+            try
+            {
+                guardsCleanup.run();
+            }
+            finally
+            {
+                operationCleanup.run();
+            }
+        };
+        BoundedJob.DeferredCleanup deferredCleanup = new BoundedJob.DeferredCleanup(cleanup,
+            cleanupCapMs, operationName + " unattended-guard safety cap"); //$NON-NLS-1$
+        BoundedJob.DeferredCleanup operationOwnership = separateOperation
+            ? BoundedJob.DeferredCleanup.untilJobFinished(operationCleanup) : null;
+        IStatus[] status = new IStatus[1];
+        BoundedJob.Result bounded = null;
+        try
+        {
+            if (cleanupInstalled != null)
+            {
+                cleanupInstalled.run();
+            }
+            bounded = BoundedJob.run(operationName, timeoutMs,
+                monitor -> status[0] = startServer(service, server, launchMode, monitor),
+                () -> {
+                    try
+                    {
+                        deferredCleanup.jobFinished();
+                    }
+                    finally
+                    {
+                        if (operationOwnership != null)
+                        {
+                            operationOwnership.jobFinished();
+                        }
+                    }
+                });
+            // For a job-bound start (explicit), a start a suspended Job manager still holds
+            // (NOT_RUN) may still run and rewrite the ports, so its port outcome is unknown too;
+            // the capped callers keep their established classification.
+            boolean conclusive = separateOperation
+                ? BoundedJob.provablyEnded(bounded)
+                    || bounded.getOutcome() == BoundedJob.Outcome.TIMED_OUT_BEFORE_START
+                : !BoundedJob.isInconclusive(bounded.getOutcome());
+            String conflictFailure = conflicts != null && conflicts.portConflicted()
+                ? LaunchUpdateDialogAutoConfirmer.portConflictError(
+                    conflicts.portConflictDetail(), conflicts.portConflictReason())
+                : null;
+            boolean portsReassigned = conclusive && conflicts != null
+                && conflicts.portsReassigned();
+            boolean portReassignmentOutcomeUnknown = !conclusive
+                && portPolicy == StandaloneServerPortConflictPolicy.REASSIGN;
+            return new GuardedStartResult(bounded, status[0], conflictFailure, portsReassigned,
+                portReassignmentOutcomeUnknown, accessDialogsBefore,
+                InfobaseAuthDialogSuppressor.accessSettingsAutoCancelCount(), timeoutMs);
+        }
+        finally
+        {
+            // BoundedJob rethrows Error only after its Job has already terminated. Otherwise its
+            // concrete outcome is the sole authority on whether the guards may be released now.
+            boolean ended = bounded == null || !BoundedJob.isInconclusive(bounded.getOutcome());
+            try
+            {
+                // A job-bound (explicit) start's guards follow its claim: a start a suspended Job
+                // manager still holds (NOT_RUN) runs after the resume and must find its port and
+                // auth-dialog answers armed. They keep their safety cap (see the caller), because
+                // a globally armed dialog suppressor must not outlive a start that never runs.
+                deferredCleanup.afterBoundedWait(separateOperation
+                    ? BoundedJob.provablyEnded(bounded) : ended);
+            }
+            finally
+            {
+                if (operationOwnership != null)
+                {
+                    // Job-bound ownership is released early only for a run that provably ended.
+                    operationOwnership.afterBoundedWait(BoundedJob.provablyEnded(bounded));
+                }
+            }
+        }
+    }
+
+    /** Describes an unsuccessful bounded start without hiding an operation still in flight. */
+    public static String startFailureReason(BoundedJob.Result result, long timeoutMs)
+    {
+        BoundedJob.Outcome outcome = result.getOutcome();
+        switch (outcome)
+        {
+        case TIMED_OUT:
+            long actualTimeoutMs = Math.max(1L, timeoutMs);
+            String deadline = actualTimeoutMs % 1000L == 0L
+                ? (actualTimeoutMs / 1000L) + "s" : actualTimeoutMs + "ms"; //$NON-NLS-1$ //$NON-NLS-2$
+            return "starting it did not finish within " //$NON-NLS-1$
+                + deadline + " and may still be running"; //$NON-NLS-1$
+        case TIMED_OUT_BEFORE_START:
+            return "the bounded start timed out before it began"; //$NON-NLS-1$
+        case INTERRUPTED:
+            return "the wait for the standalone-server start was interrupted; " //$NON-NLS-1$
+                + "the start may still be running"; //$NON-NLS-1$
+        default:
+            break;
+        }
+        if (result.getFailure() != null)
+        {
+            return PlatformFailures.describe(result.getFailure());
+        }
+        return "the standalone-server start did not run (" + outcome + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     /**
      * Reflective {@code IServerApplication.getServer()} on a wst-server {@link IApplication} — the WST
      * {@code IServer} backing the application. Returns {@code null} on any failure (the caller then falls
@@ -222,18 +889,35 @@ public final class StandaloneServerSupport
     {
         try
         {
-            Method m = app.getClass().getMethod("getModule"); //$NON-NLS-1$
-            return m.invoke(app);
-        }
-        catch (NoSuchMethodException e) // NOSONAR not a server application - an expected answer, not a failure
-        {
-            return null;
+            return moduleOrThrow(app);
         }
         catch (Throwable t)
         {
             Activator.logError("standalone-server: IServerApplication.getModule() refl failed", t); //$NON-NLS-1$
             return null;
         }
+    }
+
+    /**
+     * {@link #moduleOfApplication}, but a failed read RAISES; only an application with no
+     * {@code getModule()} at all answers {@code null}.
+     *
+     * @param app the application (never {@code null})
+     * @return the module, or {@code null} when the application has none
+     * @throws ReflectiveOperationException when {@code getModule()} exists but could not be invoked
+     */
+    public static Object moduleOrThrow(IApplication app) throws ReflectiveOperationException
+    {
+        Method m;
+        try
+        {
+            m = app.getClass().getMethod("getModule"); //$NON-NLS-1$
+        }
+        catch (NoSuchMethodException e) // NOSONAR not a server application - an expected answer, not a failure
+        {
+            return null;
+        }
+        return m.invoke(app);
     }
 
     /**
@@ -322,41 +1006,60 @@ public final class StandaloneServerSupport
     {
         try
         {
-            Object cfg = standaloneServerInfobaseModule.getClass()
-                .getMethod("getStandaloneServerConfiguration").invoke(standaloneServerInfobaseModule); //$NON-NLS-1$
-            if (cfg == null)
-            {
-                return null;
-            }
-            Object db = cfg.getClass().getMethod("getDatabase").invoke(cfg); //$NON-NLS-1$
-            if (db == null)
-            {
-                return null;
-            }
-            // A FILE database (and its create-template subclass FileCreateTemplateDatabase) carries the
-            // on-disk directory in getConfigDirectory() (2025.2), renamed to getPath() on 2026.1; an
-            // RDBMS database has neither accessor nor a local directory. Detect the file kind by the
-            // PRESENCE of either accessor rather than by the class name: the type is platform-internal
-            // and intentionally not imported (no Require-Bundle), so instanceof is impossible, and a
-            // name match would be fragile.
-            Method dirGetter = findMethod(db.getClass(), "getConfigDirectory", 0); //$NON-NLS-1$
-            if (dirGetter == null)
-            {
-                dirGetter = findMethod(db.getClass(), "getPath", 0); //$NON-NLS-1$
-            }
-            if (dirGetter == null)
-            {
-                // Not a file-backed database — nothing on the local disk to resolve.
-                return null;
-            }
-            Object dir = dirGetter.invoke(db);
-            return (dir instanceof String) ? (String)dir : null;
+            return databaseDirOrThrow(standaloneServerInfobaseModule);
         }
         catch (Throwable t) // NOSONAR deliberate catch-all at a reflective/best-effort boundary
         {
             Activator.logError("standalone-server: could not read standalone-server database directory", t); //$NON-NLS-1$
             return null;
         }
+    }
+
+    /**
+     * {@link #databaseDirOf}, but a failed read RAISES instead of answering {@code null}, so a caller
+     * that must not read "unreadable" as "no local directory" can tell the two apart.
+     *
+     * @param standaloneServerInfobaseModule the server's infobase module (never {@code null})
+     * @return the served database directory, or {@code null} ONLY for an RDBMS-backed server
+     * @throws ReflectiveOperationException when the platform accessors could not be invoked
+     * @throws IllegalStateException when the configuration or its database is missing
+     */
+    public static String databaseDirOrThrow(Object standaloneServerInfobaseModule)
+        throws ReflectiveOperationException
+    {
+        Object cfg = standaloneServerInfobaseModule.getClass()
+            .getMethod("getStandaloneServerConfiguration").invoke(standaloneServerInfobaseModule); //$NON-NLS-1$
+        if (cfg == null)
+        {
+            throw new IllegalStateException("the standalone server has no configuration"); //$NON-NLS-1$
+        }
+        Object db = cfg.getClass().getMethod("getDatabase").invoke(cfg); //$NON-NLS-1$
+        if (db == null)
+        {
+            throw new IllegalStateException("the standalone server configuration names no database"); //$NON-NLS-1$
+        }
+        // A FILE database (and its create-template subclass FileCreateTemplateDatabase) carries the
+        // on-disk directory in getConfigDirectory() (2025.2), renamed to getPath() on 2026.1; an
+        // RDBMS database has neither accessor nor a local directory. Detect the file kind by the
+        // PRESENCE of either accessor rather than by the class name: the type is platform-internal
+        // and intentionally not imported (no Require-Bundle), so instanceof is impossible, and a
+        // name match would be fragile.
+        Method dirGetter = findMethod(db.getClass(), "getConfigDirectory", 0); //$NON-NLS-1$
+        if (dirGetter == null)
+        {
+            dirGetter = findMethod(db.getClass(), "getPath", 0); //$NON-NLS-1$
+        }
+        if (dirGetter == null)
+        {
+            // Not a file-backed database — nothing on the local disk to resolve.
+            return null;
+        }
+        Object dir = dirGetter.invoke(db);
+        if (!(dir instanceof String))
+        {
+            throw new IllegalStateException("the file-backed server's directory is unreadable: " + dir); //$NON-NLS-1$
+        }
+        return (String)dir;
     }
 
     /**
@@ -788,7 +1491,7 @@ public final class StandaloneServerSupport
     }
 
     /** First public method on {@code cls} (incl. inherited) with the given name and parameter count. */
-    private static Method findMethod(Class<?> cls, String name, int paramCount)
+    public static Method findMethod(Class<?> cls, String name, int paramCount)
     {
         for (Method m : cls.getMethods())
         {

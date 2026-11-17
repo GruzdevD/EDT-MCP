@@ -50,13 +50,19 @@ public class WriteScopeInventoryTest
     private static final Set<String> CLASSIFIED = new HashSet<>(Arrays.asList(
         // DECLARES by exporting: every export goes through BmTransactions.forceExportToDisk, which
         // records the project - so these declare simply by doing the write.
+        "com.ditrix.edt.mcp.server.tools.impl.SortMetadataTool",
         "com.ditrix.edt.mcp.server.tools.impl.CreateMetadataTool", //$NON-NLS-1$
         "com.ditrix.edt.mcp.server.tools.impl.ModifyMetadataTool", //$NON-NLS-1$
         // DECLARES by exporting, plus an explicit statement for the branches that write without
         // submitting an export of their own, or that succeed while queuing nothing at all.
         "com.ditrix.edt.mcp.server.tools.impl.AdoptMetadataObjectTool", //$NON-NLS-1$
+        // Clone exports its attached tops, Configuration and selected roles/subsystems in the requested project.
+        // Explicit writes declare that project; preview queues nothing, partial native writes name that project.
+        "com.ditrix.edt.mcp.server.tools.impl.CloneMetadataObjectTool", //$NON-NLS-1$
         "com.ditrix.edt.mcp.server.tools.impl.ResyncToDiskTool", //$NON-NLS-1$
         "com.ditrix.edt.mcp.server.tools.impl.DeleteMetadataTool", //$NON-NLS-1$
+        // Route-map writes export their external top object; get explicitly queues nothing.
+        "com.ditrix.edt.mcp.server.tools.impl.BusinessProcessRouteMapTool", //$NON-NLS-1$
         // CANNOT DECLARE: EDT's quick-fix extension point reports nothing about what the fix
         // touched, so this one states that outright and names what to wait for instead. It is the
         // only member of this class, and a second one should be argued for, not assumed.

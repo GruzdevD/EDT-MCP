@@ -6,9 +6,15 @@
 
 package com.ditrix.edt.mcp.server.protocol;
 
+import java.util.Locale;
+import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -26,11 +32,33 @@ public final class JsonUtils
         // Utility class
     }
 
+    /** Returns the first unknown member, preserving input and accepted-member order in the error. */
+    public static String unknownMemberError(JsonObject object, String where, String... accepted)
+    {
+        Set<String> allowed = new LinkedHashSet<>(Arrays.asList(accepted));
+        for (String key : object.keySet())
+        {
+            if (!allowed.contains(key))
+            {
+                return "Unknown member '" + key + "' in " + where + ". Accepted members: " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + String.join(", ", allowed) + ". Remove '" + key + "' or use one of them."; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+        }
+        return null;
+    }
+
     /** JSON key for the EDT version field. */
     private static final String KEY_EDT_VERSION = "edt_version"; //$NON-NLS-1$
 
     /** JSON key for the status field. */
     private static final String KEY_STATUS = "status"; //$NON-NLS-1$
+
+    /** Maximum trimmed decimal/exponent length accepted before constructing an integral decimal. */
+    private static final int MAX_INTEGRAL_NUMBER_LENGTH = 64;
+
+    /** A JSON number (RFC 8259) with a fraction or exponent: the only non-plain shape a transport renders. */
+    private static final Pattern JSON_DECIMAL_NUMBER =
+        Pattern.compile("-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"); //$NON-NLS-1$
 
     /**
      * Whether a serialized JSON-RPC response reports failure.
@@ -348,6 +376,76 @@ public final class JsonUtils
     }
 
     /**
+     * The refusal of an array-of-{name, value}-objects argument that is PRESENT but has another shape -
+     * a JSON object, a single value, text that is not JSON, or an array with an item that is not an
+     * object - or {@code null} when the argument is absent, blank, JSON {@code null} or well-formed.
+     *
+     * <p>{@link #extractObjectArray} reads every other shape as "no items" and skips a non-object item,
+     * which is right for a reader that must not throw, but a tool that writes what the list asks for
+     * would then report success without having applied it (issue #930). A writing tool asks this first
+     * and refuses the call instead. The message has no final verdict: the tool appends what it did not
+     * do.</p>
+     *
+     * @param params the params map (may be {@code null})
+     * @param argumentName the argument name (may be {@code null})
+     * @return the refusal sentence, or {@code null} when there is nothing to refuse
+     */
+    public static String objectArrayShapeError(Map<String, String> params, String argumentName)
+    {
+        if (params == null || argumentName == null)
+        {
+            return null; // NOSONAR null is a deliberate signal (omit/sentinel), not an empty collection
+        }
+        String value = params.get(argumentName);
+        String trimmed = value == null ? "" : value.trim(); //$NON-NLS-1$
+        if (trimmed.isEmpty() || "null".equals(trimmed)) //$NON-NLS-1$
+        {
+            return null; // NOSONAR null is a deliberate signal (omit/sentinel), not an empty collection
+        }
+        String got;
+        try
+        {
+            got = shapeOf(JsonParser.parseString(trimmed));
+        }
+        catch (RuntimeException e)
+        {
+            got = "text that is not JSON"; //$NON-NLS-1$
+        }
+        if (got == null)
+        {
+            return null; // NOSONAR null is a deliberate signal (omit/sentinel), not an empty collection
+        }
+        return "'" + argumentName + "' must be an array of {name, value} objects, e.g. [{name: " //$NON-NLS-1$ //$NON-NLS-2$
+            + "'comment', value: 'Goods'}]; it was " + got + ", so none of it can be applied."; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** What an array-of-objects argument is instead, or {@code null} when it is one (or JSON null). */
+    private static String shapeOf(JsonElement element)
+    {
+        if (element == null || element.isJsonNull())
+        {
+            return null; // NOSONAR null is a deliberate signal (omit/sentinel), not an empty collection
+        }
+        if (element.isJsonObject())
+        {
+            return "a JSON object - wrap each property as one {name, value} item of an array"; //$NON-NLS-1$
+        }
+        if (!element.isJsonArray())
+        {
+            return "a single value"; //$NON-NLS-1$
+        }
+        JsonArray array = element.getAsJsonArray();
+        for (int i = 0; i < array.size(); i++)
+        {
+            if (!array.get(i).isJsonObject())
+            {
+                return "an array whose item " + (i + 1) + " is not an object"; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        return null; // NOSONAR null is a deliberate signal (omit/sentinel), not an empty collection
+    }
+
+    /**
      * Extracts an array-of-objects argument from the params map. A complex argument arrives here as
      * its JSON text (the protocol layer re-serializes nested JSON values into the string map), so a
      * {@code properties} array like {@code [{"name":"synonym","value":"X","language":"ru"}]} is
@@ -417,7 +515,7 @@ public final class JsonUtils
             return defaultValue;
         }
         
-        value = value.trim().toLowerCase();
+        value = value.trim().toLowerCase(Locale.ROOT);
         if ("true".equals(value) || "1".equals(value) || "yes".equals(value)) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         {
             return true;
@@ -430,6 +528,127 @@ public final class JsonUtils
         return defaultValue;
     }
     
+    /**
+     * Reads an exact whole number from text, including a decimal or exponent rendering such as
+     * {@code "2.0"} or {@code "1.0E7"}. Null, blank, fractional, non-finite, non-numeric and
+     * out-of-range values return {@code null}. Plain decimal digits with an optional sign have no
+     * length cap; a decimal/exponent rendering must be a JSON number (so {@code "2."}, {@code "+2.0"},
+     * {@code "02.0"} and {@code ".2e1"} are refused) of at most 64 trimmed characters.
+     * <p>
+     * The received digits are read exactly. A JSON number at or above 2^53 may already have been
+     * rounded by its transport Double; callers handing out such ids keep their own precision gate.
+     *
+     * @param raw the number text, may be {@code null}
+     * @return the whole number within {@code long}, or {@code null}
+     */
+    public static Long parseIntegralLong(String raw)
+    {
+        if (raw == null)
+        {
+            return null;
+        }
+        String text = raw.trim();
+        try
+        {
+            if (text.indexOf('.') < 0 && text.indexOf('e') < 0 && text.indexOf('E') < 0)
+            {
+                return Long.valueOf(Long.parseLong(text));
+            }
+            if (!isJsonDecimalRendering(text))
+            {
+                return null;
+            }
+            return Long.valueOf(new BigDecimal(text).longValueExact());
+        }
+        catch (NumberFormatException | ArithmeticException e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Reads a whole number with the same exact rules as {@link #parseIntegralLong(String)},
+     * restricted to {@code int}.
+     *
+     * @param raw the number text, may be {@code null}
+     * @return the whole number within {@code int}, or {@code null}
+     */
+    public static Integer parseIntegralInt(String raw)
+    {
+        if (raw == null)
+        {
+            return null;
+        }
+        String text = raw.trim();
+        try
+        {
+            if (text.indexOf('.') < 0 && text.indexOf('e') < 0 && text.indexOf('E') < 0)
+            {
+                return Integer.valueOf(Integer.parseInt(text));
+            }
+            if (!isJsonDecimalRendering(text))
+            {
+                return null;
+            }
+            return Integer.valueOf(new BigDecimal(text).intValueExact());
+        }
+        catch (NumberFormatException | ArithmeticException e)
+        {
+            return null;
+        }
+    }
+
+    private static boolean isJsonDecimalRendering(String text)
+    {
+        return text.length() <= MAX_INTEGRAL_NUMBER_LENGTH && JSON_DECIMAL_NUMBER.matcher(text).matches();
+    }
+
+    /**
+     * Reads any exact whole decimal within {@code long} the way {@link BigDecimal} spells it (for
+     * example {@code "+2"}, {@code "2."}, {@code "2.50e1"}); {@code null} for null, empty, fractional,
+     * non-numeric or out-of-range text. This is the lenient reader of the tools that always parsed
+     * through BigDecimal; a reader that used to accept only integers uses {@link #parseIntegralLong}.
+     *
+     * @param raw the number text, may be {@code null}
+     * @return the whole number within {@code long}, or {@code null}
+     */
+    public static Long parseExactDecimalLong(String raw)
+    {
+        if (raw == null || raw.isEmpty())
+        {
+            return null;
+        }
+        try
+        {
+            return Long.valueOf(new BigDecimal(raw.trim()).longValueExact());
+        }
+        catch (NumberFormatException | ArithmeticException e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Renders a whole number within {@code long} as digits only when the input contains a decimal
+     * point or exponent marker. Thus {@code "2.0"}, {@code "1.0E7"} and {@code "-0.0"} become
+     * {@code "2"}, {@code "10000000"} and {@code "0"}, while {@code "+5"} and {@code "007"}
+     * stay verbatim. Other text, including integral values beyond {@code long} or decimal/exponent
+     * text beyond the parsing length limit, stays unchanged.
+     * Conversion is bounded: exact long parsing refuses huge exponents before expanding digits.
+     *
+     * @param raw the original text, may be {@code null}
+     * @return the text for an echo or selector
+     */
+    public static String canonicalIntegerText(String raw)
+    {
+        if (raw == null || raw.indexOf('.') < 0 && raw.indexOf('e') < 0 && raw.indexOf('E') < 0)
+        {
+            return raw;
+        }
+        Long value = parseIntegralLong(raw);
+        return value == null ? raw : value.toString();
+    }
+
     /**
      * Extracts a long argument from params map.
      * Handles JSON number strings like "42.0" by parsing via double first.
@@ -465,6 +684,24 @@ public final class JsonUtils
         {
             return defaultValue;
         }
+    }
+
+    /** Reads an optional exact integer; invalid supplied values never use the default. */
+    public static int extractStrictInt(Map<String, String> params, String name,
+        int defaultValue, int min, int max)
+    {
+        if (params == null || !params.containsKey(name))
+        {
+            return defaultValue;
+        }
+        String raw = params.get(name);
+        Integer value = parseIntegralInt(raw);
+        if (value == null || value < min || value > max)
+        {
+            throw new IllegalArgumentException(name + "='" + raw + "' must be an integer in "
+                + min + ".." + max + "; retry with a valid value");
+        }
+        return value;
     }
 
     /**

@@ -6,13 +6,19 @@
 
 package com.ditrix.edt.mcp.server.tools.reference;
 
+import com.ditrix.edt.mcp.server.utils.BmModelResolver;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import org.eclipse.core.resources.IProject;
-import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
@@ -47,8 +53,10 @@ import com.ditrix.edt.mcp.server.utils.AdoptedReferenceTargets;
 import com.ditrix.edt.mcp.server.utils.BslModuleUtils;
 import com.ditrix.edt.mcp.server.utils.BslReferenceSearch;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
+import com.ditrix.edt.mcp.server.utils.Pagination;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
+import com.ditrix.edt.mcp.server.utils.ProjectStateChecker.ProjectState;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker.SearchDependenciesResult;
 
 /**
@@ -59,10 +67,12 @@ import com.ditrix.edt.mcp.server.utils.ProjectStateChecker.SearchDependenciesRes
 public class MetadataReferenceService
 {
     /**
-     * Finds all references to the metadata object identified by {@code objectFqn}.
+     * Finds the references to the metadata object identified by {@code objectFqn}, within {@code
+     * bound}: the search stops one reference past {@link ReferenceSearchBound#limit()} or when the time
+     * budget runs out, and the report then says so instead of claiming a total (issue #931).
      * Must be invoked on the UI thread (see {@code FindReferencesTool}).
      */
-    public String findReferences(String projectName, String objectFqn, int limit)
+    public String findReferences(String projectName, String objectFqn, ReferenceSearchBound bound)
     {
         // Normalize Russian metadata type names: "Справочник.Номенклатура" -> "Catalog.Номенклатура"
         objectFqn = MetadataTypeUtils.normalizeFqn(objectFqn);
@@ -83,7 +93,7 @@ public class MetadataReferenceService
             return ToolResult.error("BM model manager not available").toJson(); //$NON-NLS-1$
         }
 
-        IBmModel bmModel = bmModelManager.getModel(project);
+        IBmModel bmModel = BmModelResolver.resolve(project, bmModelManager).getModel();
         if (bmModel == null)
         {
             return ToolResult.error("BM model not available for project: " + projectName).toJson(); //$NON-NLS-1$
@@ -109,7 +119,8 @@ public class MetadataReferenceService
         }
 
         // Collect all references
-        ReferenceCollector collector = new ReferenceCollector(project, bmModel, (IBmObject)targetObject, limit);
+        ReferenceCollector collector =
+            new ReferenceCollector(project, bmModel, (IBmObject)targetObject, bound.limit(), bound);
 
         try
         {
@@ -234,25 +245,123 @@ public class MetadataReferenceService
     }
 
     /**
-     * Formats output as markdown - sorted list similar to EDT.
+     * Formats output as markdown - sorted list similar to EDT. The scan-gap note follows the BSL step's
+     * actual outcome: the specific text when the step captured a not-ready or undetermined search
+     * scope, otherwise the generic text whenever the step ended incomplete for any other reason.
+     * Package-visible so a headless test can drive the production rendering from a collector.
      */
-    private String formatOutput(String objectFqn, ReferenceCollector collector)
+    static String formatOutput(String objectFqn, ReferenceCollector collector)
+    {
+        String note = incompleteScanNote(objectFqn, collector.bslScanGap);
+        if (note == null && collector.bslScanIncompleteForReport)
+        {
+            note = genericIncompleteScanNote(objectFqn);
+        }
+        ReferenceSearchBound bound = collector.bound;
+        List<ReferenceInfo> refs = collector.getAllReferences();
+        if (bound.stopReason() == ReferenceSearchBound.StopReason.LIMIT)
+        {
+            // The reference past the limit was collected only to prove that more exist.
+            return renderStoppedReport(objectFqn, refs.subList(0, Math.min(refs.size(), bound.limit())),
+                limitCountNotice(bound.limit()), limitStopNote(bound.limit()), note);
+        }
+        if (bound.stopReason() == ReferenceSearchBound.StopReason.TIME_BUDGET)
+        {
+            return renderStoppedReport(objectFqn, refs, "", //$NON-NLS-1$
+                timeBudgetStopNote(bound.budgetMillis(), refs.size()), note);
+        }
+        return renderReport(objectFqn, refs, note);
+    }
+
+    /**
+     * The paragraph of a search that the limit stopped: it collected one reference past the limit, so
+     * more exist and the total is unknown. Package-visible so a test can pin the production wording.
+     */
+    static String limitStopNote(int limit)
+    {
+        String advice = limit < ReferenceSearchBound.MAX_LIMIT
+            ? " limit accepts up to " + ReferenceSearchBound.MAX_LIMIT + "." //$NON-NLS-1$ //$NON-NLS-2$
+            : " " + ReferenceSearchBound.MAX_LIMIT //$NON-NLS-1$
+                + " is the maximum limit, so treat the rows as a sample, not the full set."; //$NON-NLS-1$
+        return "**Search stopped early:** more than " + limit + " reference(s) exist; the search stopped at " //$NON-NLS-1$ //$NON-NLS-2$
+            + "limit=" + limit + ", so the total is unknown and the rows below are the first ones found " //$NON-NLS-1$ //$NON-NLS-2$
+            + "(metadata references first, then BSL)." + advice; //$NON-NLS-1$
+    }
+
+    /**
+     * The count-line notice of a search the limit stopped. Below the maximum it is the shared
+     * {@link Pagination#limitReachedNotice}; at the maximum a higher limit would clamp back to the same
+     * value, so it must not suggest one.
+     */
+    static String limitCountNotice(int limit)
+    {
+        if (limit < ReferenceSearchBound.MAX_LIMIT)
+        {
+            return Pagination.limitReachedNotice(limit);
+        }
+        return " (showing first " + limit + ", limit reached; " + limit + " is the maximum limit)"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /**
+     * The paragraph of a search that the time budget stopped. Package-visible so a test can pin the
+     * production wording.
+     */
+    static String timeBudgetStopNote(long budgetMillis, int shown)
+    {
+        String budget = budgetMillis >= 1000 ? (budgetMillis / 1000) + " s" : budgetMillis + " ms"; //$NON-NLS-1$ //$NON-NLS-2$
+        return "**Search stopped early:** the " + budget + " time budget ran out after " + shown //$NON-NLS-1$ //$NON-NLS-2$
+            + " reference(s), so more may exist and the total is unknown. Each BSL reference costs a parse " //$NON-NLS-1$
+            + "of its module, so a smaller limit answers sooner; if list_projects shows a project that is " //$NON-NLS-1$
+            + "not 'ready', the search covered the whole workspace - retry once every project is ready."; //$NON-NLS-1$
+    }
+
+    /** Pure report assembly, including the caveat even when no references were collected. */
+    static String renderReport(String objectFqn, List<ReferenceInfo> refs, String note)
+    {
+        return renderReport(objectFqn, refs, "**Total references found:** " + refs.size(), note); //$NON-NLS-1$
+    }
+
+    /**
+     * Report of a search the bound stopped: the count line names what is SHOWN, never a total, and the
+     * stop paragraph comes before any scan-gap note.
+     */
+    private static String renderStoppedReport(String objectFqn, List<ReferenceInfo> refs, String countNotice,
+        String stopNote, String scanNote)
+    {
+        String note = scanNote == null ? stopNote : stopNote + "\n\n" + scanNote; //$NON-NLS-1$
+        return renderReport(objectFqn, refs, "**References shown:** " + refs.size() + countNotice, note, //$NON-NLS-1$
+            "No references found before the search stopped.\n"); //$NON-NLS-1$
+    }
+
+    private static String renderReport(String objectFqn, List<ReferenceInfo> refs, String countLine,
+        String note)
+    {
+        return renderReport(objectFqn, refs, countLine, note, "No references found.\n"); //$NON-NLS-1$
+    }
+
+    private static String renderReport(String objectFqn, List<ReferenceInfo> refs, String countLine,
+        String note, String emptyLine)
     {
         StringBuilder sb = new StringBuilder();
 
-        int totalCount = collector.getTotalCount();
+        int totalCount = refs.size();
 
         sb.append("# References to ").append(objectFqn).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
-        sb.append("**Total references found:** ").append(totalCount).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+        sb.append(countLine).append("\n\n"); //$NON-NLS-1$
+
+        if (note != null)
+        {
+            sb.append(note).append("\n\n"); //$NON-NLS-1$
+        }
 
         if (totalCount == 0)
         {
-            sb.append("No references found.\n"); //$NON-NLS-1$
+            sb.append(emptyLine);
             return sb.toString();
         }
 
         // Get all references and merge BSL by module
-        List<ReferenceInfo> allRefs = collector.getAllReferences();
+        List<ReferenceInfo> allRefs = refs;
 
         // Separate BSL and metadata references
         java.util.Map<String, List<Integer>> bslModuleLines = new java.util.TreeMap<>();
@@ -270,6 +379,89 @@ public class MetadataReferenceService
         appendBslModules(sb, bslModuleLines);
 
         return sb.toString();
+    }
+
+    /** Why adopted copies were omitted from the diagnostic scan's target set. */
+    static final class ScanGap
+    {
+        enum Kind { NOT_READY, UNDETERMINED }
+
+        final Kind kind;
+        final Map<String, ProjectState> notReady;
+        final List<String> extensionNames;
+        final String projectName;
+
+        private ScanGap(Kind kind, Map<String, ProjectState> notReady,
+            List<String> extensionNames, String projectName)
+        {
+            this.kind = kind;
+            this.notReady = Collections.unmodifiableMap(new LinkedHashMap<>(notReady));
+            this.extensionNames = Collections.unmodifiableList(new ArrayList<>(extensionNames));
+            this.projectName = projectName;
+        }
+
+        static ScanGap of(String projectName, SearchDependenciesResult snapshot)
+        {
+            if (!snapshot.isDetermined())
+            {
+                return new ScanGap(Kind.UNDETERMINED, Collections.emptyMap(),
+                    Collections.emptyList(), projectName);
+            }
+            if (snapshot.isAllReady() || snapshot.getExtensionProjects().isEmpty())
+            {
+                return null;
+            }
+            Map<String, ProjectState> notReady = new LinkedHashMap<>();
+            for (String name : snapshot.getNotReadyProjectNames())
+            {
+                notReady.put(name, snapshot.getReadiness().get(name));
+            }
+            List<String> extensions = new ArrayList<>();
+            for (IProject extension : snapshot.getExtensionProjects())
+            {
+                extensions.add(extension.getName());
+            }
+            return new ScanGap(Kind.NOT_READY, notReady, extensions, projectName);
+        }
+    }
+
+    /**
+     * The note for an incomplete BSL step with no captured scope gap: the code index or finder was
+     * unavailable, an extension's adopted copy could not be inspected, the search scope changed
+     * during the search, or the step failed.
+     */
+    static String genericIncompleteScanNote(String objectFqn)
+    {
+        return "**Scan incomplete:** the BSL code scan for " + objectFqn //$NON-NLS-1$
+            + " could not inspect every module (the code index or adopted copies in extensions were " //$NON-NLS-1$
+            + "unavailable), so the count above may be low. " //$NON-NLS-1$
+            + "Retry once list_projects reports every project ready."; //$NON-NLS-1$
+    }
+
+    /** Exact diagnostic wording, separate from the reference count and grouping. */
+    static String incompleteScanNote(String objectFqn, ScanGap gap)
+    {
+        if (gap == null)
+        {
+            return null;
+        }
+        if (gap.kind == ScanGap.Kind.UNDETERMINED)
+        {
+            return "**Scan incomplete:** the search scope of project '" + gap.projectName //$NON-NLS-1$
+                + "' could not be determined (EDT project contexts are changing), so adopted copies of " //$NON-NLS-1$
+                + objectFqn + " in its extensions were not searched and the count above may be low. " //$NON-NLS-1$
+                + "Wait for list_projects to report every project 'ready' and retry."; //$NON-NLS-1$
+        }
+        List<String> states = new ArrayList<>();
+        for (Map.Entry<String, ProjectState> entry : gap.notReady.entrySet())
+        {
+            states.add(entry.getKey() + " (" + entry.getValue().getValue() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return "**Scan incomplete:** search-scope project(s) still not ready: " //$NON-NLS-1$
+            + String.join(", ", states) + ". Adopted copies of " + objectFqn + " in " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + String.join(", ", gap.extensionNames) //$NON-NLS-1$
+            + " were not searched, so the count above may be low. " //$NON-NLS-1$
+            + "Wait for list_projects to report them 'ready' and retry."; //$NON-NLS-1$
     }
 
     /**
@@ -507,7 +699,7 @@ public class MetadataReferenceService
         return projectName + "/" + modulePath; //$NON-NLS-1$
     }
 
-    private static class ReferenceCollector extends AbstractBmTask<Void>
+    static class ReferenceCollector extends AbstractBmTask<Void>
     {
 
         private final IProject sourceProject;
@@ -516,6 +708,8 @@ public class MetadataReferenceService
         /** Non-null exactly when {@code target instanceof MdObject} - see the class comment. */
         private final MdObject targetAsMdObject;
         private final int limit;
+        /** Bounds the walk of a {@code find_references} search; unbounded for a strict scan. */
+        final ReferenceSearchBound bound;
         private final List<ReferenceInfo> references = new ArrayList<>();
         /** Set to track unique references (category:path:feature) to avoid duplicates */
         private final java.util.Set<String> seenReferences = new java.util.HashSet<>();
@@ -530,6 +724,14 @@ public class MetadataReferenceService
          * fail CLOSED on an incomplete scan. Default {@code true}: most scans complete.
          */
         private boolean bslScanComplete = true;
+        /** Search-scope evidence used only for the best-effort Markdown report. */
+        private ScanGap bslScanGap;
+        /**
+         * Whether the Markdown report must say the BSL step was incomplete. It follows {@link
+         * #bslScanComplete} except where the incompleteness provably cost nothing: a determined scope
+         * with no extension project holds no adopted copy (see {@link #recordAdoptedTargetsOutcome}).
+         */
+        private boolean bslScanIncompleteForReport;
 
         /** See {@link #bslScanComplete}. */
         boolean isBslScanComplete()
@@ -537,7 +739,47 @@ public class MetadataReferenceService
             return bslScanComplete;
         }
 
+        /** Marks the BSL step incomplete for the strict caller and for the Markdown report alike. */
+        private void markBslScanIncomplete()
+        {
+            bslScanComplete = false;
+            bslScanIncompleteForReport = true;
+        }
+
+        /**
+         * Records whether the adopted-target augmentation completed. An incomplete one always makes
+         * the strict result incomplete; the report says so too unless {@code searchDependencies} is a
+         * determined scope with no extension project - then no adopted copy can exist, and the
+         * augmentation refused only because a non-extension project (e.g. external objects) was not
+         * ready yet. Package-visible so a headless test can drive it.
+         */
+        void recordAdoptedTargetsOutcome(boolean complete, SearchDependenciesResult searchDependencies)
+        {
+            if (complete)
+            {
+                return;
+            }
+            bslScanComplete = false;
+            boolean noAdoptedCopyCanExist = searchDependencies != null
+                && searchDependencies.isDetermined()
+                && searchDependencies.getExtensionProjects().isEmpty();
+            if (!noAdoptedCopyCanExist)
+            {
+                bslScanIncompleteForReport = true;
+            }
+        }
+
+        /**
+         * An unbounded (strict) collection: the legacy {@code limit * 10} cap on what is KEPT, while the
+         * walk itself runs to its end - see {@link ReferenceSearchBound#unbounded()}.
+         */
         ReferenceCollector(IProject sourceProject, IBmModel bmModel, IBmObject target, int limit)
+        {
+            this(sourceProject, bmModel, target, limit, ReferenceSearchBound.unbounded());
+        }
+
+        ReferenceCollector(IProject sourceProject, IBmModel bmModel, IBmObject target, int limit,
+            ReferenceSearchBound bound)
         {
             super("Find references to " + safeTargetName(target)); //$NON-NLS-1$
             this.sourceProject = sourceProject;
@@ -545,6 +787,22 @@ public class MetadataReferenceService
             this.target = target;
             this.targetAsMdObject = (target instanceof MdObject) ? (MdObject)target : null;
             this.limit = limit;
+            this.bound = bound;
+        }
+
+        /**
+         * Whether no further reference may be KEPT. A bounded search keeps one past its limit (the proof
+         * that more exist) and stops at its time budget; an unbounded one keeps {@code limit * 10}.
+         */
+        private boolean capReached()
+        {
+            return bound.isBounded() ? bound.shouldStop(references.size()) : references.size() >= limit * 10;
+        }
+
+        /** Whether a bounded search must not do any more work at all; never true when unbounded. */
+        private boolean stopped()
+        {
+            return bound.isBounded() && bound.shouldStop(references.size());
         }
 
         /**
@@ -585,26 +843,56 @@ public class MetadataReferenceService
          */
         void collect()
         {
+            collect(() -> IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
+                    BslModuleUtils.BSL_LOOKUP_URI),
+                ProjectStateChecker::determineSearchDependencies);
+        }
+
+        /**
+         * Package-visible seam of {@link #collect()}: the BSL index lookup and the search-scope snapshot
+         * are injected so a headless test can run every step. A bounded search skips each remaining step
+         * once it has stopped; an unbounded one runs them all, exactly as before.
+         */
+        void collect(Supplier<IResourceServiceProvider> resourceServiceProviderLookup,
+            Function<IProject, SearchDependenciesResult> searchScopeLookup)
+        {
             IBmEngine engine = bmModel.getEngine();
 
-            // 1. Collect direct back references - applies to ANY IBmObject.
-            collectBackReferences(engine, target);
+            // 1. Collect direct back references - applies to ANY IBmObject. Checked like every later
+            // step: the readiness wait and the object lookup may already have spent the time budget,
+            // and loading the back references of a busy object is itself work.
+            if (!stopped())
+            {
+                collectBackReferences(engine, target);
+            }
 
             if (targetAsMdObject != null)
             {
                 // 2. Collect references to produced types
-                collectProducedTypesReferences(engine, targetAsMdObject);
+                if (!stopped())
+                {
+                    collectProducedTypesReferences(engine, targetAsMdObject);
+                }
 
                 // 3. Collect references to predefined items
-                collectPredefinedItemsReferences(engine, targetAsMdObject);
+                if (!stopped())
+                {
+                    collectPredefinedItemsReferences(engine, targetAsMdObject);
+                }
 
                 // 4. Collect references to fields (attributes, tabular sections, etc.)
-                collectFieldReferences(engine, targetAsMdObject);
+                if (!stopped())
+                {
+                    collectFieldReferences(engine, targetAsMdObject);
+                }
             }
 
             // 5. Collect BSL code references - applies to ANY IBmObject. MdObject targets add their
             // produced types; MdObject and PredefinedItem targets can add adopted-extension copies.
-            collectBslReferences(target);
+            if (!stopped())
+            {
+                collectBslReferences(target, resourceServiceProviderLookup, searchScopeLookup);
+            }
         }
 
         /**
@@ -634,6 +922,7 @@ public class MetadataReferenceService
 
             seenReferences.add(key);
             references.add(ref);
+            bound.recordCollected(references.size());
             return true;
         }
 
@@ -643,7 +932,7 @@ public class MetadataReferenceService
 
             for (IBmCrossReference ref : refs) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
             {
-                if (references.size() >= limit * 10) // overall cap (all categories) before grouping
+                if (capReached()) // overall cap (all categories) before grouping
                 {
                     break;
                 }
@@ -684,6 +973,10 @@ public class MetadataReferenceService
 
             for (EObject type : producedTypes.eContents())
             {
+                if (stopped())
+                {
+                    return;
+                }
                 TypeItem typeItem = getTypeItem(type);
                 if (typeItem instanceof IBmObject)
                 {
@@ -698,7 +991,7 @@ public class MetadataReferenceService
             Collection<IBmCrossReference> refs = engine.getBackReferences(typeItem);
             for (IBmCrossReference ref : refs) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
             {
-                if (references.size() >= limit * 10)
+                if (capReached())
                 {
                     break;
                 }
@@ -738,10 +1031,14 @@ public class MetadataReferenceService
         {
             for (PredefinedItem item : PredefinedItemUtil.getItems((EObject) target))
             {
+                if (stopped())
+                {
+                    return;
+                }
                 Collection<IBmCrossReference> refs = engine.getBackReferences((IBmObject) item);
                 for (IBmCrossReference ref : refs) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
                 {
-                    if (references.size() >= limit * 10)
+                    if (capReached())
                     {
                         break;
                     }
@@ -775,6 +1072,10 @@ public class MetadataReferenceService
             FieldSource fieldSource = (FieldSource) target;
             for (var field : fieldSource.getFields())
             {
+                if (stopped())
+                {
+                    return;
+                }
                 if (!(field instanceof IBmObject))
                 {
                     continue;
@@ -793,7 +1094,7 @@ public class MetadataReferenceService
         {
             for (IBmCrossReference ref : refs) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
             {
-                if (references.size() >= limit * 10)
+                if (capReached())
                 {
                     break;
                 }
@@ -822,12 +1123,31 @@ public class MetadataReferenceService
             }
         }
 
-        private void collectBslReferences(IBmObject target)
+        /**
+         * Records the report's scan gap from {@code searchDependencies} - the same snapshot the BSL
+         * step derives its adopted targets and source scope from - and returns it.
+         *
+         * @param searchDependencies the snapshot the scan uses; its extension list names the copies
+         *     a gap leaves unsearched
+         * @return the captured gap, or {@code null} when nothing adopted was left out
+         */
+        ScanGap captureScanGap(SearchDependenciesResult searchDependencies)
+        {
+            bslScanGap = ScanGap.of(safeProjectName(sourceProject), searchDependencies);
+            return bslScanGap;
+        }
+
+        /**
+         * Package-visible seam of {@link #collectBslReferences(IBmObject)}: the index lookup and the
+         * search-scope snapshot are injected so a headless test can run this production step.
+         */
+        void collectBslReferences(IBmObject target,
+            Supplier<IResourceServiceProvider> resourceServiceProviderLookup,
+            Function<IProject, SearchDependenciesResult> searchScopeLookup)
         {
             try
             {
-                IResourceServiceProvider resourceServiceProvider =
-                    IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(BslModuleUtils.BSL_LOOKUP_URI);
+                IResourceServiceProvider resourceServiceProvider = resourceServiceProviderLookup.get();
 
                 if (resourceServiceProvider == null)
                 {
@@ -835,19 +1155,19 @@ public class MetadataReferenceService
                     // (possibly-incomplete) collection is still returned unchanged - but a destructive
                     // caller consulting isBslScanComplete() must know a BSL-only reference could have
                     // been MISSED here (see collectReferencesForObjectStrict).
-                    bslScanComplete = false;
+                    markBslScanIncomplete();
                     return;
                 }
 
                 IReferenceFinder finder = resourceServiceProvider.get(IReferenceFinder.class);
                 if (finder == null)
                 {
-                    bslScanComplete = false;
+                    markBslScanIncomplete();
                     return;
                 }
 
-                SearchDependenciesResult searchDependencies =
-                    ProjectStateChecker.determineSearchDependencies(sourceProject);
+                SearchDependenciesResult searchDependencies = searchScopeLookup.apply(sourceProject);
+                captureScanGap(searchDependencies);
 
                 // Collect target URIs (including produced types)
                 List<URI> targetURIs = new ArrayList<>();
@@ -874,21 +1194,40 @@ public class MetadataReferenceService
                 AdoptedReferenceTargets.Resolution adoptedTargets =
                     AdoptedReferenceTargets.resolve(target, searchDependencies);
                 targetURIs.addAll(adoptedTargets.getTargetURIs());
+                recordAdoptedTargetsOutcome(adoptedTargets.isComplete(), searchDependencies);
                 if (!adoptedTargets.isComplete())
                 {
                     // find_references remains best-effort and still searches every target found.
                     // Strict destructive callers must not interpret a failed augmentation as proof
                     // that the missing extension contains no adopted counterpart or BSL reference.
-                    bslScanComplete = false;
                     Activator.logInfo("BSL adopted-target augmentation incomplete for project '" //$NON-NLS-1$
                         + safeProjectName(sourceProject) + "' (" //$NON-NLS-1$
                         + adoptedTargets.getFailureReason() + "); continuing with resolved targets."); //$NON-NLS-1$
                 }
 
-                boolean dependencySnapshotStable = BslReferenceSearch.findReferences(
-                    resourceServiceProvider, finder, sourceProject, targetURIs,
-                    this::collectBslReferenceDescription, new NullProgressMonitor(),
-                    searchDependencies);
+                boolean dependencySnapshotStable;
+                try
+                {
+                    // A bounded search hands the finder a monitor that reads "cancelled" once the bound
+                    // says stop: Xtext polls it per candidate resource, so the INDEX WALK ends there,
+                    // not just the collection. An unbounded scan gets a monitor that never cancels.
+                    dependencySnapshotStable = BslReferenceSearch.findReferences(
+                        resourceServiceProvider, finder, sourceProject, targetURIs,
+                        this::collectBslReferenceDescription, bound.monitor(references::size),
+                        searchDependencies);
+                }
+                catch (OperationCanceledException e)
+                {
+                    if (!bound.isStopped())
+                    {
+                        // Not our stop: a cancellation from elsewhere is a failed scan, as before.
+                        throw e;
+                    }
+                    Activator.logInfo("BSL reference scan for project '" + safeProjectName(sourceProject) //$NON-NLS-1$
+                        + "' stopped early (" + bound.stopReason() + ") after " + references.size() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " reference(s)."); //$NON-NLS-1$
+                    return;
+                }
 
                 if (!dependencySnapshotStable
                     && adoptedTargets.isComplete()
@@ -896,7 +1235,7 @@ public class MetadataReferenceService
                 {
                     // The source search fell back and is complete, but its complete source set cannot
                     // repair adopted target URIs derived from a dependency snapshot that changed.
-                    bslScanComplete = false;
+                    markBslScanIncomplete();
                     Activator.logInfo("BSL dependency membership, extension kind, or readiness changed " //$NON-NLS-1$
                         + "during adopted-target " //$NON-NLS-1$
                         + "and source resolution for project '" + safeProjectName(sourceProject) //$NON-NLS-1$
@@ -906,7 +1245,7 @@ public class MetadataReferenceService
             catch (Exception e)
             {
                 Activator.logError("Error finding BSL references", e); //$NON-NLS-1$
-                bslScanComplete = false;
+                markBslScanIncomplete();
             }
         }
 
@@ -929,7 +1268,7 @@ public class MetadataReferenceService
 
         private void collectBslReferenceDescription(IReferenceDescription refDesc)
         {
-            if (references.size() >= limit * 10)
+            if (capReached())
             {
                 return;
             }
@@ -957,8 +1296,9 @@ public class MetadataReferenceService
             String modulePath = qualifyWithProject(extractModulePath(path), extractProjectName(path),
                 sourceProject == null ? null : sourceProject.getName());
 
-            // Extract line number - we need to load the EObject and use NodeModelUtils
-            int line = extractLineNumberFromSourceUri(sourceUri);
+            // Extract line number - we need to load the EObject and use NodeModelUtils. This parse is
+            // the per-reference cost a bounded search caps (capReached above runs first).
+            int line = resolveLine(sourceUri);
 
             // Use addReference for deduplication
             addReference(new ReferenceInfo("BSL modules", modulePath, line, path)); //$NON-NLS-1$
@@ -987,6 +1327,15 @@ public class MetadataReferenceService
             }
 
             return path;
+        }
+
+        /**
+         * The line of one BSL reference. Package-visible so a headless test can count these calls: in
+         * production each one loads and parses the referring module (once per module per search).
+         */
+        int resolveLine(URI sourceUri)
+        {
+            return extractLineNumberFromSourceUri(sourceUri);
         }
 
         /**

@@ -22,9 +22,12 @@ public class PreferenceInitializer extends AbstractPreferenceInitializer
     {
         IPreferenceStore store = Activator.getDefault().getPreferenceStore();
         store.setDefault(PreferenceConstants.PREF_PORT, PreferenceConstants.DEFAULT_PORT);
+        store.setDefault(PreferenceConstants.PREF_HTTP_ENABLED, PreferenceConstants.DEFAULT_HTTP_ENABLED);
         store.setDefault(PreferenceConstants.PREF_AUTO_START, PreferenceConstants.DEFAULT_AUTO_START);
         store.setDefault(PreferenceConstants.PREF_CHECKS_FOLDER, PreferenceConstants.DEFAULT_CHECKS_FOLDER);
         store.setDefault(PreferenceConstants.PREF_PLAIN_TEXT_MODE, PreferenceConstants.DEFAULT_PLAIN_TEXT_MODE);
+        store.setDefault(PreferenceConstants.PREF_ALLOW_UI_NAVIGATION,
+            PreferenceConstants.DEFAULT_ALLOW_UI_NAVIGATION);
 
         // Navigator tree contributions
         store.setDefault(PreferenceConstants.PREF_ENHANCE_NAVIGATOR,

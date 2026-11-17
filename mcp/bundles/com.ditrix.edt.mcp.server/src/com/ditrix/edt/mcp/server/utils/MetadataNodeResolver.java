@@ -6,6 +6,7 @@
 
 package com.ditrix.edt.mcp.server.utils;
 
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -20,13 +21,16 @@ import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.Subsystem;
 
 /**
  * Resolves a 1C "full name" FQN to a metadata node anywhere in the mdclass tree,
  * for the unified metadata-CRUD tools (create / modify / delete / get_properties).
  *
- * <p>A full name addresses a node by its containment path, where each level adds a
+ * <p>A full name addresses a node by its metadata path (containments and the registered EDS
+ * Table/Cube reference collections), where each level adds a
  * {@code .KindToken.Name} pair: {@code Catalog.Products} (a top object),
  * {@code Catalog.Products.Attribute.Weight} (an attribute),
  * {@code Catalog.Products.TabularSection.Goods.Attribute.Price} (a tabular-section
@@ -46,6 +50,34 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
  */
 public final class MetadataNodeResolver
 {
+    /** A lookup result that can be carried to a later transaction without retaining a live object. */
+    public record ObjectIdentity(long bmId, String fqn, String kind) { }
+
+    /** Detached Name/UUID/containment identity for APIs that compare an origin without reading its content. */
+    public static MdObject detachedIdentity(MdObject source)
+    {
+        MdObject copy = (MdObject)org.eclipse.emf.ecore.util.EcoreUtil.create(source.eClass());
+        copy.setName(source.getName());
+        copy.setUuid(source.getUuid());
+        if (source.eContainer() instanceof MdObject owner && !(owner instanceof Configuration)
+            && source.eContainingFeature() instanceof org.eclipse.emf.ecore.EReference feature && feature.isMany())
+        {
+            MdObject parent = detachedIdentity(owner);
+            @SuppressWarnings("unchecked")
+            java.util.List<Object> children = (java.util.List<Object>)parent.eGet(feature);
+            children.add(copy);
+        }
+        return copy;
+    }
+
+    /** Call inside a read; consumers must re-fetch the object by id in their own transaction. */
+    public static ObjectIdentity resolveIdentity(MetadataScope scope, String fqn)
+    {
+        MetadataNode node = resolveExistingWithYoFallback(scope, fqn).node;
+        if (node == null || !(node.object instanceof com._1c.g5.v8.bm.core.IBmObject object)) return null;
+        String canonical = resolvableAddressOf(node.object);
+        return new ObjectIdentity(object.bmGetId(), canonical, node.object.eClass().getName());
+    }
     /**
      * Bilingual child KIND token (lower-cased) &rarr; EMF containment feature name on the owner.
      * The feature name is the standard EMF accessor name (e.g. {@code getAttributes()} &rarr;
@@ -53,6 +85,10 @@ public final class MetadataNodeResolver
      * every owner type that declares the collection.
      */
     private static final Map<String, String> CHILD_FEATURE_BY_TOKEN;
+    /** The one collection whose EMF name differs from its metamodel code (the FQN token). */
+    private static final Map<String, String> KIND_TOKEN_BY_FEATURE = Map.of("tableFields", "Field"); //$NON-NLS-1$ //$NON-NLS-2$
+    /** Table and DimensionTable expose the same Field kind under different EMF names. */
+    private static final Map<String, String> ALTERNATE_CHILD_FEATURE = Map.of("tableFields", "fields"); //$NON-NLS-1$ //$NON-NLS-2$
     static
     {
         Map<String, String> m = new LinkedHashMap<>();
@@ -134,6 +170,19 @@ public final class MetadataNodeResolver
         putTokens(m, "parameters", "parameter", "parameters", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             cp(0x043f, 0x0430, 0x0440, 0x0430, 0x043c, 0x0435, 0x0442, 0x0440),
             cp(0x043f, 0x0430, 0x0440, 0x0430, 0x043c, 0x0435, 0x0442, 0x0440, 0x044b));
+        putTokens(m, "tables", "table", "tables", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            cp(0x0442, 0x0430, 0x0431, 0x043b, 0x0438, 0x0446, 0x0430), cp(0x0442, 0x0430, 0x0431, 0x043b, 0x0438, 0x0446, 0x044b));
+        putTokens(m, "cubes", "cube", "cubes", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            cp(0x043a, 0x0443, 0x0431), cp(0x043a, 0x0443, 0x0431, 0x044b));
+        putTokens(m, "functions", "function", "functions", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            cp(0x0444, 0x0443, 0x043d, 0x043a, 0x0446, 0x0438, 0x044f), cp(0x0444, 0x0443, 0x043d, 0x043a, 0x0446, 0x0438, 0x0438));
+        putTokens(m, "tableFields", "field", "fields", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            cp(0x043f, 0x043e, 0x043b, 0x0435), cp(0x043f, 0x043e, 0x043b, 0x044f));
+        putTokens(m, "dimensionTables", "dimensiontable", "dimensiontables", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            cp(0x0442, 0x0430, 0x0431, 0x043b, 0x0438, 0x0446, 0x0430, 0x0438, 0x0437, 0x043c, 0x0435,
+                0x0440, 0x0435, 0x043d, 0x0438, 0x044f),
+            cp(0x0442, 0x0430, 0x0431, 0x043b, 0x0438, 0x0446, 0x044b, 0x0438, 0x0437, 0x043c, 0x0435,
+                0x0440, 0x0435, 0x043d, 0x0438, 0x0439));
         CHILD_FEATURE_BY_TOKEN = Collections.unmodifiableMap(m);
     }
 
@@ -172,7 +221,7 @@ public final class MetadataNodeResolver
         public final MdObject object;
         /** The container: the {@link Configuration} for a top object, the owner {@link MdObject} for a child. */
         public final EObject owner;
-        /** The containment feature in {@link #owner} that holds {@link #object}. */
+        /** The collection in {@link #owner} containing or registering {@link #object}. */
         public final EReference feature;
         /** {@code true} when the node is a top-level configuration object. */
         public final boolean topLevel;
@@ -204,10 +253,11 @@ public final class MetadataNodeResolver
         public final String configFeatureName;
         /** Resolved direct parent of the leaf; {@code null} for a top-level create. */
         public final EObject owner;
-        /** The TOP object that owns the leaf's {@code .mdo} file and is re-fetchable in a BM
-         * transaction (only TOP objects are re-fetchable by bmId); {@code null} for a top-level create. */
+        /** The re-fetchable TOP object where the in-transaction walk starts. The leaf's FILE owner
+         * is read inside that transaction; it may be a referenced Table rather than this root.
+         * {@code null} for a top-level create. */
         public final MdObject topObject;
-        /** Containment feature on {@link #owner}; {@code null} for a top-level create. */
+        /** Child collection on {@link #owner}; {@code null} for a configuration-level create. */
         public final EReference feature;
         /** Concrete element type to instantiate; {@code null} for a top-level create. */
         public final EClass elementType;
@@ -297,8 +347,7 @@ public final class MetadataNodeResolver
         }
         for (String featureName : new LinkedHashSet<>(CHILD_FEATURE_BY_TOKEN.values()))
         {
-            EStructuralFeature f = owner.eClass().getEStructuralFeature(featureName);
-            if (f instanceof EReference)
+            if (childFeature(owner, kindTokenForFeature(featureName)) != null)
             {
                 kinds.add(kindTokenForFeature(featureName));
             }
@@ -307,20 +356,144 @@ public final class MetadataNodeResolver
     }
 
     /**
-     * The canonical FQN kind token for an EMF containment feature name: its singular, capitalized
-     * ({@code "tabularSections"} &rarr; {@code "TabularSection"}). Derived from the feature rather
-     * than tabulated a second time - {@link #featureNameForKind} accepts the result case-insensitively,
-     * so what this prints is addressable.
+     * The canonical FQN kind token for a child collection. Usually its singular, capitalized name
+     * ({@code "tabularSections"} &rarr; {@code "TabularSection"}); {@code tableFields} is the one
+     * collection whose EMF name is not its token, so it uses the metamodel's {@code code}, Field.
+     * {@link #featureNameForKind} accepts the result case-insensitively.
      *
      * @param featureName the containment feature name
      * @return the kind token
      */
-    private static String kindTokenForFeature(String featureName)
+    public static String kindTokenForFeature(String featureName)
     {
+        String override = KIND_TOKEN_BY_FEATURE.get(featureName);
+        if (override != null)
+        {
+            return override;
+        }
         String singular = featureName.endsWith("s") //$NON-NLS-1$
             ? featureName.substring(0, featureName.length() - 1) : featureName;
         return singular.isEmpty() ? singular
             : Character.toUpperCase(singular.charAt(0)) + singular.substring(1);
+    }
+
+    /**
+     * The full-name address of a metadata node, built from its containment: the outermost object's
+     * {@code Type.Name} (its EClass name, which is how EDT names a top object), then
+     * {@code .Kind.Name} per level ({@link #kindTokenForFeature}), e.g.
+     * {@code Catalog.Goods.TabularSection.Lines.Attribute.Price}. The walk stops at a container that
+     * is not an {@link MdObject} or is the {@link Configuration}.
+     *
+     * <p>A LABEL: every level is printed whatever its kind, so a kind this resolver has no token for
+     * (a form, an integration service channel) still yields a readable path that
+     * {@link #resolveExisting} may not accept. Use {@link #resolvableAddressOf} for an address that
+     * has to be fed back.</p>
+     *
+     * @param object the node (not {@code null})
+     * @return the address, never {@code null}
+     */
+    public static String addressOf(MdObject object)
+    {
+        return address(object, false);
+    }
+
+    /**
+     * The address {@link #resolveExisting} resolves back to {@code object} itself - the same
+     * {@code Type.Name(.Kind.Name)*} form {@link #addressOf} prints, and the form the metadata tools
+     * accept for that node (e.g. {@code rights[].object} of {@code modify_metadata}).
+     *
+     * <p>Answers only when every part of the path is addressable: the outermost object is a
+     * top-level configuration type, each level below it sits in a containment collection this
+     * resolver has a kind token for, and every level has a programmatic Name (never the synonym).
+     * Anything else - a form, an integration service channel, an unnamed
+     * level, a non-metadata container - answers {@code null}, so the caller keeps whatever it used
+     * before rather than printing an address that would not resolve.</p>
+     *
+     * @param object the node (may be {@code null})
+     * @return the address, or {@code null} when the node has none
+     */
+    public static String resolvableAddressOf(MdObject object)
+    {
+        return object == null ? null : address(object, true);
+    }
+
+    /** Shared walk of {@link #addressOf} ({@code strict == false}) and {@link #resolvableAddressOf}. */
+    private static String address(MdObject object, boolean strict)
+    {
+        if (strict && (object instanceof Configuration || isBlank(object.getName())))
+        {
+            return null;
+        }
+        EObject container = object.eContainer();
+        EStructuralFeature feature = object.eContainingFeature();
+        if (container instanceof MdObject && !(container instanceof Configuration) && feature != null)
+        {
+            if (strict && childFeature((MdObject)container, kindTokenForFeature(feature.getName())) != feature)
+            {
+                return null;
+            }
+            String owner = address((MdObject)container, strict);
+            if (owner == null)
+            {
+                return null;
+            }
+            return owner + '.' + kindTokenForFeature(feature.getName()) + '.' + object.getName();
+        }
+        if (container == null)
+        {
+            for (Map.Entry<String, String> entry : ReferencedTopObjects.BACK_REFERENCE_BY_COLLECTION.entrySet())
+            {
+                EStructuralFeature back = object.eClass().getEStructuralFeature(entry.getValue());
+                if (back != null && object.eGet(back) instanceof MdObject)
+                {
+                    MdObject parent = (MdObject)object.eGet(back);
+                    EReference collection = childFeature(parent, kindTokenForFeature(entry.getKey()));
+                    if (collection != null && collection.getEReferenceType().isSuperTypeOf(object.eClass()))
+                    {
+                        String owner = address(parent, strict);
+                        return owner == null ? null : ReferencedTopObjects.attachFqn(owner, object.eClass(),
+                            object.getName());
+                    }
+                }
+            }
+        }
+        if (strict && container != null && !(container instanceof Configuration))
+        {
+            return null;
+        }
+        if (strict && !isConfigurationType(object))
+        {
+            return null;
+        }
+        return object.eClass().getName() + '.' + object.getName();
+    }
+
+    /** Whether {@code object}'s EClass names a top-level configuration collection. */
+    private static boolean isConfigurationType(MdObject object)
+    {
+        return MetadataTypeUtils.getConfigReferenceName(object.eClass().getName()) != null;
+    }
+
+    private static boolean isBlank(String value)
+    {
+        return value == null || value.isEmpty();
+    }
+
+    private static boolean malformedEdsAddress(String fqn)
+    {
+        String[] parts = fqn.split("\\.", -1); //$NON-NLS-1$
+        if (!"ExternalDataSource".equals(MetadataTypeUtils.toEnglishSingular(parts[0]))) //$NON-NLS-1$
+        {
+            return false;
+        }
+        for (String part : parts)
+        {
+            if (part.isEmpty() || !part.equals(part.trim()))
+            {
+                return true;
+            }
+        }
+        return !isValidArity(parts.length);
     }
 
     /**
@@ -336,7 +509,7 @@ public final class MetadataNodeResolver
         {
             return null;
         }
-        return CHILD_FEATURE_BY_TOKEN.get(kindToken.toLowerCase());
+        return CHILD_FEATURE_BY_TOKEN.get(kindToken.toLowerCase(Locale.ROOT));
     }
 
     /**
@@ -375,7 +548,7 @@ public final class MetadataNodeResolver
      */
     public static MetadataNode resolveExisting(MetadataScope scope, String fqn)
     {
-        if (scope == null || fqn == null || fqn.isEmpty())
+        if (scope == null || fqn == null || fqn.isEmpty() || malformedEdsAddress(fqn))
         {
             return null;
         }
@@ -495,6 +668,163 @@ public final class MetadataNodeResolver
     }
 
     /**
+     * Resolves a NESTED subsystem chain ({@code Subsystem.<Parent>.Subsystem.<Child>}, any depth, the
+     * type tokens English or Russian at every level) to a node, for the write paths that take a node
+     * rather than an object (issue #897): {@code modify_metadata}'s generic {@code properties}.
+     *
+     * <p>A nested subsystem is a separate BM TOP object its parent only REFERS to
+     * ({@code Subsystem.subsystems} is not a containment), so {@link #resolveExisting} - the containment
+     * grammar - has no step to it and must not get one (see {@link #resolveAddress}). The chain goes
+     * through the one shared descent ({@link SubsystemUtils#resolveInScope}) instead, and the node says
+     * what the object IS: a top object ({@link MetadataNode#topLevel}), registered by its parent's
+     * {@code subsystems} list.</p>
+     *
+     * <p>The address the result carries is the subsystem's canonical chain - every token English,
+     * every level by its stored Name - when the subsystem's own parent links spell the address
+     * ({@link SubsystemUtils.Lineage#spells}); otherwise the address as given. With {@code yoFallback}
+     * a chain the exact descent misses is resolved again with the yo reading decided level by level
+     * (see {@link #resolveSubsystemChain}).</p>
+     *
+     * @param scope the resolution root (may be {@code null})
+     * @param fqn the normalized address (may be {@code null})
+     * @param yoFallback whether a missed chain is retried with yo normalized to ye
+     * @return the result; its {@code node} is {@code null} when the address is not a nested chain or
+     *     names no subsystem in this root - never {@code null} itself
+     */
+    public static ResolvedNode resolveNestedSubsystem(MetadataScope scope, String fqn, boolean yoFallback)
+    {
+        if (SubsystemUtils.nestedChain(fqn) == null)
+        {
+            return new ResolvedNode(null, fqn, false);
+        }
+        SubsystemHit hit = resolveSubsystemChain(scope, fqn, yoFallback);
+        if (hit == null)
+        {
+            return new ResolvedNode(null, fqn, false);
+        }
+        Subsystem parent = SubsystemUtils.resolveByPath(scope.configuration(), hit.chain, hit.chain.length - 1);
+        SubsystemUtils.Lineage lineage = SubsystemUtils.lineage(hit.leaf);
+        String address = lineage.spells(hit.chain) ? lineage.chainFqn() : hit.address;
+        return new ResolvedNode(new MetadataNode(hit.leaf, parent, MdClassPackage.Literals.SUBSYSTEM__SUBSYSTEMS, true),
+            address, !hit.address.equals(fqn));
+    }
+
+    /** A subsystem a chain address resolved to, with the address and parsed chain that hit. */
+    private static final class SubsystemHit
+    {
+        final Subsystem leaf;
+        final String address;
+        final String[] chain;
+
+        SubsystemHit(Subsystem leaf, String address, String[] chain)
+        {
+            this.leaf = leaf;
+            this.address = address;
+            this.chain = chain;
+        }
+    }
+
+    /**
+     * The ONE rule a subsystem chain address resolves by, for {@link #resolveAddress} (and so the
+     * vendor-support guard) and {@link #resolveNestedSubsystem} (the write) alike, so the two judge and
+     * change the same subsystem (issue #897): the exact descent ({@link SubsystemUtils#resolveInScope});
+     * then, only with {@code yoFallback}, a descent that matches each level by its exact name first and
+     * by its yo-normalized (ye) twin second, accepted only when exactly one chain matches. Never one of
+     * the chain's parents.
+     *
+     * @return the hit, or {@code null} when the address is no chain or names no subsystem in this root
+     */
+    private static SubsystemHit resolveSubsystemChain(MetadataScope scope, String fqn, boolean yoFallback)
+    {
+        String[] chain = SubsystemUtils.parseSubsystemPath(fqn);
+        Subsystem leaf = chain == null ? null : SubsystemUtils.resolveInScope(scope, chain);
+        if (leaf != null)
+        {
+            return new SubsystemHit(leaf, fqn, chain);
+        }
+        if (chain == null || !yoFallback || scope == null || scope.isExternalObjects())
+        {
+            return null;
+        }
+        // The yo reading is decided PER LEVEL, never over the whole address: create_metadata stores each
+        // Name on its own (normalizeYo is a per-call choice), so a chain can hold a 'yo' parent above a
+        // 'ye' child. The shared per-level descent (SubsystemUtils.resolveStoredChain) tries, at each
+        // level, the exact name first and then its yo-normalized twin among the subsystems that really
+        // exist there. More than one matching chain is two different subsystems the address could mean:
+        // none is guessed.
+        List<String[]> stored = SubsystemUtils.resolveStoredChain(scope.configuration(), fqn);
+        if (stored.size() != 1)
+        {
+            return null;
+        }
+        String[] names = stored.get(0);
+        Subsystem viaYo = SubsystemUtils.resolveInScope(scope, names);
+        return viaYo == null ? null : new SubsystemHit(viaYo, SubsystemUtils.chainFqn(names, names.length), names);
+    }
+
+    /**
+     * Resolves ONE address to the metadata object it names - a subsystem by its chain, a form, or any
+     * node {@link #resolveExisting} knows. It is the one dispatch the vendor-support guard and
+     * {@code adopt_metadata_object} resolve an address with, so the two cannot disagree about WHICH
+     * object an FQN names: the guard judges the object a write would change, adopt adopts the object
+     * the caller named. The one respect in which they deliberately differ is this method's
+     * {@code yoFallback} parameter, not a second copy of the dispatch.
+     *
+     * <ul>
+     * <li>A SUBSYSTEM goes by its chain ({@link SubsystemUtils#parseSubsystemPath}, then
+     * {@link SubsystemUtils#resolveInScope}): a nested subsystem is a separate top object that its
+     * parent only REFERS to ({@code Subsystem.subsystems} is not a containment), so the containment
+     * grammar of this class has no step to it - and must not get one: it would make a top object look
+     * like a member to every tool at once (see {@code CreateMetadataTool}, issue #351). The answer is
+     * the subsystem at the chain's LAST level or {@code null}, never one of its parents.</li>
+     * <li>A FORM ({@link FormElementWriter#parseFormPath}, whose kind token is bilingual) resolves
+     * through {@link FormStructureReader#resolveMdForm(MetadataScope, String)}; a form path that
+     * names no form falls through to the node grammar below.</li>
+     * <li>Any other address must have a valid arity ({@link #isValidArity}) and resolves through
+     * {@link #resolveExisting(MetadataScope, String)} - or, with {@code yoFallback}, through
+     * {@link #resolveExistingWithYoFallback(MetadataScope, String)}, which also finds a name
+     * {@code create_metadata} stored with ye when the address spells it with yo. The subsystem branch
+     * honours the same flag by the rule the {@code modify_metadata} write resolves a chain with
+     * ({@link #resolveSubsystemChain}), so the guard judges the very subsystem the write then changes
+     * (issue #897); the form branch has no retry.</li>
+     * </ul>
+     *
+     * @param scope the resolution root (may be {@code null})
+     * @param fqn the normalized FQN (see {@link MetadataTypeUtils#normalizeFqn}; may be {@code null})
+     * @param yoFallback whether an address the exact node lookup misses is retried with yo
+     *     normalized to ye
+     * @return the object, or {@code null} when the address names nothing in this root
+     */
+    public static MdObject resolveAddress(MetadataScope scope, String fqn, boolean yoFallback)
+    {
+        if (fqn == null)
+        {
+            return null;
+        }
+        if (SubsystemUtils.parseSubsystemPath(fqn) != null)
+        {
+            SubsystemHit hit = resolveSubsystemChain(scope, fqn, yoFallback);
+            return hit == null ? null : hit.leaf;
+        }
+        String formPath = FormElementWriter.parseFormPath(fqn);
+        if (formPath != null)
+        {
+            MdObject form = FormStructureReader.resolveMdForm(scope, formPath);
+            if (form != null)
+            {
+                return form;
+            }
+        }
+        if (!isValidArity(fqn.split("\\.").length)) //$NON-NLS-1$
+        {
+            return null;
+        }
+        MetadataNode node = yoFallback ? resolveExistingWithYoFallback(scope, fqn).node
+            : resolveExisting(scope, fqn);
+        return node == null ? null : node.object;
+    }
+
+    /**
      * Returns the yo-to-ye-normalized retry FQN for a failed exact resolve, or {@code null}
      * when the input contains no yo (no distinct retry form exists).
      *
@@ -548,10 +878,10 @@ public final class MetadataNodeResolver
      * The {@link #resolveForCreate(Configuration, String)} variant that resolves the parent against
      * whichever ROOT the project has (issue #309).
      *
-     * <p>A TOP-level create still requires a {@code Configuration} collection to put the object in,
-     * so a top-level FQN of a STANDALONE type (an external data processor / report, which is a
-     * project root rather than a configuration entry) does not resolve here - the caller reports
-     * that, rather than silently creating nothing.</p>
+     * <p>A TOP-level target is a {@code Configuration} collection entry, so a top-level FQN of a
+     * STANDALONE type (an external data processor / report, which is a project root rather than a
+     * configuration entry) does not resolve here; {@code create_metadata} creates such a root by a
+     * separate branch.</p>
      *
      * @param scope the resolution root (may be {@code null})
      * @param fqn the full-name FQN of the node to create
@@ -560,7 +890,7 @@ public final class MetadataNodeResolver
      */
     public static CreateTarget resolveForCreate(MetadataScope scope, String fqn)
     {
-        if (scope == null || fqn == null || fqn.isEmpty())
+        if (scope == null || fqn == null || fqn.isEmpty() || malformedEdsAddress(fqn))
         {
             return null;
         }
@@ -574,11 +904,9 @@ public final class MetadataNodeResolver
         {
             if (scope.isExternalObjects())
             {
-                // An external-objects project has NO configuration to add a top object to, and
-                // its own roots are created with the project (create_project / an .epf import),
-                // never here. Handing back a target anyway made createTopLevel treat this root as
-                // a Configuration and die with a raw ClassCastException; answering "no target"
-                // lets the caller get the refusal that names the project kind instead.
+                // An external-objects project has NO configuration to add a top object to; its
+                // roots are not collection entries. Handing back a target made createTopLevel
+                // treat this root as a Configuration and die with a raw ClassCastException.
                 return null;
             }
             String type = MetadataTypeUtils.toEnglishSingular(parts[0]);
@@ -674,13 +1002,25 @@ public final class MetadataNodeResolver
      */
     private static EReference childFeature(MdObject owner, String kindToken)
     {
+        return childFeature(owner.eClass(), kindToken);
+    }
+
+    /** The shared per-owner grammar check, also used by marker and orphan address walks. */
+    public static EReference childFeature(EClass ownerType, String kindToken)
+    {
         String featureName = featureNameForKind(kindToken);
-        if (featureName == null)
+        if (ownerType == null || featureName == null)
         {
             return null;
         }
-        EStructuralFeature f = owner.eClass().getEStructuralFeature(featureName);
-        return (f instanceof EReference) ? (EReference)f : null;
+        EStructuralFeature f = ownerType.getEStructuralFeature(featureName);
+        if (f == null && ALTERNATE_CHILD_FEATURE.containsKey(featureName))
+        {
+            f = ownerType.getEStructuralFeature(ALTERNATE_CHILD_FEATURE.get(featureName));
+        }
+        // FieldSource.fields is a derived mcore collection, not metadata children.
+        return f instanceof EReference reference
+            && MdClassPackage.Literals.MD_OBJECT.isSuperTypeOf(reference.getEReferenceType()) ? reference : null;
     }
 
     /**

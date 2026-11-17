@@ -35,7 +35,13 @@ RESPONSE SHAPE
 --------------
 JSON tool (getResponseType() == JSON); payload in r.structured:
   stored: {"success": true, "clientConfigured", "project", "applicationId",
-           "applicationName", "user", "access", "passwordSet", "message"}
+           "applicationName", "user", "access", "passwordSet", "storedFor",
+           "verification", "passwordMatched" (only when the read-back decided it),
+           "message"}
+  NOTE: "verification" is three-valued - verified / mismatched / not_verifiable -
+        because EDT's resolveSettings falls back to a default (OS, empty user,
+        empty password) when nothing is stored, so a read-back of exactly that
+        shape proves nothing. A mismatch is returned as an ERROR envelope.
   error:  {"success": false, "error": "..."}
 
 CI STRATEGY
@@ -75,6 +81,7 @@ from harness import (
     assert_error_quality,
     assert_no_diff,
     requires_live_infobase,
+    snapshot_application_bindings,
     e2e_test,
     PROJECT,
 )
@@ -130,11 +137,13 @@ def test_nonexistent_project_errors_with_hint():
 def test_nonexistent_application_id_errors_with_hint():
     """A real project but a non-existent applicationId -> 'Application not found' with
     a get_applications hint. Exercises the application-resolution chain."""
+    before = snapshot_application_bindings(PROJECT)
     r = call("set_infobase_credentials",
              {"projectName": PROJECT, "applicationId": NONEXISTENT_APP_ID, "user": "Admin"})
     err = assert_error(r, "nonexistent applicationId")
     assert_error_quality(err, names=[NONEXISTENT_APP_ID], suggests=["get_applications"],
                          ctx="nonexistent applicationId is named with get_applications hint")
+    assert snapshot_application_bindings(PROJECT) == before, "refused credential write changed application bindings"
     assert_no_diff("a rejected call must not touch the fixture")
 
 

@@ -29,6 +29,8 @@ import java.util.regex.Pattern;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.emf.common.util.BasicEList;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.InternalEObject;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -41,10 +43,12 @@ import com._1c.g5.v8.dt.core.event.IEventBroker;
 import com._1c.g5.v8.dt.core.model.IModelObjectCollectionRuntimeOrderSorter;
 import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractRoleDescription;
+import com._1c.g5.v8.dt.metadata.mdclass.Catalog;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.Role;
 import com._1c.g5.v8.dt.rights.IRightInfosService;
+import com._1c.g5.v8.dt.rights.model.ObjectRights;
 import com._1c.g5.v8.dt.rights.model.RightValue;
 import com._1c.g5.v8.dt.rights.model.RightsFactory;
 import com._1c.g5.v8.dt.rights.model.RoleDescription;
@@ -417,8 +421,8 @@ public class RoleRightsWriterTest
     @Test
     public void testAttachRoleDescriptionRegistersTheFreshDescriptionUnderTheGeneratedFqn()
     {
-        // The whole of issue #452: a role created through create_metadata has no rights model, and a
-        // description that is merely REFERENCED is not persistable - the next commit dies with
+        // The missing-model branch behind issue #452: a merely REFERENCED description is not
+        // persistable - the next commit dies with
         // "Failed to persist reference value ...RoleDescriptionImpl@<hash>". The bootstrap must
         // register it as a BM top object in the SAME transaction that sets the reference.
         Role role = mockRole("Reader"); //$NON-NLS-1$
@@ -667,6 +671,9 @@ public class RoleRightsWriterTest
         {
             assertErrorMentions(e.getErrorJson(), "Role.Reader.Rights"); //$NON-NLS-1$
             assertErrorMentions(e.getErrorJson(), "clean_project"); //$NON-NLS-1$
+            assertErrorMentions(e.getErrorJson(), "retry the same call"); //$NON-NLS-1$
+            assertFalse("the refusal must not tell a create caller to re-read a rolled-back role", //$NON-NLS-1$
+                e.getErrorJson().contains("re-read the role")); //$NON-NLS-1$
             // ...but the refusal may claim only what it OBSERVED: that the name is taken. Declaring
             // the registration stale sends the caller to run clean_project - a rebuild - on a premise
             // this call never checked, and a LIVE registration the role's reference has not resolved
@@ -789,9 +796,8 @@ public class RoleRightsWriterTest
     @Test
     public void testAnUnresolvableRightsEntryIsRefusedBeforeTheBootstrapWrites()
     {
-        // The whole rights payload must resolve before the bootstrap commits. An unresolvable entry
-        // on a fresh role must therefore leave NO Rights.rights model behind - and, above all, must
-        // not leave a right granted while the caller sees only a refusal.
+        // The whole payload resolves before bootstrap. For a legacy role with no description, an
+        // unresolvable entry must leave no Rights.rights model or silently granted right behind.
         Role role = mockRole("Reader"); //$NON-NLS-1$
         JsonObject missing = rightsEntry("DefinitelyNotAnObjectFqn", "Read", "set"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         RoleRightsWriter.Result result = applyThroughMockedModel(role, null,
@@ -998,6 +1004,38 @@ public class RoleRightsWriterTest
     }
 
     @Test
+    public void testExtractErrorMessageReturnsTheHumanReadableError()
+    {
+        String message = "The rights model could not be registered."; //$NON-NLS-1$
+        RoleRightsWriter.RoleWriteException failure = new RoleRightsWriter.RoleWriteException(
+            ToolResult.error(message).toJson());
+
+        assertEquals(message, RoleRightsWriter.extractErrorMessage(failure));
+    }
+
+    @Test
+    public void testExtractErrorMessageFallsBackToMalformedPayload()
+    {
+        String malformed = "{definitely not json"; //$NON-NLS-1$
+        RoleRightsWriter.RoleWriteException failure =
+            new RoleRightsWriter.RoleWriteException(malformed);
+
+        assertSame("a malformed refusal must pass through byte-for-byte", malformed, //$NON-NLS-1$
+            RoleRightsWriter.extractErrorMessage(failure));
+    }
+
+    @Test
+    public void testExtractErrorMessageFallsBackToUnexpectedPayloadShape()
+    {
+        String unexpected = "{\"success\":false,\"error\":42}"; //$NON-NLS-1$
+        RoleRightsWriter.RoleWriteException failure =
+            new RoleRightsWriter.RoleWriteException(unexpected);
+
+        assertSame("a non-string error must pass through byte-for-byte", unexpected, //$NON-NLS-1$
+            RoleRightsWriter.extractErrorMessage(failure));
+    }
+
+    @Test
     public void testApplyFailureCarriesNoEmfObjectIdentity()
     {
         // The catch-all of apply() is the one place the #452 commit failure reaches a caller, and the
@@ -1056,6 +1094,8 @@ public class RoleRightsWriterTest
         catch (RoleRightsWriter.RoleWriteException e)
         {
             assertErrorMentions(e.getErrorJson(), roleName);
+            assertErrorMentions(e.getErrorJson(), "clean_project"); //$NON-NLS-1$
+            assertErrorMentions(e.getErrorJson(), "retry the same call"); //$NON-NLS-1$
         }
 
         assertNull("the role must not keep a reference to a description that was never attached", //$NON-NLS-1$
@@ -1081,11 +1121,70 @@ public class RoleRightsWriterTest
         catch (RoleRightsWriter.RoleWriteException e)
         {
             assertErrorMentions(e.getErrorJson(), "Reader"); //$NON-NLS-1$
+            assertErrorMentions(e.getErrorJson(), "clean_project"); //$NON-NLS-1$
+            assertErrorMentions(e.getErrorJson(), "retry the same call"); //$NON-NLS-1$
         }
 
         assertSame("the previous reference must be restored, not cleared", previous, //$NON-NLS-1$
             role.getRights());
         verify(tx, never()).attachTopObject(any(), any());
+    }
+
+    // ---- a role holding entries on deleted objects ---------------------------------------------
+
+    @Test
+    public void testUnresolvedTargetsListsOnlyEntriesWhoseObjectDoesNotResolve()
+    {
+        RoleDescription description = RightsFactory.eINSTANCE.createRoleDescription();
+        ObjectRights live = RightsFactory.eINSTANCE.createObjectRights();
+        live.setObject(com._1c.g5.v8.dt.metadata.mdclass.MdClassFactory.eINSTANCE.createCatalog());
+        ObjectRights gone = RightsFactory.eINSTANCE.createObjectRights();
+        Catalog proxy = com._1c.g5.v8.dt.metadata.mdclass.MdClassFactory.eINSTANCE.createCatalog();
+        ((InternalEObject)proxy).eSetProxyURI(URI.createURI("unresolved:/Catalog.Gone")); //$NON-NLS-1$
+        gone.setObject(proxy);
+        description.getRights().add(live);
+        description.getRights().add(gone);
+
+        assertEquals(List.of("Catalog.Gone"), RoleRightsWriter.unresolvedTargets(description)); //$NON-NLS-1$
+        assertTrue(RoleRightsWriter.unresolvedTargets(null).isEmpty());
+    }
+
+    @Test
+    public void testAnEntryWithNoTargetAlsoBlocksTheEdit()
+    {
+        // The orphan scan reports a null target (undetermined); the preflight must not let it through.
+        RoleDescription description = RightsFactory.eINSTANCE.createRoleDescription();
+        description.getRights().add(RightsFactory.eINSTANCE.createObjectRights());
+        assertEquals(List.of(RoleRightsOrphans.NO_TARGET), RoleRightsWriter.unresolvedTargets(description));
+    }
+
+    @Test
+    public void testTheUnresolvedRefusalNamesTheEntriesAndTheWayOut()
+    {
+        String error = RoleRightsWriter.unresolvedTargetsRefusal("Sales", List.of("Catalog.Gone")); //$NON-NLS-1$ //$NON-NLS-2$
+        JsonObject json = JsonParser.parseString(error).getAsJsonObject();
+        assertFalse(json.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertErrorMentions(error, "Catalog.Gone"); //$NON-NLS-1$
+        assertErrorMentions(error, "nothing was written"); //$NON-NLS-1$
+        assertErrorMentions(error, "resync_to_disk(cleanOrphanRoleRights=true)"); //$NON-NLS-1$
+        assertErrorMentions(error, "clean_project"); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testTheUnresolvedRefusalListsAtMostTwentyAndCountsTheRest()
+    {
+        List<String> targets = new java.util.ArrayList<>();
+        for (int i = 1; i <= 25; i++)
+        {
+            targets.add("Catalog.Gone" + i); //$NON-NLS-1$
+        }
+        String error = RoleRightsWriter.unresolvedTargetsRefusal("Sales", targets); //$NON-NLS-1$
+        assertErrorMentions(error, "has 25 rights entries"); //$NON-NLS-1$
+        assertErrorMentions(error, "Catalog.Gone20 and 5 more)"); //$NON-NLS-1$
+        assertFalse(error, error.contains("Catalog.Gone21")); //$NON-NLS-1$
+        String exact = RoleRightsWriter.unresolvedTargetsRefusal("Sales", targets.subList(0, 20)); //$NON-NLS-1$
+        assertErrorMentions(exact, "Catalog.Gone20)"); //$NON-NLS-1$
+        assertFalse(exact, exact.contains("more)")); //$NON-NLS-1$
     }
 
     private static void assertErrorMentions(String errorJson, String needle)

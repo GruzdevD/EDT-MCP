@@ -6,37 +6,23 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 
+import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
-import org.eclipse.emf.common.util.URI;
-import org.eclipse.emf.ecore.resource.Resource;
-import org.eclipse.emf.ecore.resource.ResourceSet;
-import org.eclipse.swt.widgets.Display;
-import org.eclipse.xtext.resource.IResourceServiceProvider;
-import org.eclipse.xtext.resource.XtextResource;
-import org.eclipse.xtext.ui.resource.IResourceSetProvider;
-import org.eclipse.xtext.util.CancelIndicator;
-import org.eclipse.xtext.validation.CheckMode;
-import org.eclipse.xtext.validation.IResourceValidator;
-import org.eclipse.xtext.validation.Issue;
 
-import com._1c.g5.v8.dt.ql.dcs.resource.QlDcsResource;
-
-import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
+import com.ditrix.edt.mcp.server.protocol.McpKeys;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.BslModuleUtils;
+import com.ditrix.edt.mcp.server.utils.ModuleQueryExtractor;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
+import com.ditrix.edt.mcp.server.utils.QueryValidationService;
 
 /**
  * Tool to validate 1C:Enterprise query language (QL) text in the context of a project.
@@ -47,14 +33,21 @@ public class ValidateQueryTool implements IMcpTool
 {
     public static final String NAME = "validate_query"; //$NON-NLS-1$
     
-    /** URI used to look up the QlDcs language IResourceServiceProvider */
-    private static final URI QLDCS_LOOKUP_URI = URI.createURI("/nopr/querywizard_validate.qldcs"); //$NON-NLS-1$
-
     private static final String PROJECT_NAME = "projectName"; //$NON-NLS-1$
     private static final String QUERY_TEXT = "queryText"; //$NON-NLS-1$
     private static final String DCS_MODE = "dcsMode"; //$NON-NLS-1$
-    private static final String ERROR = "ERROR"; //$NON-NLS-1$
-    private static final String WARNING = "WARNING"; //$NON-NLS-1$
+    private static final String METHOD = "method";
+    private final QueryValidationService validator;
+
+    public ValidateQueryTool()
+    {
+        this(new QueryValidationService());
+    }
+
+    ValidateQueryTool(QueryValidationService validator)
+    {
+        this.validator = validator;
+    }
 
     @Override
     public String getName()
@@ -65,7 +58,7 @@ public class ValidateQueryTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Check a 1C query for syntax and metadata-reference errors. Parameters and examples: " //$NON-NLS-1$
+        return "Check a 1C query or stored BSL query literals for syntax and metadata-reference errors. Parameters and examples: " //$NON-NLS-1$
             + "get_tool_guide('validate_query')."; //$NON-NLS-1$
     }
 
@@ -76,8 +69,11 @@ public class ValidateQueryTool implements IMcpTool
             .stringProperty(PROJECT_NAME,
                 "EDT project name (required).", true) //$NON-NLS-1$
             .stringProperty(QUERY_TEXT,
-                "Full 1C query text to validate (required), e.g. 'SELECT Ref FROM Catalog.Products'.", //$NON-NLS-1$
-                true)
+                "Full 1C query text, e.g. 'SELECT Ref FROM Catalog.Products'. Pass exactly one of queryText or modulePath.")
+            .stringProperty(McpKeys.MODULE_PATH,
+                "Stored BSL path from src/, e.g. 'CommonModules/MyModule/Module.bsl'. Exclusive with queryText; omit method to scan the whole module.")
+            .stringProperty(METHOD,
+                "Procedure/function name (case-insensitive); only with modulePath.")
             .booleanProperty(DCS_MODE,
                 "true for Data Composition System queries (allows DCS-specific syntax). Default: false.") //$NON-NLS-1$
             .build();
@@ -88,13 +84,24 @@ public class ValidateQueryTool implements IMcpTool
     {
         return JsonSchemaBuilder.object()
             .booleanProperty("success", "Whether the operation succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
-            .booleanProperty("valid", "true when the query has zero issues") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("valid", "true only for complete validation without errors") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("validationState", "VALID, INVALID, or PARTIAL")
+            .booleanProperty("validationComplete", "Whether all sources and native checks resolved")
+            .objectArrayProperty("unresolvedSources", "Unresolved source names and reasons")
+            .objectArrayProperty("sources", "Native source resolution and bilingual available fields")
             .booleanProperty(DCS_MODE, "Whether DCS validation mode was used") //$NON-NLS-1$
+            .stringProperty("validationScope", "Project and metadata scope used for validation") //$NON-NLS-1$ //$NON-NLS-2$
             .integerProperty("errorCount", "Number of ERROR-severity issues") //$NON-NLS-1$ //$NON-NLS-2$
             .integerProperty("warningCount", "Number of WARNING-severity issues") //$NON-NLS-1$ //$NON-NLS-2$
             .integerProperty("infoCount", "Number of INFO-severity issues") //$NON-NLS-1$ //$NON-NLS-2$
             .objectArrayProperty("issues", //$NON-NLS-1$
                 "Validation issues; each has severity, message, optional line/column/offset") //$NON-NLS-1$
+            .stringProperty(McpKeys.MODULE_PATH, "Stored module scanned in modulePath mode")
+            .objectArrayProperty("queries", "Validated literals: method, module line/column, shared verdict and module-mapped issues")
+            .objectArrayProperty("skipped", "Keyword-leading literals refused by extraction: method, line/column, reason")
+            .integerProperty("foundCount", "Number of standalone query literals validated")
+            .integerProperty("skippedCount", "Number of keyword-leading literals skipped")
+            .stringProperty("message", "Empty-result explanation and queryText fallback")
             .build();
     }
     
@@ -109,13 +116,26 @@ public class ValidateQueryTool implements IMcpTool
     {
         String projectName = JsonUtils.extractStringArgument(params, PROJECT_NAME);
         String queryText = JsonUtils.extractStringArgument(params, QUERY_TEXT);
+        String modulePath = JsonUtils.extractStringArgument(params, McpKeys.MODULE_PATH);
+        String method = JsonUtils.extractStringArgument(params, METHOD);
         boolean dcsMode = JsonUtils.extractBooleanArgument(params, DCS_MODE, false);
 
-        String err = JsonUtils.requireArguments(params, PROJECT_NAME, QUERY_TEXT);
+        String err = JsonUtils.requireArguments(params, PROJECT_NAME);
         if (err != null)
         {
             return err;
         }
+        if (method != null && (modulePath == null || modulePath.isBlank()))
+            return ToolResult.error("method requires modulePath. Pass a stored modulePath from list_modules, "
+                + "or remove method to validate queryText.").toJson();
+        boolean hasQuery = queryText != null && !queryText.isEmpty();
+        boolean hasModule = modulePath != null && !modulePath.isBlank();
+        if (queryText != null && modulePath != null || hasQuery == hasModule)
+            return ToolResult.error("Pass exactly one of queryText or modulePath. Use queryText for a complete query "
+                + "or list_modules to choose a stored modulePath.").toJson();
+        if (method != null && method.isBlank())
+            return ToolResult.error("method must be a non-blank procedure/function name. "
+                + "Use get_module_structure to choose a name or omit method to scan the module.").toJson();
         
         // Find the project
         ProjectContext ctx = ProjectContext.of(projectName);
@@ -128,272 +148,72 @@ public class ValidateQueryTool implements IMcpTool
             return ToolResult.error("Project is closed: " + projectName).toJson(); //$NON-NLS-1$
         }
 
-        return validateQuery(ctx.project(), queryText, dcsMode);
+        return hasModule ? doValidateModule(ctx.project(), modulePath, method, dcsMode)
+            : doValidateQuery(ctx.project(), queryText, dcsMode);
     }
-    
-    /**
-     * Validates query text against the project context.
-     * Must run on the UI thread for proper Xtext resource access.
-     * 
-     * @param project the project context
-     * @param queryText the query text to validate
-     * @param dcsMode whether to use DCS validation mode
-     * @return JSON result with validation errors
-     */
-    private String validateQuery(IProject project, String queryText, boolean dcsMode)
+
+    String doValidateQuery(IProject project, String queryText, boolean dcsMode)
     {
-        final AtomicReference<String> resultRef = new AtomicReference<>();
-        
-        Display display = Display.getDefault();
-        if (Display.getCurrent() != null)
-        {
-            // Already on UI thread
-            resultRef.set(doValidateQuery(project, queryText, dcsMode));
-        }
-        else
-        {
-            display.syncExec(() -> resultRef.set(doValidateQuery(project, queryText, dcsMode)));
-        }
-        
-        return resultRef.get();
+        return validator.validate(project, queryText, dcsMode).toJson();
     }
-    
-    /**
-     * Performs the actual validation. Executed on UI thread.
-     * 
-     * @param project the project context
-     * @param queryText the query text to validate
-     * @param dcsMode whether to use DCS validation mode
-     * @return JSON result with validation errors
-     */
-    private String doValidateQuery(IProject project, String queryText, boolean dcsMode)
+
+    String doValidateModule(IProject project, String modulePath, String method, boolean dcsMode)
     {
-        XtextResource resource = null;
         try
         {
-            // Get the QlDcs language resource service provider
-            IResourceServiceProvider resourceServiceProvider =
-                IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(QLDCS_LOOKUP_URI);
-            
-            if (resourceServiceProvider == null)
-            {
-                return ToolResult.error("QlDcs language support not available. " + //$NON-NLS-1$
-                    "Please ensure the QL plugin is installed.").toJson(); //$NON-NLS-1$
-            }
-            
-            // Get IResourceSetProvider for project context
-            IResourceSetProvider resourceSetProvider =
-                resourceServiceProvider.get(IResourceSetProvider.class);
-            
-            if (resourceSetProvider == null)
-            {
-                return ToolResult.error("Failed to get resource set provider").toJson(); //$NON-NLS-1$
-            }
-            
-            // Create resource set bound to the project
-            ResourceSet resourceSet = resourceSetProvider.get(project);
-            
-            // Create a unique URI for this validation resource
-            URI resourceUri = URI.createPlatformResourceURI(
-                "/" + project.getName() + "/mcp_validate_query_" + System.currentTimeMillis() + ".qldcs", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                true);
-            
-            // Create the Xtext resource
-            resource = (XtextResource) resourceSet.createResource(resourceUri);
-            
-            // Configure QlDcsResource if applicable
-            if (resource instanceof QlDcsResource)
-            {
-                QlDcsResource qlResource = (QlDcsResource) resource;
-                // Match EDT's query editor: use the extension + base model union; regular projects are a no-op.
-                qlResource.setParentScopeAware(true);
-                qlResource.addOptions("DcsValidationModeOption", dcsMode); //$NON-NLS-1$
-                qlResource.setPreComputeAnnounceAlias(dcsMode);
-            }
-            
-            // Load the query text into the resource
-            try (InputStream inputStream = new ByteArrayInputStream(
-                queryText.getBytes(StandardCharsets.UTF_8)))
-            {
-                resource.load(inputStream, null);
-            }
-            
-            // Get the resource validator
-            IResourceValidator validator = resourceServiceProvider.get(IResourceValidator.class);
-            if (validator == null)
-            {
-                return ToolResult.error("Failed to get resource validator").toJson(); //$NON-NLS-1$
-            }
-            
-            // Collect syntax errors from resource diagnostics and semantic checks
-            List<QueryIssue> issues = collectIssues(resource, validator);
-
-            // Build the result
-            return buildResult(issues, dcsMode);
-        }
-        catch (IOException e)
-        {
-            Activator.logError("Error loading query text into resource", e); //$NON-NLS-1$
-            return ToolResult.error("Failed to load query text: " + e.getMessage()).toJson(); //$NON-NLS-1$
+            IFile file = BslModuleUtils.resolveModuleFile(project, modulePath);
+            if (file == null || !file.exists())
+                return ToolResult.error("Module '" + modulePath
+                    + "' not found. Use list_modules to choose a stored BSL modulePath.").toJson();
+            return validateModuleText(project, modulePath, BslModuleUtils.readFileText(file), method, dcsMode);
         }
         catch (Exception e)
         {
-            Activator.logError("Error validating query", e); //$NON-NLS-1$
-            return ToolResult.error("Validation error: " + e.getMessage()).toJson(); //$NON-NLS-1$
+            return ToolResult.error(moduleReadError(modulePath, e)).toJson();
         }
-        finally
+    }
+
+    /** The extractor's refusals already name the queryText fallback; name it once, not twice. */
+    static String moduleReadError(String modulePath, Exception e)
+    {
+        String message = "Could not read query literals from modulePath '" + modulePath + "': " + e.getMessage();
+        return e.getMessage() != null && e.getMessage().contains(QUERY_TEXT) ? message
+            : message + ". Check read_module_source or pass queryText directly.";
+    }
+
+    String validateModuleText(IProject project, String modulePath, String source, String method, boolean dcsMode)
+    {
+        List<Map<String, Object>> queries = new ArrayList<>();
+        List<Map<String, Object>> skipped = new ArrayList<>();
+        boolean available = true;
+        for (var literal : ModuleQueryExtractor.extract(source, method))
         {
-            // Clean up the resource
-            if (resource != null)
+            Map<String, Object> entry = literal.location();
+            if (literal.reason() != null)
             {
-                try
-                {
-                    ResourceSet resourceSet = resource.getResourceSet();
-                    resource.unload();
-                    if (resourceSet != null)
-                    {
-                        resourceSet.getResources().remove(resource);
-                    }
-                }
-                catch (Exception e)
-                {
-                    Activator.logError("Error cleaning up validation resource", e); //$NON-NLS-1$
-                }
+                entry.put("reason", literal.reason());
+                skipped.add(entry);
+                continue;
             }
+            var validation = validator.validate(project, literal.queryText(), dcsMode);
+            available &= validation.available();
+            Map<String, Object> values = new LinkedHashMap<>(validation.values());
+            @SuppressWarnings("unchecked")
+            var issues = (List<Map<String, Object>>)values.get("issues");
+            values.put("issues", issues.stream().map(literal::mapIssue).toList());
+            entry.putAll(values);
+            queries.add(entry);
         }
+        ToolResult result = available ? ToolResult.success()
+            : ToolResult.error("Native query validation was unavailable for some literals. "
+                + "Check each incompleteReason, wait for project loading and retry.");
+        result.put(McpKeys.MODULE_PATH, modulePath).put(DCS_MODE, dcsMode)
+            .put("queries", queries).put("skipped", skipped)
+            .put("foundCount", queries.size()).put("skippedCount", skipped.size());
+        if (queries.isEmpty())
+            result.put("message", skipped.isEmpty() ? "no query literal found. Pass queryText to validate a query directly."
+                : "No standalone query literal validated. Check skipped reasons or pass queryText directly.");
+        return result.toJson();
     }
     
-    /**
-     * Collects syntax diagnostics (resource errors/warnings) and semantic
-     * validation issues into a single list, preserving the original ordering
-     * (errors, then warnings, then semantic issues).
-     *
-     * @param resource the loaded Xtext resource carrying syntax diagnostics
-     * @param validator the resource validator used for semantic checks
-     * @return the collected query issues
-     */
-    private static List<QueryIssue> collectIssues(XtextResource resource, IResourceValidator validator)
-    {
-        List<QueryIssue> issues = new ArrayList<>();
-
-        for (Resource.Diagnostic error : resource.getErrors())
-        {
-            issues.add(new QueryIssue(
-                ERROR,
-                error.getMessage(),
-                error.getLine(),
-                error.getColumn(),
-                -1
-            ));
-        }
-
-        for (Resource.Diagnostic warning : resource.getWarnings())
-        {
-            issues.add(new QueryIssue(
-                WARNING,
-                warning.getMessage(),
-                warning.getLine(),
-                warning.getColumn(),
-                -1
-            ));
-        }
-
-        // Run full validation (semantic checks)
-        List<Issue> validationIssues = validator.validate(resource, CheckMode.ALL, CancelIndicator.NullImpl);
-
-        for (Issue issue : validationIssues)
-        {
-            issues.add(new QueryIssue(
-                severityName(issue.getSeverity()),
-                issue.getMessage(),
-                issue.getLineNumber() != null ? issue.getLineNumber() : -1,
-                issue.getColumn() != null ? issue.getColumn() : -1,
-                issue.getOffset() != null ? issue.getOffset() : -1
-            ));
-        }
-
-        return issues;
-    }
-
-    /** Maps an Xtext issue {@link Severity} to the wire string (unknown/blank -> WARNING). */
-    private static String severityName(org.eclipse.xtext.diagnostics.Severity severity)
-    {
-        switch (severity)
-        {
-            case ERROR:
-                return ERROR;
-            case INFO:
-                return "INFO"; //$NON-NLS-1$
-            case WARNING:
-            default:
-                return WARNING;
-        }
-    }
-
-    /**
-     * Builds the JSON result from validation issues, via the shared
-     * {@link ToolResult} builder (consistent with the tool's error paths and
-     * the rest of the server).
-     *
-     * @param issues list of validation issues
-     * @param dcsMode whether DCS mode was used
-     * @return JSON result string
-     */
-    static String buildResult(List<QueryIssue> issues, boolean dcsMode)
-    {
-        List<Map<String, Object>> issueList = new ArrayList<>();
-        for (QueryIssue issue : issues)
-        {
-            // LinkedHashMap to keep a stable, readable field order per issue.
-            Map<String, Object> issueObj = new LinkedHashMap<>();
-            issueObj.put("severity", issue.severity); //$NON-NLS-1$
-            issueObj.put("message", issue.message); //$NON-NLS-1$
-            if (issue.line > 0)
-            {
-                issueObj.put("line", issue.line); //$NON-NLS-1$
-            }
-            if (issue.column > 0)
-            {
-                issueObj.put("column", issue.column); //$NON-NLS-1$
-            }
-            if (issue.offset >= 0)
-            {
-                issueObj.put("offset", issue.offset); //$NON-NLS-1$
-            }
-            issueList.add(issueObj);
-        }
-
-        return ToolResult.success()
-            .put("valid", issues.isEmpty()) //$NON-NLS-1$
-            .put(DCS_MODE, dcsMode)
-            .put("errorCount", //$NON-NLS-1$
-                issues.stream().filter(i -> ERROR.equals(i.severity)).count())
-            .put("warningCount", //$NON-NLS-1$
-                issues.stream().filter(i -> WARNING.equals(i.severity)).count())
-            .put("infoCount", //$NON-NLS-1$
-                issues.stream().filter(i -> "INFO".equals(i.severity)).count()) //$NON-NLS-1$
-            .put("issues", issueList) //$NON-NLS-1$
-            .toJson();
-    }
-    
-    /**
-     * Internal representation of a validation issue.
-     */
-    static class QueryIssue
-    {
-        final String severity;
-        final String message;
-        final int line;
-        final int column;
-        final int offset;
-        
-        QueryIssue(String severity, String message, int line, int column, int offset)
-        {
-            this.severity = severity;
-            this.message = message;
-            this.line = line;
-            this.column = column;
-            this.offset = offset;
-        }
-    }
 }

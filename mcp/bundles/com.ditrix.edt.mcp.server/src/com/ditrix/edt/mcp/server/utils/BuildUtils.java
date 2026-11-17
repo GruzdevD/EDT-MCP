@@ -1,4 +1,4 @@
-﻿/**
+/**
  * MCP Server for EDT
  * Copyright (C) 2025 DitriX (https://github.com/DitriXNew)
  * Licensed under AGPL-3.0-or-later
@@ -6,13 +6,24 @@
 
 package com.ditrix.edt.mcp.server.utils;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.core.runtime.jobs.IJobManager;
 import org.eclipse.core.runtime.jobs.Job;
 
@@ -57,6 +68,44 @@ public final class BuildUtils
      */
     private static final ConcurrentMap<String, ExportWaitSlot> EXPORT_WAIT_RETURNED = new ConcurrentHashMap<>();
 
+    /** Slot-key prefix of the per-object validation wait, kept apart from the export slot. */
+    private static final String VALIDATION_SLOT_PREFIX = "validation:"; //$NON-NLS-1$
+
+    /** Slot-key prefix of the bounded marker read of a write, apart from both waits. */
+    private static final String MARKER_READ_SLOT_PREFIX = "markers:"; //$NON-NLS-1$
+
+    /**
+     * Slot-key prefix of a bounded read of a project's files - a module's state line read back from a {@code .mdo},
+     * and each read of the new-extension root look, of the root file and of each file beside it - apart from both
+     * waits and the marker read.
+     */
+    private static final String STATE_LINE_READ_SLOT_PREFIX = "mdo-state-line:"; //$NON-NLS-1$
+
+    /**
+     * The clock every slot's hold is measured on: {@link System#nanoTime()}, monotonic - never the wall clock. A claim
+     * lapses once its hold has ELAPSED, and the wall clock does not measure elapsed time: NTP corrects it, an operator
+     * sets it, a virtual machine resumed from a snapshot reads earlier than before. A step forward would lapse a claim
+     * while its platform call is still out, so a second job nobody can stop could be scheduled behind it; a step back
+     * would hold a claim longer than the three times its timeout it is stated to hold. One clock for every slot,
+     * because every slot is the one limiter ({@link #beginWait}). Only a test replaces it ({@link #useSlotClock}).
+     */
+    private static final AtomicReference<LongSupplier> slotClock = new AtomicReference<>(System::nanoTime);
+
+    /** Nanoseconds in a millisecond, for the slots' clock. */
+    private static final long NANOS_PER_MILLI = TimeUnit.MILLISECONDS.toNanos(1L);
+
+    /**
+     * The derived-data segments EDT's validation runs under: the check framework's model checks
+     * (critical-data-integrity, normal, complex) and the validator segments. Mirrored, not imported,
+     * for the same reason as {@link #EXPORT_OBJECTS_SEGMENT}: the declaring classes are internal.
+     * The BSL language checks are left out - their markers are keyed by module URI, not by a BM top
+     * object. A segment that does not apply to an object is never pending for it, so one list serves
+     * every object kind. Only the ids a project's pipeline registers are ever sent (see
+     * {@link #registeredSegments}).
+     */
+    static final List<String> VALIDATION_SEGMENTS = List.of("CDI_CHECKS_SEGMENT", //$NON-NLS-1$
+        "M_CHECKS_SEGMENT", "CM_CHECKS_SEGMENT", "XDTO_VAL", "STYLE_VAL", "CMI_VAL", "AGGR_VAL"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+
 
     private BuildUtils()
     {
@@ -85,12 +134,197 @@ public final class BuildUtils
     }
     
     /**
+     * The job families of the Eclipse workspace build, in the order {@link #awaitWorkspaceBuild}
+     * joins them. The build is what runs EDT's Xtext builder ({@code xtextBuilder} in every EDT
+     * project's {@code .project}), and that builder is the only writer of the BSL index the
+     * reference finder of a rename reads.
+     */
+    static final List<Object> WORKSPACE_BUILD_FAMILIES =
+        List.of(ResourcesPlugin.FAMILY_AUTO_BUILD, ResourcesPlugin.FAMILY_MANUAL_BUILD);
+
+    /** How a {@link #awaitWorkspaceBuild} ended. Only {@link #DRAINED} lets a rename read the index. */
+    public enum BuildWait
+    {
+        /** No workspace build was sleeping, waiting or running at the end of a full pass. */
+        DRAINED,
+        /** A build was still pending when the deadline passed. */
+        TIMED_OUT,
+        /** The waiting thread was interrupted (its interrupt flag is kept). */
+        INTERRUPTED,
+        /**
+         * A build is pending while the job manager is suspended: it cannot start, and
+         * {@code IJobManager.join} would then wait only for jobs already RUNNING.
+         */
+        SUSPENDED,
+        /**
+         * A build this wait joined ended canceled or with an error, so the index it should have
+         * written may be stale.
+         */
+        FAILED
+    }
+
+    /**
+     * BOUNDED wait for the workspace build: {@link BuildWait#DRAINED} once a full pass over the
+     * build families finds no build job sleeping, waiting or running, otherwise the reason it could
+     * not be established.
+     * <p>
+     * Why a cascade needs it (#935): writing a {@code .bsl} file only SCHEDULES the auto-build -
+     * {@code AutoBuildJob.build} puts the job to sleep for 100-1000 ms before it runs - and only
+     * that build updates the Xtext index of BSL modules. A rename collects the module references it
+     * rewrites through EDT's {@code BslBmReferenceFinder}, which looks a module up in that index
+     * first: a reference written before the build ran is invisible to it, and the rename then
+     * leaves it pointing at the old name. The derived-data pipeline does not cover this window -
+     * it is idle until the build has run.
+     * <p>
+     * Unlike {@link #waitForBuildJobs}, this never blocks past its deadline:
+     * {@code IJobManager.join} polls its monitor about every 100 ms, and the monitor here reports
+     * cancellation once the deadline has passed. Joining a family includes its SLEEPING jobs, so a
+     * build that is scheduled but not yet started is waited for too - except while the job manager
+     * is suspended, when {@code join} waits only for RUNNING jobs; a pending build is then reported
+     * as {@link BuildWait#SUSPENDED} instead. The families are passed over again until one whole pass
+     * finds them all empty, so a build scheduled in one family while another was being joined is
+     * not missed. A joined build that ended canceled ({@code AutoBuildJob.canceled()} - unless
+     * interrupted, which reschedules it and is waited for) or with an error status is
+     * {@link BuildWait#FAILED}: its index may be stale.
+     * <p>
+     * What this cannot see: changes no build was scheduled for (automatic building off, see
+     * {@link #isAutoBuilding()}), and a build that ended canceled or failed BEFORE this wait began.
+     *
+     * @param timeoutMs how long to wait at most
+     * @return the outcome; only {@link BuildWait#DRAINED} means no workspace build is pending
+     */
+    public static BuildWait awaitWorkspaceBuild(long timeoutMs)
+    {
+        return awaitJobFamilies(Job.getJobManager(), WORKSPACE_BUILD_FAMILIES, timeoutMs);
+    }
+
+    /**
+     * Whether Eclipse's "Build Automatically" is on. When it is off, writing a module schedules no
+     * build at all, so a rename reads the index of the user's last build.
+     *
+     * @return {@code true} when the workspace builds automatically, or when that cannot be read
+     */
+    public static boolean isAutoBuilding()
+    {
+        try
+        {
+            return ResourcesPlugin.getWorkspace().isAutoBuilding();
+        }
+        catch (RuntimeException e) // NOSONAR no workspace: nothing to warn about
+        {
+            return true;
+        }
+    }
+
+    /**
+     * {@link #awaitWorkspaceBuild} over any job manager and families; package-visible so a test can
+     * drive it with its own job family, or a stand-in job manager, instead of the live build.
+     *
+     * @param manager the job manager to join on
+     * @param families the families to wait for, passed over under ONE deadline
+     * @param timeoutMs how long to wait at most for all of them together
+     * @return the outcome
+     */
+    static BuildWait awaitJobFamilies(IJobManager manager, List<Object> families, long timeoutMs)
+    {
+        if (Thread.currentThread().isInterrupted())
+        {
+            return BuildWait.INTERRUPTED;
+        }
+        long start = System.nanoTime();
+        long deadline = start + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, timeoutMs));
+        boolean waited = false;
+        boolean pendingInPass = true;
+        while (pendingInPass)
+        {
+            pendingInPass = false;
+            for (Object family : families)
+            {
+                Job[] pending = manager.find(family);
+                if (pending.length == 0)
+                {
+                    continue;
+                }
+                pendingInPass = true;
+                waited = true;
+                if (manager.isSuspended())
+                {
+                    return BuildWait.SUSPENDED;
+                }
+                try
+                {
+                    manager.join(family, new DeadlineMonitor(deadline));
+                }
+                catch (OperationCanceledException e)
+                {
+                    Activator.logInfo("The workspace build did not finish within " + timeoutMs + " ms"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return BuildWait.TIMED_OUT;
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    return BuildWait.INTERRUPTED;
+                }
+                if (endedUnsuccessfully(pending))
+                {
+                    return BuildWait.FAILED;
+                }
+            }
+            if (pendingInPass && System.nanoTime() - deadline >= 0)
+            {
+                return BuildWait.TIMED_OUT;
+            }
+        }
+        if (waited)
+        {
+            Activator.logInfo("Waited " + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) //$NON-NLS-1$
+                + " ms for the workspace build"); //$NON-NLS-1$
+        }
+        return BuildWait.DRAINED;
+    }
+
+    /**
+     * Whether one of the joined jobs ended canceled or with an error. A job that is pending again
+     * is not judged here: the next pass waits for its new run.
+     */
+    private static boolean endedUnsuccessfully(Job[] joined)
+    {
+        for (Job job : joined)
+        {
+            IStatus result = job.getResult();
+            if (job.getState() == Job.NONE && result != null
+                && (result.getSeverity() == IStatus.CANCEL || result.matches(IStatus.ERROR)))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A monitor that reports cancellation once its deadline (a {@link System#nanoTime} value) passed. */
+    private static final class DeadlineMonitor extends NullProgressMonitor
+    {
+        private final long deadline;
+
+        DeadlineMonitor(long deadline)
+        {
+            this.deadline = deadline;
+        }
+
+        @Override
+        public boolean isCanceled()
+        {
+            return super.isCanceled() || System.nanoTime() - deadline >= 0;
+        }
+    }
+
+    /**
      * Waits for build jobs and derived data computations to complete.
-     * 
+     *
      * <p>Note: This method does NOT wait for lifecycle events. If you need to wait for
      * project restart during clean build, use {@link LifecycleWaiter#prepareForRestart(IDtProject)}
      * BEFORE triggering the build, then call {@link LifecycleWaiter.ProjectRestartWaiter#await(long)}.
-     * 
+     *
      * @param project the IProject to wait for
      * @param monitor progress monitor
      */
@@ -142,12 +376,33 @@ public final class BuildUtils
      */
     public static void waitForDerivedData(IProject project, long timeoutMs)
     {
+        awaitDerivedData(project, timeoutMs);
+    }
+
+    /** @return whether all queued derived data completed within the default timeout */
+    public static boolean awaitDerivedData(IProject project)
+    {
+        return awaitDerivedData(project, DEFAULT_DD_TIMEOUT_MS);
+    }
+
+    /**
+     * Drains the contexts already queued by EDT's resource/model listeners without scheduling
+     * new objects. A failed or interrupted drain must not authorise an infobase update.
+     *
+     * @return {@code true} only when the project's derived data completed
+     */
+    public static boolean awaitDerivedData(IProject project, long timeoutMs)
+    {
+        if (Thread.currentThread().isInterrupted())
+        {
+            return false;
+        }
         try
         {
             IDerivedDataManager ddManager = resolveDerivedDataManager(project);
             if (ddManager == null)
             {
-                return;
+                return false;
             }
 
             // Wait for ALL derived data. Callers of this method depend on that: the cascade
@@ -166,10 +421,17 @@ public final class BuildUtils
             {
                 Activator.logInfo("Derived data wait timed out for: " + project.getName()); //$NON-NLS-1$
             }
+            return completed;
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            return false;
         }
         catch (Exception e)
         {
             Activator.logError("Error waiting for derived data", e); //$NON-NLS-1$
+            return false;
         }
     }
 
@@ -263,8 +525,7 @@ public final class BuildUtils
                 monitor -> {
                     try
                     {
-                        drained[0] = ddManager.waitComputation(timeoutMs, true,
-                            EXPORT_OBJECTS_SEGMENT, EXPORT_BLOBS_SEGMENT);
+                        drained[0] = waitExportComputations(ddManager, timeoutMs);
                     }
                     finally
                     {
@@ -317,6 +578,280 @@ public final class BuildUtils
         return DiskExportState.PENDING;
     }
 
+    static boolean waitExportComputations(IDerivedDataManager manager, long timeoutMs) throws InterruptedException
+    {
+        // Object/blob exporters enqueue EXP_CL to remove their deleted files' empty directories.
+        // Await it after its producers, within the same budget, before claiming disk completion.
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        if (!manager.waitComputation(timeoutMs, true, EXPORT_OBJECTS_SEGMENT, EXPORT_BLOBS_SEGMENT)) return false;
+        long remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+        return remaining > 0 && manager.waitComputation(remaining, true, "EXP_CL"); //$NON-NLS-1$
+    }
+
+    /** How a bounded {@link #waitForObjectValidation} ended. */
+    public enum ValidationState
+    {
+        /** EDT confirmed the validation segments computed for every named object. */
+        COMPLETE,
+        /** Not confirmed within the deadline, or a previous wait for the project is still out. */
+        PENDING,
+        /**
+         * Could not be asked or answered: no derived-data service, not a DT project, no registered
+         * validation segment, a failed (broken) record, or the job never ran.
+         */
+        UNOBSERVABLE
+    }
+
+    /**
+     * The derived-data calls one validation wait makes; a seam so the segment guard is testable
+     * without a live pipeline.
+     */
+    interface ValidationPipeline
+    {
+        /**
+         * @param segmentId a segment id
+         * @return whether this project's pipeline registers it; {@code false} when unprovable
+         */
+        boolean registers(String segmentId);
+
+        /**
+         * {@code IDerivedDataManager.waitComputation(Map, long)}.
+         *
+         * @param scope per top-object id, registered segment ids only
+         * @param timeoutMs the platform timeout, positive
+         * @return the platform's answer
+         * @throws InterruptedException when the waiting thread is interrupted
+         */
+        boolean waitComputation(Map<Long, Collection<String>> scope, long timeoutMs) throws InterruptedException;
+
+        /**
+         * {@code IDerivedDataManager.isComputed(long, Collection)}: none of the segments is still
+         * pending on the object's record.
+         *
+         * @param topObjectId the BM top-object id
+         * @param segmentIds registered segment ids, not empty
+         * @return whether the object's record has none of them pending
+         */
+        boolean isComputed(long topObjectId, Collection<String> segmentIds);
+    }
+
+    /**
+     * Waits until EDT has validated the given top objects - per object, not project-wide.
+     * <p>
+     * {@code IDerivedDataManager.waitComputation(Map, long)} first drains the accumulated change
+     * contexts, then waits until none of the registered {@link #VALIDATION_SEGMENTS} is pending for
+     * the named objects, raising their pipeline priority meanwhile. Its timeout is advisory (it
+     * retries once), so it runs inside a {@link BoundedJob}, with at most one outstanding validation
+     * wait per project, exactly like {@link #waitForDiskExport}. Must not be called inside a BM
+     * transaction.
+     *
+     * @param project the workspace project owning the objects
+     * @param topObjectIds BM ids of the top objects to wait for; empty yields UNOBSERVABLE
+     * @param timeoutMs the hard deadline in milliseconds
+     * @return how the wait ended; never {@code null}
+     */
+    public static ValidationState waitForObjectValidation(IProject project, Collection<Long> topObjectIds,
+        long timeoutMs)
+    {
+        if (topObjectIds == null || topObjectIds.isEmpty())
+        {
+            // The platform rejects an empty scope; there is nothing to observe.
+            return ValidationState.UNOBSERVABLE;
+        }
+        IDerivedDataManager ddManager;
+        try
+        {
+            ddManager = resolveDerivedDataManager(project);
+        }
+        catch (RuntimeException e)
+        {
+            Activator.logWarning("Could not resolve the derived data manager for validation: " + e); //$NON-NLS-1$
+            return ValidationState.UNOBSERVABLE;
+        }
+        if (ddManager == null)
+        {
+            return ValidationState.UNOBSERVABLE;
+        }
+        return waitForObjectValidation(pipelineOf(ddManager), project.getName(), topObjectIds, timeoutMs);
+    }
+
+    /**
+     * The bounded wait over a {@link ValidationPipeline}: slot, job, outcome mapping.
+     *
+     * @param pipeline the project's derived-data calls
+     * @param key the project name, the slot key
+     * @param topObjectIds BM ids of the top objects, not empty
+     * @param timeoutMs the hard deadline in milliseconds
+     * @return how the wait ended; never {@code null}
+     */
+    static ValidationState waitForObjectValidation(ValidationPipeline pipeline, String key,
+        Collection<Long> topObjectIds, long timeoutMs)
+    {
+        long platformTimeoutMs = platformTimeoutMs(timeoutMs);
+        AtomicBoolean returned = beginValidationWait(key, platformTimeoutMs);
+        if (returned == null)
+        {
+            Activator.logInfo("A previous validation wait for " + key //$NON-NLS-1$
+                + " has not returned yet; not starting another one"); //$NON-NLS-1$
+            return ValidationState.PENDING;
+        }
+
+        ValidationState[] state = { ValidationState.PENDING };
+        BoundedJob.Result result = BoundedJob.run("Waiting for the validation of written objects in " + key, //$NON-NLS-1$
+            platformTimeoutMs, monitor -> {
+                try
+                {
+                    state[0] = validate(pipeline, topObjectIds, platformTimeoutMs);
+                }
+                finally
+                {
+                    returned.set(true);
+                }
+            });
+        if (result.getOutcome() == BoundedJob.Outcome.TIMED_OUT_BEFORE_START)
+        {
+            // Never ran and never will: nothing outstanding, reopen at once (see waitForDiskExport).
+            returned.set(true);
+        }
+        if (result.getOutcome() == BoundedJob.Outcome.COMPLETED && result.getFailure() == null)
+        {
+            if (state[0] == ValidationState.UNOBSERVABLE)
+            {
+                Activator.logInfo("Validation of the written objects in " + key //$NON-NLS-1$
+                    + " is not observable: no registered validation segment, or a failed record"); //$NON-NLS-1$
+            }
+            return state[0];
+        }
+        if (result.getFailure() != null || result.getOutcome() == BoundedJob.Outcome.NOT_RUN)
+        {
+            // The pipeline was never successfully asked: unobserved, not pending. Not an ERROR -
+            // it degrades a write's marker report, it does not fail the write.
+            Activator.logWarning("Validation wait for " + key + " was not observable (" //$NON-NLS-1$ //$NON-NLS-2$
+                + result.getOutcome() + ", " + result.getFailure() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+            return ValidationState.UNOBSERVABLE;
+        }
+        return ValidationState.PENDING;
+    }
+
+    /**
+     * One wait, run inside the bounded job: registered segments only, then the platform wait, then
+     * the record re-check.
+     * <p>
+     * An unregistered id must never reach the platform: on EDT 2026.2.1
+     * {@code AsyncProcessingPipeline.increasePriority(Map)} queues it in the priority task queue
+     * even without a segment group, and {@code PriorityTaskQueue.hasAllowedPriorityTasks} then
+     * dereferences its missing dependency set on every scheduling pass.
+     * <p>
+     * {@code waitComputation} counts a BROKEN record (a validator failed three times) as done
+     * while the failed segment stays unconfirmed on it, so a {@code true} is re-checked per object
+     * with {@code isComputed(long, Collection)}, which ignores the broken flag.
+     *
+     * @param pipeline the project's derived-data calls
+     * @param topObjectIds BM ids of the top objects, not empty
+     * @param platformTimeoutMs the platform timeout, positive
+     * @return how the wait ended
+     * @throws InterruptedException when the job thread is interrupted
+     */
+    static ValidationState validate(ValidationPipeline pipeline, Collection<Long> topObjectIds,
+        long platformTimeoutMs) throws InterruptedException
+    {
+        List<String> segments = registeredSegments(pipeline);
+        if (segments.isEmpty())
+        {
+            return ValidationState.UNOBSERVABLE;
+        }
+        Map<Long, Collection<String>> scope = new LinkedHashMap<>();
+        for (Long id : topObjectIds)
+        {
+            scope.put(id, segments);
+        }
+        if (!pipeline.waitComputation(scope, platformTimeoutMs))
+        {
+            return ValidationState.PENDING;
+        }
+        for (Long id : topObjectIds)
+        {
+            if (!pipeline.isComputed(id.longValue(), segments))
+            {
+                return ValidationState.UNOBSERVABLE;
+            }
+        }
+        return ValidationState.COMPLETE;
+    }
+
+    /**
+     * The {@link #VALIDATION_SEGMENTS} this project's pipeline registers.
+     *
+     * @param pipeline the project's derived-data calls
+     * @return the registered ids, in list order; empty when none is provably registered
+     */
+    static List<String> registeredSegments(ValidationPipeline pipeline)
+    {
+        List<String> registered = new ArrayList<>();
+        for (String segmentId : VALIDATION_SEGMENTS)
+        {
+            if (pipeline.registers(segmentId))
+            {
+                registered.add(segmentId);
+            }
+        }
+        return registered;
+    }
+
+    /**
+     * The production {@link ValidationPipeline}.
+     * <p>
+     * EDT has no API that lists a pipeline's segments. {@code IDerivedDataManager.isComputed(String...)}
+     * reaches {@code AsyncProcessingPipeline.isSegmentComputed}, which asserts "Unsupported segment
+     * is specified" on the same map whose entries are added together with the segment group and
+     * the dependency set; so a probe that returns proves the id is registered, and a throw of any
+     * kind counts as unregistered.
+     */
+    private static ValidationPipeline pipelineOf(IDerivedDataManager ddManager)
+    {
+        return new ValidationPipeline()
+        {
+            @Override
+            public boolean registers(String segmentId)
+            {
+                try
+                {
+                    ddManager.isComputed(new String[] { segmentId });
+                    return true;
+                }
+                catch (RuntimeException e)
+                {
+                    return false;
+                }
+            }
+
+            @Override
+            public boolean waitComputation(Map<Long, Collection<String>> scope, long timeoutMs)
+                throws InterruptedException
+            {
+                return ddManager.waitComputation(scope, timeoutMs);
+            }
+
+            @Override
+            public boolean isComputed(long topObjectId, Collection<String> segmentIds)
+            {
+                return ddManager.isComputed(topObjectId, segmentIds);
+            }
+        };
+    }
+
+    /**
+     * The timeout handed to the platform: always positive, because EDT 2026.1.1 asserts
+     * {@code timeout > 0} in {@code waitComputationExt}.
+     *
+     * @param timeoutMs the requested deadline
+     * @return a deadline of at least one millisecond
+     */
+    static long platformTimeoutMs(long timeoutMs)
+    {
+        return Math.max(1L, timeoutMs);
+    }
+
     /**
      * Claims the single export-wait slot for a project.
      * <p>
@@ -331,24 +866,116 @@ public final class BuildUtils
      */
     static AtomicBoolean beginExportWait(String projectName, long timeoutMs)
     {
+        return beginWait(projectName, timeoutMs);
+    }
+
+    /**
+     * Claims the single validation-wait slot for a project. A separate key from the export slot, so
+     * the two waits of one write never block each other.
+     *
+     * @param projectName the project whose slot to claim
+     * @param timeoutMs the wait's deadline, which also sizes how long an unreturned claim holds
+     * @return the flag the wait must set when it returns, or {@code null} when a previous
+     *     validation wait for this project has not come back yet
+     */
+    static AtomicBoolean beginValidationWait(String projectName, long timeoutMs)
+    {
+        return beginWait(VALIDATION_SLOT_PREFIX + projectName, timeoutMs);
+    }
+
+    /**
+     * Claims the single bounded-marker-read slot for a project, so reads stuck behind a model
+     * service operation do not pile up one job per write.
+     *
+     * @param projectName the project whose slot to claim
+     * @param timeoutMs the read's deadline, which also sizes how long an unreturned claim holds
+     * @return the flag the read must set when it returns, or {@code null} when a previous read for
+     *     this project has not come back yet
+     */
+    static AtomicBoolean beginMarkerRead(String projectName, long timeoutMs)
+    {
+        return beginWait(MARKER_READ_SLOT_PREFIX + projectName, timeoutMs);
+    }
+
+    /**
+     * Claims the single slot for a bounded read of a project's files - a module's state line read back from a
+     * {@code .mdo} (AdoptedModuleState), and each read of ExtensionRootBuilder's look at a new extension's root file and
+     * at each file beside it, which share it: both read files under the project's location, and a file system that does
+     * not answer one of them answers neither - so reads stuck in it do not pile up one job per write: a read its
+     * deadline cut off keeps its job until the file system answers. A key of its own, so it never refuses - and is
+     * never refused by - the export wait, the validation wait or the marker read.
+     *
+     * @param projectName the project whose slot to claim
+     * @param timeoutMs sizes how long an unreturned claim holds: three times it
+     * @return the flag to set when the read's job ends - the read returned, or the job ended without running it - or
+     *     {@code null} when the job of a previous read for this project has not ended and its claim has not lapsed
+     */
+    static AtomicBoolean beginStateLineRead(String projectName, long timeoutMs)
+    {
+        return beginWait(STATE_LINE_READ_SLOT_PREFIX + projectName, timeoutMs);
+    }
+
+    /**
+     * How much longer a project's claim for a state-line read holds while its job has not ended - so a test can pin
+     * the size of the claim, which its caller chooses ({@link #beginStateLineRead}'s timeout), without waiting it out.
+     * Counted on {@link #slotClock}, the clock the claim lapses on.
+     *
+     * @param projectName the project
+     * @return the milliseconds until the claim lapses, rounded up - a claim with less than a millisecond left still
+     *     holds - or 0 when the project holds no such claim: none taken, its job ended, or the claim lapsed
+     */
+    static long stateLineReadHoldLeftMs(String projectName)
+    {
+        ExportWaitSlot slot = EXPORT_WAIT_RETURNED.get(STATE_LINE_READ_SLOT_PREFIX + projectName);
+        if (slot == null || slot.returned.get())
+        {
+            return 0L;
+        }
+        long leftNanos = slot.reopenAtNanos - slotClock.get().getAsLong();
+        return leftNanos <= 0L ? 0L : (leftNanos - 1L) / NANOS_PER_MILLI + 1L;
+    }
+
+    /**
+     * The one limiter behind every slot - the export wait, the validation wait, the marker read and the state-line
+     * read, each on a key of its own. A key is refused while its last claim holds: its flag is not set, and its hold -
+     * three times the holder's timeout ({@link #slotHoldMs}) - has not elapsed on {@link #slotClock} since the claim
+     * was taken. That is elapsed time on a monotonic clock, so a claim holds exactly that long whatever the system
+     * clock does; two readings are compared by their difference, as a monotonic reading's origin is arbitrary and the
+     * reading may wrap.
+     * <p>
+     * When the flag is set is for the holder to decide. The export wait, the validation wait and the marker read set
+     * it from their job's body when the platform call returns, and at once when their own cancel kept the job from
+     * starting - so a job that something else cancelled before it ran holds their claim until it lapses. The
+     * state-line read also sets it from the job's terminal notification - BoundedJob's completion callback, the job's
+     * {@code done} event, which EDT sends as well when it ends a job that never ran (AdoptedModuleState.readBounded);
+     * the same hook could serve the other three.
+     *
+     * @param slotKey the slot's key: its prefix, then the project's name
+     * @param timeoutMs the holder's timeout, which sizes the hold
+     * @return the new claim's flag, or {@code null} when the key's last claim still holds
+     */
+    private static AtomicBoolean beginWait(String slotKey, long timeoutMs)
+    {
         AtomicBoolean[] granted = new AtomicBoolean[1];
-        long reopenAtMs = System.currentTimeMillis() + slotHoldMs(timeoutMs);
+        long holdNanos = TimeUnit.MILLISECONDS.toNanos(slotHoldMs(timeoutMs));
         // compute(), not get()+put(): the map holds the bin lock across the whole decision, so two
         // writes finishing together cannot both see a free slot and both schedule a Job. A
         // check-then-act here would have made the limit hold only when it was not needed.
-        EXPORT_WAIT_RETURNED.compute(projectName, (name, prior) -> {
-            if (prior != null && !prior.returned.get() && System.currentTimeMillis() < prior.reopenAtMs)
+        EXPORT_WAIT_RETURNED.compute(slotKey, (name, prior) -> {
+            long now = slotClock.get().getAsLong();
+            if (prior != null && !prior.returned.get() && now - prior.reopenAtNanos < 0)
             {
                 return prior;
             }
             granted[0] = new AtomicBoolean();
-            return new ExportWaitSlot(granted[0], reopenAtMs);
+            return new ExportWaitSlot(granted[0], now + holdNanos);
         });
         return granted[0];
     }
 
     /**
-     * How long a slot stays claimed by a wait that never came back.
+     * How long a slot stays claimed by a wait that never came back - elapsed on {@link #slotClock}, counted from the
+     * moment the claim is taken.
      * <p>
      * A stuck waiter must not shut a project out for the rest of the session, so the claim expires
      * even when nothing ever sets the flag. The platform wait can legitimately outlive its own
@@ -364,16 +991,16 @@ public final class BuildUtils
         return 3 * Math.max(1L, timeoutMs);
     }
 
-    /** A project's export-wait claim: the flag its job sets, and when the claim lapses anyway. */
+    /** A project's claim: the flag its holder sets, and when, on {@link #slotClock}, the claim lapses anyway. */
     private static final class ExportWaitSlot
     {
         private final AtomicBoolean returned;
-        private final long reopenAtMs;
+        private final long reopenAtNanos;
 
-        ExportWaitSlot(AtomicBoolean returned, long reopenAtMs)
+        ExportWaitSlot(AtomicBoolean returned, long reopenAtNanos)
         {
             this.returned = returned;
-            this.reopenAtMs = reopenAtMs;
+            this.reopenAtNanos = reopenAtNanos;
         }
     }
 
@@ -384,13 +1011,31 @@ public final class BuildUtils
     }
 
     /**
+     * Puts every slot on {@code clock} and answers the clock they were on - for a test, which steps time instead of
+     * sleeping, and puts the original back afterwards.
+     *
+     * @param clock a monotonic reading in nanoseconds
+     * @return the clock the slots were on
+     */
+    static LongSupplier useSlotClock(LongSupplier clock)
+    {
+        LongSupplier previous = slotClock.get();
+        slotClock.set(clock);
+        return previous;
+    }
+
+    /**
      * Resolves the project's derived-data manager, logging which link of the chain was missing.
      *
      * @param project the workspace project
      * @return the manager, or {@code null} when the project or a service is unavailable
      */
-    private static IDerivedDataManager resolveDerivedDataManager(IProject project)
+    static IDerivedDataManager resolveDerivedDataManager(IProject project)
     {
+        if (project == null || Activator.getDefault() == null)
+        {
+            return null;
+        }
         IDerivedDataManagerProvider ddProvider = Activator.getDefault().getDerivedDataManagerProvider();
         if (ddProvider == null)
         {

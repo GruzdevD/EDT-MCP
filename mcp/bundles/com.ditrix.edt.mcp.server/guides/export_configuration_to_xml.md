@@ -5,11 +5,17 @@ Exports an EDT configuration project to a directory of XML source files - the ED
 - Producing a portable snapshot of the project's metadata as files.
 
 ## Parameter details
-- `projectName` (required) - the EDT configuration project to export.
+- `projectName` (required) - the EDT configuration project to export. An unknown project is refused up front (`Project not found`), before anything is created at `outputPath`; a closed project is opened by the export itself.
 - `outputPath` (required) - filesystem directory for the XML files. Relative paths are resolved to absolute; the directory is created if missing. If the path exists but is a file, the call errors.
 
 ## What you get
 Markdown with a YAML front-matter summary (tool, status, project, `outputPath`) confirming the export. If the destination is outside the EDT workspace, a note/`outsideWorkspace` flag is added (a warning, not a failure).
+
+Success requires a regular `Configuration.xml` created or proven rewritten by this call.
+For an existing root, a strictly newer mtime or changed size/SHA-256 proves the rewrite.
+An unchanged stale root, missing file, or unprovable rewrite returns an error even if EDT
+returned normally. Check the EDT Error Log, project readiness and permissions; retry into
+a fresh `outputPath` when timestamps are too coarse to establish a rewrite.
 
 ## Notes & gotchas
 - This **writes to the filesystem at the path you give** - it can write outside the workspace. The server is trusted-caller-only (loopback + optional token); double-check `outputPath`.

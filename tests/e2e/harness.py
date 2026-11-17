@@ -23,6 +23,57 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import uuid
+
+def cleanup_cluster_registration_probe(name, server, reference, registration_id=None):
+    """Remove only an exact synthetic probe from the launcher file, even if EDT cannot see it.
+
+    Normal cleanup uses the application ID first. The fallback uses delete_infobase's
+    explicit registration UUID path, never rewrites the launcher file itself, and
+    returns the number of leftovers so the test fails on leaked registrations.
+    """
+    if not re.fullmatch(r"McpServerRegistration_McpRegistrationProbe_[0-9a-f]{16}", name):
+        raise ValueError("launcher cleanup requires a uniquely named cluster registration probe")
+    if name != "McpServerRegistration_" + reference or server != "localhost:1541":
+        raise ValueError("launcher cleanup target does not match the synthetic probe")
+    path = os.environ.get("EDT_MCP_INFOBASE_LIST")
+    if not path:
+        path = (os.path.join(os.environ["APPDATA"], "1C", "1CEStart", "ibases.v8i")
+                if os.name == "nt" else
+                os.path.expanduser("~/.1C/1cestart/ibases.v8i"))
+    if not os.path.isfile(path):
+        return 0
+    with open(path, "rb") as stream:
+        original = stream.read()
+    starts = list(re.finditer(rb"(?m)^(?:\xef\xbb\xbf)?\[([^\r\n]+)\]\r?$", original))
+    removals = []
+    for index, match in enumerate(starts):
+        # Some launcher files place a UTF-8 BOM before the first section header.
+        if match.group(1).decode("utf-8") != name:
+            continue
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(original)
+        section = original[match.start():end]
+        connect = re.search(rb"(?m)^Connect=(.*)\r?$", section)
+        if not connect or connect.group(1).rstrip(b"\r").decode("utf-8") != (
+                'Srvr="%s";Ref="%s";' % (server, reference)):
+            raise AssertionError("refusing to remove a probe whose launcher address differs")
+        identifier = re.search(rb"(?m)^ID=([^\r\n]+)", section)
+        if registration_id is None or identifier is None or (
+                identifier.group(1).decode("ascii").lower() != str(uuid.UUID(registration_id))):
+            raise AssertionError("refusing launcher cleanup without the exact returned registrationId")
+        removals.append((match.start(), end))
+    if not removals:
+        return 0
+    if len(removals) != 1:
+        raise AssertionError("ambiguous probe name in launcher list; inspect it in EDT")
+    result = call("delete_infobase", {"projectName": PROJECT, "infobaseName": name,
+                  "registrationId": registration_id,
+                  "deleteRegistration": True, "deleteDatabaseFiles": False, "confirm": True})
+    assert_ok(result, "cleanup a cluster probe independently of application visibility")
+    with open(path, "rb") as stream:
+        remaining = stream.read()
+    assert ("[" + name + "]").encode("utf-8") not in remaining, "probe is still in the launcher file"
+    return len(removals)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration (read once at import; the orchestrator sets env BEFORE importing)
@@ -61,6 +112,16 @@ TESTS_PROJECT_REL = os.environ.get("MCP_TESTS_PROJECT_REL", "tests/tests")
 # resolved FQNs in it against the BASE configuration until #309 was fixed.
 EXT_OBJECTS_PROJECT = os.environ.get("MCP_EXT_OBJECTS_PROJECT", "ExternalObjects")
 EXT_OBJECTS_REL = os.environ.get("MCP_EXT_OBJECTS_REL", "tests/ExternalObjects")
+
+# The VENDOR-SUPPORT fixture (issue #642): a base configuration whose Configuration.distr locks
+# some objects (and the configuration itself) while others stay editable, so the writing tools'
+# support guard is proved against EDT's own verdict. Touched only by its own test file.
+SUPPORTED_PROJECT = os.environ.get("MCP_SUPPORTED_PROJECT", "SupportedConfiguration")
+SUPPORTED_REL = os.environ.get("MCP_SUPPORTED_REL", "tests/SupportedConfiguration")
+
+# Fixture projects not every stand loads. Their model sync is best-effort at setup, and a reset
+# includes one only when that sync succeeded or a call's outcome says it was written.
+OPTIONAL_FIXTURE_PROJECTS = (EXT_OBJECTS_PROJECT, SUPPORTED_PROJECT)
 
 # Opt-in gate for the ATTENDED live-infobase round-trip suite (test_live_roundtrip.py).
 # Those tests drive a REAL 1C runtime-client launch / debug session against a running
@@ -132,7 +193,17 @@ NON_BASE_PROBE_FQNS = {
             "ExternalDataProcessor.ExtProc.Form.MainForm").split(",")
         if fqn.strip()
     ],
+    SUPPORTED_PROJECT: [
+        fqn.strip() for fqn in os.environ.get(
+            "E2E_SUPPORTED_BASELINE_PROBE_FQN",
+            "Catalog.Locked,Catalog.Open").split(",")
+        if fqn.strip()
+    ],
 }
+
+# The fixture projects that HAVE a configuration root of their own (an external-objects project
+# has none), so the root brace of the reset post-condition is captured for exactly these.
+ROOT_FINGERPRINT_PROJECTS = (PROJECT, TESTS_PROJECT, SUPPORTED_PROJECT)
 
 # Kept as the single-value alias some tests/messages still read.
 BASELINE_PROBE_FQN = BASELINE_PROBE_FQNS[0]
@@ -168,8 +239,20 @@ MODEL_SETTLE_ATTEMPTS = int(os.environ.get("E2E_MODEL_SETTLE_ATTEMPTS", "3"))
 # stabilizing the slower matrix legs without masking real results (a genuine success/error
 # returns unchanged on the next attempt). Override with E2E_BUILDING_RETRY_TIMEOUT.
 BUILDING_RETRY_TIMEOUT = int(os.environ.get("E2E_BUILDING_RETRY_TIMEOUT", "120"))
-# The server's derived-data "still building, retry" refusal, in any response channel.
+# The server's derived-data "still building, retry" refusal, in an error channel.
 _BUILDING_REFUSAL_RE = re.compile(r"Project is building|Please wait and retry", re.IGNORECASE)
+
+# Every transient building refusal call() received this run, as the server worded it. call()
+# retries them away, so without this record no test could ever look at their text (issue #769:
+# the wording leaked a JVM object identity for months while every refusal was silently retried).
+# Capped so a long run cannot grow it without bound; the first refusals are as good as any.
+_BUILDING_REFUSALS_SEEN = []
+_BUILDING_REFUSALS_CAP = 200
+
+
+def building_refusals_seen():
+    """The texts of the transient building refusals call() has received so far this run."""
+    return list(_BUILDING_REFUSALS_SEEN)
 
 # The longest ONE logical call() can take: the retry loop keeps re-issuing a building refusal for
 # BUILDING_RETRY_TIMEOUT, the attempt in flight when that elapses still gets its full CALL_TIMEOUT,
@@ -381,24 +464,31 @@ def _post(method, params):
             text = e.read().decode("utf-8", "replace")
         except (TimeoutError, socket.timeout) as body_timeout:
             # Headers arrived, the body did not - still a call we cannot account for.
-            _arm_timeout_latch()
-            raise E2ECallTimeout(_call_timeout_message(body_timeout))
+            _arm_timeout_latch(method, params)
+            raise _call_timeout_error(body_timeout, method, params)
     except urllib.error.URLError as e:
         # A socket read timeout arrives either bare or wrapped in URLError, depending on the
-        # Python build; only the timeout becomes E2ECallTimeout - a refused connection is a
-        # different failure and must keep its own traceback.
+        # Python build. Unclassified/writer timeouts become E2ECallTimeout; shared-table
+        # reads keep an ordinary TimeoutError so earlier completed writes can be cleaned up.
         if isinstance(getattr(e, "reason", None), (TimeoutError, socket.timeout)):
-            _arm_timeout_latch()
-            raise E2ECallTimeout(_call_timeout_message(e))
+            _arm_timeout_latch(method, params)
+            raise _call_timeout_error(e, method, params)
         raise
     except (TimeoutError, socket.timeout) as e:
-        _arm_timeout_latch()
-        raise E2ECallTimeout(_call_timeout_message(e))
+        _arm_timeout_latch(method, params)
+        raise _call_timeout_error(e, method, params)
     return _parse_response(text)
 
 
-def _arm_timeout_latch():
-    """Remember that a call was abandoned - see _TIMED_OUT."""
+def _is_read_only_model_request(method, params):
+    return (method == "tools/call" and isinstance(params, dict)
+            and _is_read_only_model_action(params.get("name"), params.get("arguments")))
+
+
+def _arm_timeout_latch(method=None, params=None):
+    """Read-only actions cannot leave an in-flight model mutation."""
+    if _is_read_only_model_request(method, params):
+        return
     abort_further_calls("an earlier call timed out and may still be running")
 
 
@@ -447,7 +537,16 @@ def abort_reason():
     return _ABORT_REASON
 
 
-def _call_timeout_message(cause):
+def _call_timeout_error(cause, method, params):
+    # The runner can still clean up earlier writes after a failed read.
+    error = TimeoutError if _is_read_only_model_request(method, params) else E2ECallTimeout
+    return error(_call_timeout_message(cause, method, params))
+
+
+def _call_timeout_message(cause, method=None, params=None):
+    if _is_read_only_model_request(method, params):
+        return ("no response in %gs (MCP_CALL_TIMEOUT). The read-only request may still be "
+                "running on the server. %s" % (CALL_TIMEOUT, cause))
     return ("no response in %gs (MCP_CALL_TIMEOUT). The server may still be RUNNING this call, "
             "so the model is not safe to read or even to reset - the run stops here. Check the "
             "EDT log for the matching 'Completed tools/call: ... in Nms' line to see whether it "
@@ -460,11 +559,128 @@ def _is_transient_building(result):
     and retry" refusal — surfaced in any channel (an isError text, or a structured
     success=false envelope). The call was refused with NO side effect, so re-issuing it is
     safe and correct (it is never an assertion target)."""
-    try:
-        blob = json.dumps(result.raw, ensure_ascii=False)
-    except (TypeError, ValueError):
-        blob = str(result.raw)
-    return bool(_BUILDING_REFUSAL_RE.search(blob))
+    structured_error = (isinstance(result.structured, dict)
+                        and result.structured.get("success") is False)
+    if not result.is_error and not structured_error:
+        return False
+    return bool(_BUILDING_REFUSAL_RE.search(result.error_text()))
+
+
+_OUTPUT_SCHEMAS = None
+
+
+def _output_schemas(refresh=False):
+    """Cache each advertised tool's contract, including explicit schema-free entries."""
+    global _OUTPUT_SCHEMAS
+    if refresh:
+        _OUTPUT_SCHEMAS = None
+    if _OUTPUT_SCHEMAS is None:
+        schemas, params, cursors = {}, {}, set()
+        while True:
+            raw = _post("tools/list", params)
+            page = raw.get("result", {})
+            if "error" in raw or not isinstance(page.get("tools"), list):
+                raise AssertionError("tools/list: cannot load outputSchema contracts: %r" % raw)
+            for tool in page["tools"]:
+                schemas[tool["name"]] = tool.get("outputSchema")
+            cursor = page.get("nextCursor")
+            if not cursor:
+                break
+            if cursor in cursors:
+                raise AssertionError("tools/list: repeated nextCursor %r" % cursor)
+            cursors.add(cursor)
+            params = {"cursor": cursor}
+        _OUTPUT_SCHEMAS = schemas
+    return _OUTPUT_SCHEMAS
+
+
+def validate_output_schema(value, schema, tool, path="$"):
+    """Validate the server's JSON Schema subset using only the standard library.
+
+    Annotation keywords do not constrain instances. Unknown validation keywords fail
+    closed so a new server schema feature cannot silently weaken this check.
+    """
+    def fail(rule, detail):
+        raise AssertionError("%s structuredContent %s: %s: %s" % (tool, path, rule, detail))
+
+    if isinstance(schema, bool):
+        if not schema:
+            fail("false schema", "no value is allowed")
+        return
+    supported = {"type", "properties", "items", "required", "enum", "additionalProperties",
+                 "oneOf", "anyOf", "description", "title", "$schema", "$id", "$comment",
+                 "default", "examples"}
+    for keyword in schema:
+        if keyword not in supported:
+            fail("unsupported schema keyword", keyword)
+    types = schema.get("type")
+    if types is not None:
+        types = types if isinstance(types, list) else [types]
+        matches = {"object": isinstance(value, dict), "array": isinstance(value, list),
+                   "string": isinstance(value, str), "boolean": isinstance(value, bool),
+                   "null": value is None,
+                   "integer": type(value) in (int, float) and value % 1 == 0,
+                   "number": type(value) in (int, float)}
+        if any(t not in matches for t in types):
+            fail("type", "unsupported type %r" % types)
+        if not any(matches[t] for t in types):
+            fail("type", "expected %r, got %s" % (types, type(value).__name__))
+    if "enum" in schema:
+        # Python equates True with 1, unlike JSON Schema. Compare JSON values recursively.
+        def equal(a, b):
+            if isinstance(a, bool) or isinstance(b, bool):
+                return type(a) is type(b) and a == b
+            if isinstance(a, list) and isinstance(b, list):
+                return len(a) == len(b) and all(equal(x, y) for x, y in zip(a, b))
+            if isinstance(a, dict) and isinstance(b, dict):
+                return a.keys() == b.keys() and all(equal(a[k], b[k]) for k in a)
+            return a == b
+        if not any(equal(value, candidate) for candidate in schema["enum"]):
+            fail("enum", "%r is not one of %r" % (value, schema["enum"]))
+    for keyword in ("oneOf", "anyOf"):
+        if keyword in schema:
+            count, errors = 0, []
+            for alternative in schema[keyword]:
+                try:
+                    validate_output_schema(value, alternative, tool, path)
+                    count += 1
+                except AssertionError as error:
+                    errors.append(str(error))
+            if (keyword == "oneOf" and count != 1) or (keyword == "anyOf" and count == 0):
+                fail(keyword, "%d matching alternatives; %s" % (count, "; ".join(errors)))
+    if isinstance(value, dict):
+        for name in schema.get("required", []):
+            if name not in value:
+                fail("required", "missing property %r" % name)
+        properties = schema.get("properties", {})
+        for name, member in value.items():
+            member_path = path + "[" + json.dumps(name, ensure_ascii=True) + "]"
+            if name in properties:
+                validate_output_schema(member, properties[name], tool, member_path)
+            elif "additionalProperties" in schema:
+                if schema["additionalProperties"] is False:
+                    raise AssertionError("%s structuredContent %s: additionalProperties: unexpected property"
+                                         % (tool, member_path))
+                validate_output_schema(member, schema["additionalProperties"], tool, member_path)
+    if isinstance(value, list) and "items" in schema:
+        for index, member in enumerate(value):
+            validate_output_schema(member, schema["items"], tool, "%s[%d]" % (path, index))
+
+
+def _validate_tool_output(tool, result):
+    if result.is_error or result.rpc_error or "structuredContent" not in result.result:
+        return
+    if isinstance(result.structured, dict) and result.structured.get("success") is False:
+        return
+    schemas = _output_schemas()
+    if tool not in schemas:
+        schemas = _output_schemas(refresh=True)
+    if tool not in schemas:
+        raise AssertionError("%s structuredContent $: outputSchema discovery: tool is not advertised "
+                             "by tools/list; enable its toolset before calling it" % tool)
+    schema = schemas[tool]
+    if schema is not None:
+        validate_output_schema(result.structured, schema, tool)
 
 
 def call(tool, arguments):
@@ -476,6 +692,7 @@ def call(tool, arguments):
     until it clears stabilizes the slower matrix legs without masking a real success/error
     (which returns unchanged on the next attempt). Bounded by BUILDING_RETRY_TIMEOUT; on
     expiry the building refusal is returned so the test fails loudly rather than hanging."""
+    global _OUTPUT_SCHEMAS
     deadline = time.time() + BUILDING_RETRY_TIMEOUT
     attempt = 0
     # Record the attempt BEFORE issuing it, once for the whole retry loop. If the request dies
@@ -486,6 +703,8 @@ def call(tool, arguments):
     # Prove the body can be built before counting the attempt. If this raises, nothing left this
     # process, so no outcome exists for anyone to read back.
     json.dumps({"name": tool, "arguments": arguments})
+    if tool == "enable_toolset":
+        _OUTPUT_SCHEMAS = None
     _record_attempt(tool, arguments)
     while True:
         try:
@@ -498,16 +717,81 @@ def call(tool, arguments):
             # export lands on the restored tree and leaks into the next test. So arm the same latch
             # a timeout arms, which also freezes the fixtures, and let the run stop. Reading a write
             # back is what makes it safe to undo; nothing else does.
-            if tool in MODEL_MUTATION_TOOLS and not _TIMED_OUT:
+            if (tool in MODEL_MUTATION_TOOLS and not _is_read_only_model_action(tool, arguments)
+                    and not _TIMED_OUT):
                 abort_further_calls(
                     "a %s request died in flight, so the server may still be executing it" % tool)
             raise
         result = Result(raw)
-        if not _is_transient_building(result) or time.time() >= deadline:
+        building = _is_transient_building(result)
+        if building and len(_BUILDING_REFUSALS_SEEN) < _BUILDING_REFUSALS_CAP:
+            _BUILDING_REFUSALS_SEEN.append(result.error_text())
+        if not building or time.time() >= deadline:
             _record_outcome(tool, arguments, result.is_error, result.structured)
+            _validate_tool_output(tool, result)
             return result
         attempt += 1
         time.sleep(min(2 * attempt, 10))
+
+
+# ── Background-job answers: a long rename preview continues as a job (#803) ────────────
+PENDING_PREFIX = "**Pending:**"
+_JOB_ID_RE = re.compile(r"^\| jobId \| ([^|]+) \|\s*$", re.MULTILINE)
+_JOB_STATUS_RE = re.compile(r"^# Background job: (\S+)", re.MULTILINE)
+_JOB_RESULT_MARKER = "\n## Result\n\n"
+_JOB_ERROR_MARKER = "\n## Error\n\n"
+_JOB_POLL_WAIT_SECONDS = 45
+
+
+def _text_result(text, is_error=False):
+    """A Result carrying `text` as the tool's own answer, the shape a direct call would return."""
+    result = {"content": [{"type": "text", "text": text}]}
+    if is_error:
+        result["isError"] = True
+    return Result({"result": result})
+
+
+def follow_pending(result, ctx=""):
+    """Return what the call would have answered had it not continued as a background job.
+
+    A `**Pending:**` answer names a jobId; this polls get_job_status until the job is terminal
+    (bounded by MCP_CALL_TIMEOUT overall) and returns its Result as an ordinary success, or its
+    Error as an ordinary error. Any other answer - an inline preview, a confirm report, a refusal -
+    is returned unchanged, so a caller can route every call of a job-capable tool through here."""
+    if result.is_error or not result.text.startswith(PENDING_PREFIX):
+        return result
+    match = _JOB_ID_RE.search(result.text)
+    if not match:
+        _fail("%s: a Pending answer must name its jobId:\n%s" % (ctx or "follow_pending", result.text))
+    job_id = match.group(1).strip()
+    deadline = time.time() + CALL_TIMEOUT
+    while True:
+        remaining = deadline - time.time()
+        wait = int(max(0, min(_JOB_POLL_WAIT_SECONDS, remaining)))
+        status = call("get_job_status", {"jobId": job_id, "waitSeconds": wait})
+        assert_ok(status, "%s: poll background job %s" % (ctx or "follow_pending", job_id))
+        state = _JOB_STATUS_RE.search(status.text)
+        state = state.group(1) if state else ""
+        if state == "running":
+            if time.time() >= deadline:
+                _fail("%s: background job %s still running after %gs (MCP_CALL_TIMEOUT):\n%s"
+                      % (ctx or "follow_pending", job_id, CALL_TIMEOUT, status.text))
+            continue
+        if state == "done" and _JOB_RESULT_MARKER in status.text:
+            return _text_result(status.text.split(_JOB_RESULT_MARKER, 1)[1])
+        if state == "failed" and _JOB_ERROR_MARKER in status.text:
+            return _text_result(status.text.split(_JOB_ERROR_MARKER, 1)[1], is_error=True)
+        _fail("%s: background job %s ended without a Result or an Error:\n%s"
+              % (ctx or "follow_pending", job_id, status.text))
+
+
+def rename_call(arguments):
+    """call("rename_metadata_object", arguments), following a Pending preview to its Result.
+
+    A preview that outlives its waitSeconds answers Pending instead of inline; every e2e that reads
+    a preview's table goes through here so a slow runner turns into a longer wait, not a red test.
+    A confirm or a refusal is never Pending, so it comes back exactly as call() returned it."""
+    return follow_pending(call("rename_metadata_object", arguments), "rename_metadata_object")
 
 
 # ── Model-reset shortcut: don't pay for a reset when nothing was changed ──────────────
@@ -528,6 +812,8 @@ DEEP_MUTATION_TOOLS = frozenset({
     "rename_metadata_object", "delete_metadata", "adopt_metadata_object",
     "update_database", "import_configuration_from_xml", "resync_to_disk",
     "clean_project", "create_project", "delete_project",
+    # Creates a NEW project from a 1C file; a failed import is rolled back by the tool.
+    "import_project_from_file",
 })
 
 # These tools can confirm writes in fixture projects that the response does not name.
@@ -572,8 +858,13 @@ def _confirmed(args):
 # the Java side and is missing here fails the suite. Hand-maintained membership silently rots -
 # apply_quick_fix landed on master mutating the model, and this set did not know about it.
 MODEL_MUTATION_TOOLS = frozenset({
-    "create_metadata", "modify_metadata", "write_module_source",
+    "manage_tech_log",  # Writes only config/capture/export files; never the fixture model.
+    # A conflict-dialog Import press can rewrite project sources through EDT.
+    "edt_dialog",
+    "sort_metadata", "create_metadata", "modify_metadata", "write_module_source",
     "apply_quick_fix", "build_external_objects",
+    # The preview never writes; a confirmed clone writes only after validation and the hash check.
+    "clone_metadata_object",
     # dcs authors schemas / settings / dynamic lists. It belongs here rather than in
     # DEEP_MUTATION_TOOLS because an ordinary refusal does not move the model: the writer validates
     # the request before the first eSet. The exception is a post-commit force-export scheduling
@@ -581,6 +872,8 @@ MODEL_MUTATION_TOOLS = frozenset({
     # failure carries mutationOutcomeUnknown:true. Both forfeit the shortcut without making an
     # ordinary negative test do so.
     "dcs",
+    # Like dcs, get only reads; replace/remove write after validation and consent.
+    "business_process_route_map",
     # Writers whose write happens OUTSIDE our code: both call LanguageTool through reflection.
     # Their entry points now mark an exception after invoke() as outcome-unknown, but source
     # scanning still cannot discover their membership; the ratchet pins their names explicitly.
@@ -591,11 +884,30 @@ MODEL_MUTATION_TOOLS = frozenset({
 # therefore require kind="write-metadata". The exclusions are deliberate and kept one-per-line:
 # Tools that never move the FIXTURE's model, whatever arguments they are given.
 NON_FIXTURE_MODEL_MUTATION_TOOLS = frozenset({
+    "manage_tech_log",  # User-profile configuration and independent log files only.
     "clean_project",    # Restores the in-memory model FROM the fixture on disk.
     "create_project",   # Changes workspace composition, not the fixture's model.
+    "import_project_from_file",  # Adds a NEW project; the fixture model is only read.
     "delete_project",   # Changes workspace composition, not the fixture's model.
     "update_database",  # Writes to the information base, not the fixture's model.
 })
+
+
+# Action-based writers share one exemption table. All other actions stay conservative.
+READ_ONLY_MODEL_ACTIONS = {
+    "edt_dialog": frozenset({"list"}),
+    "dcs": frozenset({"get", "options"}),
+    "business_process_route_map": frozenset({"get"}),
+}
+
+
+def _is_read_only_model_action(tool, args):
+    if tool == "manage_tech_log":
+        return isinstance(args, dict) and args.get("mode", "preview") in {"preview", "status"}
+    if tool == "sort_metadata":
+        return isinstance(args, dict) and args.get("mode") == "list"
+    return (isinstance(args, dict) and isinstance(args.get("action"), str)
+            and args["action"] in READ_ONLY_MODEL_ACTIONS.get(tool, ()))
 
 
 def _call_moves_the_fixture_model(tool, args, structured):
@@ -614,7 +926,7 @@ def _call_moves_the_fixture_model(tool, args, structured):
     is "preview" is a dry run by construction (rename/delete build the refactoring and report it
     without applying), so it cannot have moved anything.
     """
-    if tool in NON_FIXTURE_MODEL_MUTATION_TOOLS:
+    if tool in NON_FIXTURE_MODEL_MUTATION_TOOLS or _is_read_only_model_action(tool, args):
         return False
     if isinstance(structured, dict) and structured.get("action") == "preview":
         return False
@@ -648,12 +960,15 @@ _UNRESOLVED_CASCADE_CALLS = 0
 # verification deliberately continue to read it exactly as before.
 _BASELINE_INVENTORY_BY_PROJECT = {}
 _BASELINE_DETAILS_BY_PROJECT = {}
+# The third brace: the configuration ROOT's own properties, per project that has a root. See
+# _root_fingerprint.
+_BASELINE_ROOT_BY_PROJECT = {}
 _BASELINE_INVENTORY = None
 _BASELINE_DETAILS = None
-# ExternalObjects is optional, so final_cleanup cannot require its model refresh to succeed. Its
-# inventory is safe to capture only when that refresh DID succeed; False is the fail-closed import
-# default and is reset at the start of every final_cleanup attempt.
-_EXT_OBJECTS_MODEL_SYNCED = False
+# The OPTIONAL fixtures, so final_cleanup cannot require their model refresh to succeed. A
+# project's inventory is safe to capture only when that refresh DID succeed; empty is the
+# fail-closed import default and is reset at the start of every final_cleanup attempt.
+_OPTIONAL_MODELS_SYNCED = set()
 
 # A mutating call that succeeded, committed before failing, or entered an opaque mutation whose
 # rollback outcome is unknown. Any one is enough to forfeit the shortcut for the whole test.
@@ -677,12 +992,13 @@ _CONFIRMED_MUTATION_TOOLS = set()
 _MUTATIONS_UNRESOLVED = 0
 
 # Only arguments whose schema says they NAME a project participate in target inference. Across the
-# fixture-model writers these are projectName and adopt_metadata_object's extensionProjectName;
+# fixture-model writers these are projectName, adopt_metadata_object's extensionProjectName and
+# clone_metadata_object's targetProjectName (the project a cross-project clone writes);
 # fixture-looking text in source, fqn, or any other value is unrelated. The one exception is
 # `_implicit_extension_targets` below: an adoption whose omitted or empty extensionProjectName makes
 # the server select the single extension. An unresolved outcome widens evidence only for these
 # candidate projects, because this branch already treats "outcome unknown" as "assume it moved".
-_PROJECT_ARGUMENT_KEYS = frozenset({"projectName", "extensionProjectName"})
+_PROJECT_ARGUMENT_KEYS = frozenset({"projectName", "extensionProjectName", "targetProjectName"})
 
 
 def _fixture_projects_named_in(args):
@@ -716,8 +1032,8 @@ def _candidate_mutation_targets(tool, args):
 
 
 # A cascade can cross fixture projects only when rooted at PROJECT, whose open extension is
-# TESTS_PROJECT. EXT_OBJECTS_PROJECT is neither an extension nor a base; an unknown root stays
-# wide. Do not infer delete dispatch from FQN shape: the server-side form parser decides whether
+# TESTS_PROJECT. EXT_OBJECTS_PROJECT is neither an extension nor a base, and SUPPORTED_PROJECT
+# is a base no fixture extends; an unknown root stays wide. Do not infer delete dispatch from FQN shape: the server-side form parser decides whether
 # EDT uses metadata refactoring or the direct form-member path.
 def _cascades_across_fixtures(tool, args):
     named = _fixture_projects_named_in(args)
@@ -729,6 +1045,8 @@ def _record_attempt(tool, args=None):
     """Called ONCE per logical call, before the request goes out."""
     global _MUTATIONS_UNRESOLVED, _UNRESOLVED_CASCADE_CALLS
     _CALLED_TOOLS.add(tool)
+    if _is_read_only_model_action(tool, args):
+        return
     if _cascades_across_fixtures(tool, args):
         _UNRESOLVED_CASCADE_CALLS += 1
     if (tool in (MODEL_MUTATION_TOOLS | DEEP_MUTATION_TOOLS)
@@ -769,14 +1087,16 @@ def _record_outcome(tool, args, is_error, structured):
         _UNRESOLVED_CASCADE_CALLS = max(0, _UNRESOLVED_CASCADE_CALLS - 1)
     if tool not in MODEL_MUTATION_TOOLS:
         return
-    if tool not in NON_FIXTURE_MODEL_MUTATION_TOOLS:
-        for project in _candidate_mutation_targets(tool, args):
-            remaining = _UNRESOLVED_MUTATION_PROJECTS.get(project, 0) - 1
-            if remaining > 0:
-                _UNRESOLVED_MUTATION_PROJECTS[project] = remaining
-            else:
-                _UNRESOLVED_MUTATION_PROJECTS.pop(project, None)
-    _MUTATIONS_UNRESOLVED = max(0, _MUTATIONS_UNRESOLVED - 1)
+    if not _is_read_only_model_action(tool, args):
+        # Retire only an attempt this call actually recorded; a read cannot settle a writer.
+        if tool not in NON_FIXTURE_MODEL_MUTATION_TOOLS:
+            for project in _candidate_mutation_targets(tool, args):
+                remaining = _UNRESOLVED_MUTATION_PROJECTS.get(project, 0) - 1
+                if remaining > 0:
+                    _UNRESOLVED_MUTATION_PROJECTS[project] = remaining
+                else:
+                    _UNRESOLVED_MUTATION_PROJECTS.pop(project, None)
+        _MUTATIONS_UNRESOLVED = max(0, _MUTATIONS_UNRESOLVED - 1)
     mutation_committed = (isinstance(structured, dict)
                           and structured.get("mutationCommitted") is True)
     mutation_unknown = (isinstance(structured, dict)
@@ -785,12 +1105,13 @@ def _record_outcome(tool, args, is_error, structured):
     call_moves_fixture = (mutation_evidenced
                           and _call_moves_the_fixture_model(tool, args, structured))
     if mutation_evidenced:
-        _MUTATION_CONFIRMED = True
+        if mutation_committed or mutation_unknown or not _is_read_only_model_action(tool, args):
+            _MUTATION_CONFIRMED = True
         if _cascades_across_fixtures(tool, args):
             _CASCADE_CONFIRMED_CALLED = True
         # The RATCHET's set is narrower than the reset shortcut's flag on purpose: the shortcut
-        # stays conservative (any success forfeits it), while accusing a test of a mis-declared
-        # kind has to be right about THIS call actually having moved the fixture's model.
+        # stays conservative outside the shared read-only actions, while accusing a test of a
+        # mis-declared kind must be right about THIS call moving the fixture's model.
         if call_moves_fixture:
             _CONFIRMED_MUTATION_TOOLS.add(tool)
     # Keep the named targets correlated with THIS outcome. A success counts only when this call
@@ -850,9 +1171,14 @@ def mutation_could_have_cascaded():
     return _CASCADE_CONFIRMED_CALLED or _UNRESOLVED_CASCADE_CALLS > 0
 
 
+def optional_model_synced(project):
+    """Whether final_cleanup synchronized this optional fixture's model at setup."""
+    return project in _OPTIONAL_MODELS_SYNCED
+
+
 def external_objects_model_synced():
     """Whether final_cleanup synchronized the optional ExternalObjects model at setup."""
-    return _EXT_OBJECTS_MODEL_SYNCED
+    return optional_model_synced(EXT_OBJECTS_PROJECT)
 
 
 def mutation_kind_violation_tools(kind, confirmed_tools):
@@ -939,6 +1265,62 @@ def _probe_details(project=PROJECT, fqns=None):
     return text
 
 
+def _root_fingerprint(project=PROJECT):
+    """The project's configuration ROOT as get_configuration_properties renders it, or None when it
+    cannot be read AS EVIDENCE (a tool error or an empty body).
+
+    The third brace of the post-condition. modify_metadata writes the root's own properties (its
+    version, vendor, synonym, ... - issue #741), and neither of the other two braces reads the root:
+    the inventory lists the top objects, the detail probes read three of them. A root write that
+    survived a reset would therefore be certified as reset, and fail a later, innocent test - one that
+    asserts the fixture's synonym, say, or the languages it keeps in use. get_configuration_properties
+    renders exactly those properties, in one cheap call.
+
+    A TIMEOUT propagates, like every other probe's: it arms the global latch and means the request may
+    still be running server-side."""
+    try:
+        r = call("get_configuration_properties", {"projectName": project})
+    except E2ECallTimeout:
+        raise
+    except Exception:
+        return None
+    if r.is_error:
+        return None
+    text = (r.text or "").strip()
+    return text or None
+
+
+def _capture_root_baseline(project):
+    """Record the root fingerprint of `project` when it has a root and it can be read as evidence."""
+    if project not in ROOT_FINGERPRINT_PROJECTS:
+        return
+    root = _root_fingerprint(project)
+    if root is not None:
+        _BASELINE_ROOT_BY_PROJECT[project] = root
+    elif project == PROJECT:
+        # Degraded, not broken - but say so: without it a root write that survives a reset goes unseen.
+        print("!! the configuration root of %s could not be fingerprinted - the reset post-condition "
+              "cannot see a root write that survives it" % project, flush=True)
+
+
+def _root_mismatch(project):
+    """Why `project`'s configuration root no longer matches its captured baseline, or None.
+
+    Applied only when a root baseline was captured - the same degradation as the other braces: no
+    baseline, no brace. A root that cannot be read once the baseline exists is a mismatch, because a
+    post-condition must not certify what it could not look at."""
+    baseline = _BASELINE_ROOT_BY_PROJECT.get(project)
+    if baseline is None:
+        return None
+    root = _root_fingerprint(project)
+    if root is None:
+        return "the configuration root of %s could not be read as evidence" % project
+    if root != baseline:
+        return ("the configuration root of %s (get_configuration_properties) no longer matches the "
+                "baseline - a write to 'Configuration' survived" % project)
+    return None
+
+
 def snapshot_model_baseline():
     """Record the pristine fingerprints once, before the first test runs.
 
@@ -955,14 +1337,16 @@ def snapshot_model_baseline():
     global _BASELINE_INVENTORY, _BASELINE_DETAILS
     _BASELINE_INVENTORY_BY_PROJECT.clear()
     _BASELINE_DETAILS_BY_PROJECT.clear()
+    _BASELINE_ROOT_BY_PROJECT.clear()
     _BASELINE_INVENTORY = _top_object_inventory()
     if _BASELINE_INVENTORY is not None:
         _BASELINE_INVENTORY_BY_PROJECT[PROJECT] = _BASELINE_INVENTORY
     _BASELINE_DETAILS = _probe_details()
     if _BASELINE_DETAILS is not None:
         _BASELINE_DETAILS_BY_PROJECT[PROJECT] = _BASELINE_DETAILS
-    for project in (TESTS_PROJECT, EXT_OBJECTS_PROJECT):
-        if project == EXT_OBJECTS_PROJECT and not _EXT_OBJECTS_MODEL_SYNCED:
+    _capture_root_baseline(PROJECT)
+    for project in (TESTS_PROJECT,) + OPTIONAL_FIXTURE_PROJECTS:
+        if project in OPTIONAL_FIXTURE_PROJECTS and project not in _OPTIONAL_MODELS_SYNCED:
             # Its disk was still reverted, but an absent, unloaded or otherwise uncleanable
             # optional project can retain a stale in-memory model. No baseline is safer than
             # certifying that stale model; _non_base_mismatch then degrades to its disk check.
@@ -985,6 +1369,7 @@ def snapshot_model_baseline():
         details = _probe_details(project, NON_BASE_PROBE_FQNS[project])
         if details is not None:
             _BASELINE_DETAILS_BY_PROJECT[project] = details
+        _capture_root_baseline(project)
     return (_BASELINE_INVENTORY is not None, _BASELINE_DETAILS is not None)
 
 
@@ -1058,7 +1443,10 @@ def initialize(capabilities=None):
     """MCP lifecycle handshake: initialize -> capture session id -> notifications/initialized.
 
     Per the 2025-06-18 / 2025-11-25 spec the client MUST send initialize first and
-    then the initialized notification before normal operations. Done once at startup."""
+    then the initialized notification before normal operations. Reset cached contracts
+    for the new session's capabilities and visible tools."""
+    global _OUTPUT_SCHEMAS
+    _OUTPUT_SCHEMAS = None
     result = _post("initialize", {
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": capabilities or {},
@@ -1138,7 +1526,10 @@ def _all_edt_projects_ready(list_projects_markdown, not_ready=None, ignore=()):
     """True when every EDT project in the list_projects table reads 'ready'.
 
     Two kinds of row are skipped, because neither can ever become ready and neither can serve a
-    tool: one KNOWN to be non-EDT (`EDT Project` = No), and one that is CLOSED (`Open` = No).
+    tool: one KNOWN to be non-EDT (`EDT Project` = No and no V8 nature), and one that is
+    CLOSED (`Open` = No). External-object projects carry V8ExternalObjectsNature and must settle
+    even though list_projects labels them `EDT Project` = No. Legacy five-column tables have
+    no nature evidence and keep skipping No rows.
     A closed project reads 'not_available' forever - EDT is deliberately not building it, which
     is the entire point of closing a heavy configuration - so blocking on it aborts every local
     run on such a workspace before the first test starts. A test that actually targets a closed
@@ -1159,6 +1550,11 @@ def _all_edt_projects_ready(list_projects_markdown, not_ready=None, ignore=()):
     fill it with the blocking (project name, state) pairs from this same parse so timeout callers
     can report which project prevented progress without parsing the table again. Project names
     explicitly supplied in `ignore` are skipped before their state is checked.
+
+    Known limit of the nature evidence: ListProjectsTool renders only the FIRST THREE natures of a
+    project and summarises the rest as '...+N', so a V8 nature in fourth place or later is not seen
+    here and that `EDT Project` = No row falls back to being skipped. Harmless for the fixture (its
+    projects carry two natures), but a project with more natures needs `ignore` or a wider cell.
     """
     rows = []
     for line in list_projects_markdown.splitlines():
@@ -1181,7 +1577,10 @@ def _all_edt_projects_ready(list_projects_markdown, not_ready=None, ignore=()):
             continue
         state, is_open = cells[1].strip().lower(), cells[3].strip().lower()
         edt_project = cells[4].strip().lower()
-        if edt_project == "no":
+        natures = cells[5] if len(cells) > 5 else ""
+        edt_nature = any(token.strip().startswith("V8") and token.strip().endswith("Nature")
+                         for token in natures.split(","))
+        if edt_project == "no" and not edt_nature:
             continue  # a KNOWN non-EDT project (the standalone server's "Servers" container)
         if is_open == "no":
             continue  # closed on purpose: it will never leave 'not_available' by itself
@@ -1218,9 +1617,10 @@ def _store_project_ready_progress(progress, changed, observed, polls, start,
 
 def wait_for_project_ready(timeout=None, failure_details=None, progress=None, ignore_projects=()):
     """Wait until every EDT project is fully indexed (state 'ready') — i.e. none is still
-    'building' its derived data AND none is 'not_available' (mid (re)load). Non-EDT projects
-    are ignored (see _all_edt_projects_ready): a standalone server's "Servers" container is
-    permanently 'not_available' and would otherwise block every run on such a workspace.
+    'building' its derived data AND none is 'not_available' (mid (re)load). V8-natured projects,
+    including external-object projects labeled `EDT Project` = No, participate. Non-EDT projects
+    without a V8 nature are ignored (see _all_edt_projects_ready): a standalone server's "Servers"
+    container is permanently 'not_available' and would otherwise block every run on such a workspace.
 
     After a `-clean` relaunch the MCP port opens (wait_for_server) BEFORE EDT finishes
     indexing, so a cascade/mutation tool (rename / delete / create) run too early would
@@ -1311,6 +1711,24 @@ def wait_for_project_ready(timeout=None, failure_details=None, progress=None, ig
     return False
 
 
+def wait_for_named_projects_ready(names, timeout=180, ctx="", *, invoke=None):
+    """Poll list_projects(format=json) until every project in `names` reads 'ready'.
+
+    Returns the last {name: state} map so the caller asserts on it (and on what else it holds).
+    Unlike wait_for_project_ready this reads the JSON contract and requires every named project
+    to exist and read 'ready', regardless of its EDT flag, nature, or open state.
+    An optional invoke uses the same readiness contract over a different transport.
+    """
+    deadline = time.time() + timeout
+    while True:
+        listed = (invoke or call)("list_projects", {"format": "json"})
+        assert_ok(listed, "list_projects while waiting for %s" % (ctx or sorted(names)))
+        states = {row["name"]: row["state"] for row in listed.structured["projects"]}
+        if all(states.get(name) == "ready" for name in names) or time.time() > deadline:
+            return states
+        time.sleep(2)
+
+
 def settle_or_fail(what):
     """Wait for the project to be ready, and FAIL the test if it never is.
 
@@ -1356,18 +1774,19 @@ def _git(*args, timeout=None):
 
 
 # Every fixture project. The BASE is the one most tests mutate (reset before every test); the
-# EXTENSION and the EXTERNAL-OBJECTS project are touched only by their own files, and the
-# end-of-run cleanup reverts all three.
-ALL_FIXTURE_RELS = [PROJECT_REL, TESTS_PROJECT_REL, EXT_OBJECTS_REL]
-# The same three fixtures addressed as PROJECTS, for callers that must clean a model rather
-# than a path (the kind ratchet cleans all three: an undeclared write names no project).
-ALL_FIXTURE_PROJECTS = [PROJECT, TESTS_PROJECT, EXT_OBJECTS_PROJECT]
+# EXTENSION, the EXTERNAL-OBJECTS and the VENDOR-SUPPORT projects are touched only by their own
+# files, and the end-of-run cleanup reverts them all.
+ALL_FIXTURE_RELS = [PROJECT_REL, TESTS_PROJECT_REL, EXT_OBJECTS_REL, SUPPORTED_REL]
+# The same fixtures addressed as PROJECTS, for callers that must clean a model rather than a
+# path (the kind ratchet cleans them all: an undeclared write names no project).
+ALL_FIXTURE_PROJECTS = [PROJECT, TESTS_PROJECT, EXT_OBJECTS_PROJECT, SUPPORTED_PROJECT]
 # Written out rather than zipped from the two lists above, so a project can never be silently
 # paired with another fixture's path if one of them gains an entry and the other does not.
 FIXTURE_REL_BY_PROJECT = {
     PROJECT: PROJECT_REL,
     TESTS_PROJECT: TESTS_PROJECT_REL,
     EXT_OBJECTS_PROJECT: EXT_OBJECTS_REL,
+    SUPPORTED_PROJECT: SUPPORTED_REL,
 }
 
 
@@ -1540,6 +1959,49 @@ def read_disk(relpath):
         return f.read()
 
 
+def metadata_collection_state(project_name, fqn):
+    """Read one actual model EList and its optional V8 code style autosort policy."""
+    result = call("sort_metadata", {"projectName": project_name, "fqn": fqn, "mode": "list"})
+    assert_ok(result, "read current model collection order: %s" % fqn)
+    body = result.structured or {}
+    rows = body.get("collections", [])
+    if body.get("mode") != "list" or len(rows) != 1 or not isinstance(rows[0].get("order"), list):
+        _fail("expected one read-only model order for %s, got %r" % (fqn, body))
+    if "autosort" in rows[0]:
+        assert_autosort_notice(rows[0], message=body.get("message", ""))
+    return rows[0]
+
+
+def assert_autosort_notice(payload, governs=None, message=None):
+    """Validate the shared user-owned autosort notice; presence is the capability signal."""
+    block = payload.get("autosort")
+    fields = {"plugin", "governs", "setting", "order", "effect", "userAction"}
+    if not isinstance(block, dict) or set(block) != fields:
+        _fail("expected a complete autosort notice, got %r" % block)
+    assert block["plugin"] == "1C:Code style V8 (com.e1c.v8codestyle.autosort)", block
+    if governs is not None:
+        assert block["governs"] == governs, block
+    assert block["setting"] in ("all top-level lists", "all subordinate lists", "this list"), block
+    assert block["order"] in ("ascending, natural", "ascending, plain", "descending, natural", "descending, plain"), block
+    action = block["userAction"]
+    assert action.startswith("Autosort (1C:Code style V8) keeps this list in alphabetical order. "), block
+    assert "ask the user to turn it off for this list in Project > Properties > V8 > Metadata objects sort > Auto sort" in action, block
+    assert action.endswith("do not change this setting yourself."), block
+    assert ".prefs" not in str(block) and "topObjects" not in str(block) and "subordinateObjects" not in str(block), block
+    text = payload.get("message", "") if message is None else message
+    assert action in text and block["effect"] in text, (block, text)
+    return block
+
+
+def autosort_descending(state):
+    return "autosort" in state and state["autosort"]["order"].startswith("descending,")
+
+
+def metadata_collection_order(project_name, fqn):
+    """Preserve stored order; get_metadata_objects is a presentation listing."""
+    return metadata_collection_state(project_name, fqn)["order"]
+
+
 # ── Markdown table parsing (this project's OWN presentation contract) ──────────
 #
 # Splits on a '|' COLUMN DELIMITER but never on an escaped '\|'. This mirrors the
@@ -1654,7 +2116,8 @@ def _baseline_mismatch():
 
     Both braces are needed and neither subsumes the other: the INVENTORY sees a top object that
     appeared, vanished or was renamed; the DETAIL of BASELINE_PROBE_FQNS sees a change INSIDE one
-    - a property, a child, a synonym - which leaves every name identical.
+    - a property, a child, a synonym - which leaves every name identical. A third brace, the ROOT
+    (_root_fingerprint), sees a write to the configuration root itself, which neither of them reads.
 
     Best-effort by construction: anything that cannot be read counts as a mismatch and the caller
     retries the whole revert+clean cycle (or, for the shortcut, simply does not skip it). A call
@@ -1676,7 +2139,8 @@ def _baseline_mismatch():
     if _BASELINE_DETAILS is not None and text != _BASELINE_DETAILS:
         return "%s still resolve, but their detail no longer matches the baseline - something "\
             "INSIDE one of them changed" % ", ".join(BASELINE_PROBE_FQNS)
-    return None
+    # The root brace: a write to the configuration root changes neither the inventory nor the probes.
+    return _root_mismatch(PROJECT)
 
 
 def _settle_progress_note(progress):
@@ -2281,6 +2745,11 @@ def _non_base_mismatch(project, rel):
             return "the top-object inventory for %s could not be read" % project
         if inventory != baseline:
             return _inventory_difference_against(inventory, baseline)
+    # The root brace, applied when its own baseline was captured (an extension's root is as writable
+    # as the base's, and neither the inventory nor the detail probes read it).
+    root_mismatch = _root_mismatch(project)
+    if root_mismatch is not None:
+        return root_mismatch
     detail_baseline = _BASELINE_DETAILS_BY_PROJECT.get(project)
     if detail_baseline is None:
         return None
@@ -2361,6 +2830,40 @@ def all_fixtures_status():
     return "\n".join(parts)
 
 
+def _sync_optional_fixture(project, ignore_projects):
+    """Best-effort revert+clean+settle of ONE optional fixture; records it as synced on success."""
+    skip_reason = None
+    try:
+        cleaned, clean_attempts, settle_failures, settle_failure = \
+            _revert_and_clean(project, reset_all_fixtures, ignore_projects=ignore_projects)
+        if not cleaned:
+            skip_reason = _clean_failure_cause(clean_attempts, settle_failures, settle_failure)
+        else:
+            failure_details = []
+            if wait_for_project_ready(timeout=MODEL_SETTLE_TIMEOUT,
+                                      failure_details=failure_details,
+                                      ignore_projects=ignore_projects):
+                _OPTIONAL_MODELS_SYNCED.add(project)
+            else:
+                skip_reason = (failure_details[0] if failure_details
+                               else "projects did not become ready after clean_project")
+    except E2ECallTimeout:
+        # NOT best-effort. A timeout means the request may still be running server-side and it has
+        # already armed the global latch, so continuing would carry the whole run on a latched
+        # harness and pin the failure on whichever test trips over it next. The baseline capture
+        # re-raises it for this same reason; "optional fixture" means its model may be absent, not
+        # that the server may be unreachable.
+        raise
+    except Exception as e:
+        # A latched optional failure must surface before any later call inherits its abort.
+        if calls_aborted():
+            raise
+        skip_reason = str(e) or type(e).__name__
+    if project not in _OPTIONAL_MODELS_SYNCED:
+        print("!! optional project %r model synchronization skipped: %s"
+              % (project, skip_reason or "unknown failure"), flush=True)
+
+
 def final_cleanup():
     """Leave the working tree verifiably clean ('no diff' == the session passed and left
     nothing behind).
@@ -2368,9 +2871,9 @@ def final_cleanup():
     Reverts every fixture on disk, then mandatorily clean_projects the base and test-extension
     projects with the SAME retry-until-synced contract as reset_model() - literally the same code,
     _revert_and_clean: wait for the projects to settle, THEN clean_project, each with its own
-    budget. ExternalObjects uses that same path only AFTER the mandatory projects have passed
-    their unchanged clean-and-settle gate, but it is optional: failure is reported and its model
-    baseline is disabled rather than aborting the run.
+    budget. Each OPTIONAL fixture (ExternalObjects, SupportedConfiguration) uses that same path
+    only AFTER the mandatory projects have passed their unchanged clean-and-settle gate: failure is
+    reported and its model baseline is disabled rather than aborting the run.
 
     call() only raises on a TIMEOUT, so a mandatory clean_project that came back with isError
     (e.g. the derived-data pipeline outlived BUILDING_RETRY_TIMEOUT and the server refused it) must
@@ -2385,13 +2888,13 @@ def final_cleanup():
     E2EModelResetFailed rather than let a run be reported green over a model nobody actually
     verified is back in sync. The final reset_all_fixtures() only mops up any file clean_project
     itself re-touched (e.g. a CRLF/marker touch). Run at startup AND at the end."""
-    global _EXT_OBJECTS_MODEL_SYNCED
-    _EXT_OBJECTS_MODEL_SYNCED = False
+    _OPTIONAL_MODELS_SYNCED.clear()
     reset_all_fixtures()
+    optional = set(OPTIONAL_FIXTURE_PROJECTS)
     for proj in (PROJECT, TESTS_PROJECT):
         cleaned, clean_attempts, settle_failures, settle_failure = \
             _revert_and_clean(
-                proj, reset_all_fixtures, ignore_projects={EXT_OBJECTS_PROJECT})
+                proj, reset_all_fixtures, ignore_projects=optional)
         if not cleaned:
             # Any failed settle already started the single-flight collector in _revert_and_clean;
             # exhausted clean_project retries alone do not provide a failed-settle snapshot.
@@ -2403,46 +2906,19 @@ def final_cleanup():
     progress = {}
     if not wait_for_project_ready(timeout=MODEL_SETTLE_TIMEOUT,
                                   failure_details=failure_details, progress=progress,
-                                  ignore_projects={EXT_OBJECTS_PROJECT}):
+                                  ignore_projects=optional):
         _failed_settle_evidence(progress.get("last_list_projects", ""))
         raise E2EModelResetFailed(
             "clean_project succeeded for every project, but %s; %s, so the model is not "
             "guaranteed to be back in sync."
             % (failure_details[0], _settle_progress_note(progress)))
 
-    # ExternalObjects is not installed/loaded on every stand. Keep its attempt completely outside
-    # the mandatory projects' outcome above, but retain their full revert+clean+settle contract
-    # before allowing snapshot_model_baseline to read its in-memory inventory.
-    external_skip_reason = None
-    try:
-        cleaned, clean_attempts, settle_failures, settle_failure = \
-            _revert_and_clean(EXT_OBJECTS_PROJECT, reset_all_fixtures)
-        if not cleaned:
-            external_skip_reason = _clean_failure_cause(
-                clean_attempts, settle_failures, settle_failure)
-        else:
-            failure_details = []
-            if wait_for_project_ready(timeout=MODEL_SETTLE_TIMEOUT,
-                                      failure_details=failure_details):
-                _EXT_OBJECTS_MODEL_SYNCED = True
-            else:
-                external_skip_reason = (failure_details[0] if failure_details
-                                        else "projects did not become ready after clean_project")
-    except E2ECallTimeout:
-        # NOT best-effort. A timeout means the request may still be running server-side and it has
-        # already armed the global latch, so continuing would carry the whole run on a latched
-        # harness and pin the failure on whichever test trips over it next. The baseline capture
-        # re-raises it for this same reason; "optional fixture" means its model may be absent, not
-        # that the server may be unreachable.
-        raise
-    except Exception as e:
-        # A latched optional failure must surface before any later call inherits its abort.
-        if calls_aborted():
-            raise
-        external_skip_reason = str(e) or type(e).__name__
-    if not _EXT_OBJECTS_MODEL_SYNCED:
-        print("!! optional project %r model synchronization skipped: %s"
-              % (EXT_OBJECTS_PROJECT, external_skip_reason or "unknown failure"), flush=True)
+    # The optional fixtures are not installed/loaded on every stand. Keep each attempt completely
+    # outside the mandatory projects' outcome above (and outside the other optional ones'), but
+    # retain the full revert+clean+settle contract before allowing snapshot_model_baseline to read
+    # its in-memory inventory.
+    for project in OPTIONAL_FIXTURE_PROJECTS:
+        _sync_optional_fixture(project, optional - {project})
     reset_all_fixtures()
     # Deliberately NOT _mark_model_synced() here. This function cleans and settles but never
     # VERIFIES the baseline came back (that is reset_model's _baseline_mismatch), and only a
@@ -2450,9 +2926,94 @@ def final_cleanup():
     # flag would come to mean "we tried" instead of "we checked".
 
 
+def restore_extension_fixture(ctx):
+    """Put the EXTENSION fixture back - its files AND EDT's model of it - from inside a test that
+    wrote into it, and FAIL the test when that cannot be done.
+
+    The one such restore: every test that writes into the extension (create_metadata's
+    extension-owned form, apply_quick_fix, adopt_metadata_object's nested subsystems) calls this
+    instead of carrying a copy. The orchestrator resets after the test as well - a call that named
+    the extension makes that reset follow it there - so this exists for what that reset comes too
+    late for: a test that measures its NEXT step against the committed extension (apply_quick_fix
+    judges every candidate against it), and a test that fails half way and must not hand a polluted
+    extension to the extension-reading tests after it.
+
+    One pass, each step closing a race: revert every fixture path; clean_project the extension, so
+    EDT drops what the test wrote and re-imports the clean files; settle; revert again (an export of
+    the test's write still in flight, or clean_project's own revalidation, may have rewritten a
+    file); settle again, because that second revert is a change EDT has not seen yet and whatever
+    reads the extension next would race its re-import. Retrying belongs to the orchestrator's reset.
+
+    Every step is CHECKED (settle_or_fail, not a bare wait whose answer is dropped): a refused
+    clean_project or a project that never settles fails the test here, named by ctx, while it is
+    still attributable - carrying on would hand the next step a measurement against the last one's
+    leftovers.
+
+    @param ctx what is being undone, for the failure message (e.g. "a nested-subsystem adoption")"""
+    reset_all_fixtures()
+    assert_ok(call("clean_project", {"projectName": TESTS_PROJECT}),
+              "clean_project of the extension %s after %s - without it EDT's model keeps what the test "
+              "wrote" % (TESTS_PROJECT, ctx))
+    settle_or_fail("whatever reads the extension after %s" % ctx)
+    reset_all_fixtures()
+    settle_or_fail("whatever reads the extension after %s" % ctx)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Form render mode (an independent oracle for render-dependent form tests)
+# ──────────────────────────────────────────────────────────────────────────────
+def _form_render_flag(flag):
+    """formRenderFlags[flag] from get_server_status; fails the test when it cannot be read.
+
+    A prerequisite that cannot be established is a failure, not a skip: only a
+    positively reported missing prerequisite may skip a test."""
+    r = call("get_server_status", {})
+    if r.is_error or not isinstance(r.structured, dict):
+        _fail("form render prerequisites: get_server_status failed: %s" % (r.error_text() or "")[:300])
+    flags = r.structured.get("formRenderFlags")
+    state = flags.get(flag) if isinstance(flags, dict) else None
+    if not isinstance(state, dict) or state.get("atStartup") not in ("on", "off"):
+        _fail("form render prerequisites: get_server_status reports no readable formRenderFlags.%s "
+              "(got %r)" % (flag, state))
+    return state
+
+
+def native_form_layout_render_mode():
+    """EDT's native form layout render mode, 'on' or 'off'; fails the test when unreadable.
+
+    formRenderFlags.nativeFormLayoutRender.atStartup is EDT's own
+    NativeRenderService.isNativeRender() at plugin activation, so EDT's default (native
+    when the property is absent) is reported correctly. Tests branch on this instead of
+    accepting whichever outcome a form tool happens to return. Opening an editor and
+    resolving a name need no particular mode."""
+    return _form_render_flag("nativeFormLayoutRender")["atStartup"]
+
+
+def buffered_form_render_at_startup():
+    """-DnativeFormBufferedLayoutRender at plugin activation, 'on' or 'off'; fails the
+    test when unreadable. Only the startup value counts: EDT builds its offscreen buffer
+    once, so changing the launch flag requires an EDT restart. It governs
+    the IMAGE only - an editor opens and resolves names without it."""
+    return _form_render_flag("nativeFormBufferedLayoutRender")["atStartup"]
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Assertions
 # ──────────────────────────────────────────────────────────────────────────────
+def snapshot_application_bindings(project):
+    """Observe default and RuntimeClient IDs for infobase refusal/validation checks."""
+    applications = call("get_applications", {"projectName": project})
+    assert_ok(applications, "snapshot application default")
+    configurations = call("list_configurations", {"projectName": project, "type": "client"})
+    assert_ok(configurations, "snapshot RuntimeClient bindings")
+    assert isinstance(applications.structured, dict), applications.structured
+    assert isinstance(configurations.structured, dict), configurations.structured
+    configs = configurations.structured["configurations"]
+    assert isinstance(configs, list), configs
+    return (applications.structured.get("defaultApplicationId"),
+            sorted((entry["name"], entry.get("applicationId")) for entry in configs))
+
+
 def assert_ok(result, ctx=""):
     if result.is_error:
         _fail("expected success but tool returned isError [%s]: %s" % (ctx, result.error_text()[:300]))
@@ -2706,21 +3267,46 @@ def poll_disk_contains(rel_path, substr, timeout=10, ctx=""):
     file: poll_diff_contains is satisfied by the substring appearing in ANY changed file, so when a
     write touches several files (an object plus the ones it cascades into) it can release while the
     file about to be read is still being exported - a race that only shows up on a fast machine.
-    A missing file just keeps polling: the export may not have created it yet."""
-    full = os.path.join(PROJECT_DIR, rel_path)
+    A missing file just keeps polling: the export may not have created it yet.
+
+    Returns the text of the read that matched. Assert on THAT text rather than reading the file
+    again: a later export pass may be rewriting it, and a second read can land mid-rewrite."""
+    return poll_disk_contains_all(rel_path, [substr], timeout=timeout, ctx=ctx)
+
+
+def poll_disk_contains_all(rel_path, substrs, timeout=10, ctx="", fixture_rel=None, *, check=None):
+    """Poll until ONE read of a named fixture file contains every substring in substrs, and return
+    that read. Polling each needle separately proves each was present at SOME moment, not that one
+    snapshot of the file holds them all. An optional check(text) must also accept that same read;
+    use it for structural comparisons that cannot be expressed as substring checks.
+
+    rel_path is relative to the BASE project by default, or to the fixture path `fixture_rel` names
+    (TESTS_PROJECT_REL for the extension, say) - one poll for every fixture, not a copy per root.
+
+    A file that does not exist yet, or cannot be read at this moment (a read that lands while the
+    export replaces it), is no verdict either: the poll goes on until the timeout, and only then
+    fails, naming what the last read saw."""
+    root = PROJECT_DIR if fixture_rel is None else os.path.join(REPO_ROOT, *fixture_rel.split("/"))
+    shown = rel_path if fixture_rel is None else "%s/%s" % (fixture_rel, rel_path)
+    full = os.path.join(root, rel_path)
     deadline = time.time() + timeout
     last = ""
     while time.time() < deadline:
         try:
             with open(full, encoding="utf-8", errors="replace") as f:
                 last = f.read()
-            if substr in last:
-                return
+            if all(s in last for s in substrs) and (check is None or check(last)):
+                return last
         except FileNotFoundError:
             last = "(file does not exist yet)"
+        except OSError as e:
+            last = "(file could not be read yet: %s)" % e
         time.sleep(0.5)
+    missing = [s for s in substrs if s not in last]
+    if check is not None and not missing:
+        _fail("expected %s to pass its content check [%s]; it holds:\n%s" % (shown, ctx, last[:700]))
     _fail("expected %s to contain %r [%s]; it holds:\n%s"
-          % (rel_path, substr, ctx, last[:700]))
+          % (shown, missing[0] if len(missing) == 1 else missing, ctx, last[:700]))
 
 
 def assert_disk_path_gone(rel_path, ctx=""):
@@ -2832,6 +3418,103 @@ def poll_disk_count(rel_path, substr, expected, timeout=10, stable_for=1.0, ctx=
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Written-object marker report of create_metadata / modify_metadata (#643)
+# ──────────────────────────────────────────────────────────────────────────────
+MARKER_FIELDS = ("markersIncomplete", "markersIncompleteReason", "markerCount", "markers")
+MARKER_REASONS = frozenset({"validationPending", "validationUnobservable", "objectUnresolved",
+                            "readFailed", "checksDisabled"})
+MARKER_ROW_KEYS = frozenset({"object", "severity", "checkId", "message", "location", "hasQuickFix"})
+MARKER_MAX_ROWS = 20
+
+
+def assert_marker_contract(structured, ctx=""):
+    """Assert the #643 marker members of a write success and return (incomplete, rows).
+
+    The flag is a real boolean, the reason is present IFF the flag is true and is one of the
+    documented values, markerCount >= len(markers), at most 20 rows, each row carries exactly
+    the documented keys."""
+    if not isinstance(structured, dict):
+        _fail("a write success must carry structuredContent [%s]: %r" % (ctx, structured))
+    incomplete = structured.get("markersIncomplete")
+    if not isinstance(incomplete, bool):
+        _fail("markersIncomplete must be a boolean on a write that exported an object [%s]: %r"
+              % (ctx, structured))
+    reason = structured.get("markersIncompleteReason")
+    if incomplete and reason not in MARKER_REASONS:
+        _fail("markersIncomplete:true needs a documented reason [%s], got %r" % (ctx, reason))
+    if not incomplete and "markersIncompleteReason" in structured:
+        _fail("a complete report must not carry a reason [%s]: %r" % (ctx, reason))
+    rows = structured.get("markers")
+    count = structured.get("markerCount")
+    if not isinstance(rows, list) or not isinstance(count, int) or isinstance(count, bool):
+        _fail("markers must be a list and markerCount an integer [%s]: %r" % (ctx, structured))
+    if len(rows) > MARKER_MAX_ROWS or count < len(rows):
+        _fail("at most %d rows and markerCount >= rows [%s]: count=%r rows=%d"
+              % (MARKER_MAX_ROWS, ctx, count, len(rows)))
+    for row in rows:
+        if not isinstance(row, dict) or not MARKER_ROW_KEYS.issuperset(row.keys()) \
+                or not {"object", "checkId", "message", "location", "hasQuickFix"}.issubset(row.keys()):
+            _fail("a marker row must be {object, severity, checkId, message, location, hasQuickFix} "
+                  "[%s]: %r" % (ctx, row))
+    # The marker sentence is appended as a sentence: "Created X. EDT ...", never "Created X EDT".
+    message = structured.get("message")
+    if isinstance(message, str):
+        joined = re.search(r"(\S)( +)EDT (validation of|reports) ", message)
+        if joined and (joined.group(1) not in ".!?" or joined.group(2) != " "
+                       or ".. EDT" in message):
+            _fail("the marker sentence must follow a closed sentence [%s]: %r" % (ctx, message))
+    return incomplete, rows
+
+
+def assert_no_marker_fields(structured, ctx=""):
+    """A response that wrote no object (or is not a create/modify success) carries none of the four."""
+    present = [k for k in MARKER_FIELDS if isinstance(structured, dict) and k in structured]
+    if present:
+        _fail("unexpected marker members %s [%s]: %r" % (present, ctx, structured))
+
+
+def project_error_rows(fqn, project=PROJECT, include_modules=False):
+    """The settled `get_project_errors objectFqns=[fqn]` rows as (checkId, message, location).
+
+    BSL-module rows (a non-empty Module path cell) are left out unless asked for: they are keyed
+    by module URI and are outside the write tools' per-object slice."""
+    r = call("get_project_errors", {"projectName": project, "objectFqns": [fqn],
+                                    "limit": 1000})
+    assert_ok(r, "get_project_errors objectFqns=[%s]" % fqn)
+    structured = r.structured if isinstance(r.structured, dict) else {}
+    report = structured.get("report") if isinstance(structured.get("report"), str) else (r.text or "")
+    rows = []
+    header_seen = False
+    for line in report.splitlines():
+        cells = split_markdown_row(line)
+        if not cells:
+            continue
+        if not header_seen:
+            header_seen = cells[0] == "Description"
+            continue
+        if set("".join(cells)) <= set("-: "):
+            continue  # the separator row
+        if len(cells) < 5:
+            continue
+        message, location, module_path, check = cells[0], cells[1], cells[2], cells[4]
+        if module_path and not include_modules:
+            continue
+        rows.append((check.strip("`"), message, location))
+    return rows
+
+
+def poll_project_error_check(fqn, check_id, timeout=60, project=PROJECT):
+    """Poll get_project_errors objectFqns=[fqn] until a `check_id` row shows up; True when it did."""
+    deadline = time.time() + timeout
+    while True:
+        if any(row[0] == check_id for row in project_error_rows(fqn, project)):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(2)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Live-infobase helpers (used only by the gated test_live_roundtrip.py suite)
 # ──────────────────────────────────────────────────────────────────────────────
 def parse_yaxunit_counts(text):
@@ -2934,8 +3617,11 @@ def wait_until_no_running_launch(config_name=None, timeout=60):
 REGISTRY = []
 
 
-def e2e_test(tool, kind="read", last=False):
+def e2e_test(tool, kind="read", last=False, first=False):
     """Register a test function. kind: 'read' | 'write' | 'action'.
+
+    first=True runs before ordinary tests within the selected shard. Use it only for a test
+    whose exact pin needs an EDT that no earlier test has changed.
 
     last=True defers the test to the END of the run. Use it only when the SUBJECT of the test
     is the run itself rather than one tool's behaviour - the EDT-log ratchet, which can only
@@ -2945,6 +3631,6 @@ def e2e_test(tool, kind="read", last=False):
     """
     def deco(fn):
         REGISTRY.append({"func": fn, "tool": tool, "kind": kind, "name": fn.__name__,
-                         "last": last})
+                         "last": last, "first": first})
         return fn
     return deco

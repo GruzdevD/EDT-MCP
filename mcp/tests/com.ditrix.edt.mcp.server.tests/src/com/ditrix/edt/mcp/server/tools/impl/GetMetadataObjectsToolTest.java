@@ -271,6 +271,29 @@ public class GetMetadataObjectsToolTest
     }
 
     @Test
+    public void testEnglishAndCyrillicFiltersUnderTurkishDefaultLocale()
+    {
+        java.util.Locale original = java.util.Locale.getDefault();
+        java.util.Locale display = java.util.Locale.getDefault(java.util.Locale.Category.DISPLAY);
+        java.util.Locale format = java.util.Locale.getDefault(java.util.Locale.Category.FORMAT);
+        try
+        {
+            java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr-TR"));
+            CommonModule object = metadataObject("INVOICE", "Invoice", "ИМЕНА");
+            GetMetadataObjectsTool tool = new GetMetadataObjectsTool();
+            assertTrue(tool.matches(object, "invoice", GetMetadataObjectsTool.FilterMode.TEXT, "en"));
+            assertTrue(tool.matches(object, "имена", GetMetadataObjectsTool.FilterMode.TEXT, "ru"));
+            testTextFilterMatchesRussianNameCaseInsensitively();
+        }
+        finally
+        {
+            java.util.Locale.setDefault(original);
+            java.util.Locale.setDefault(java.util.Locale.Category.DISPLAY, display);
+            java.util.Locale.setDefault(java.util.Locale.Category.FORMAT, format);
+        }
+    }
+
+    @Test
     public void testTextFilterMatchesRussianNameCaseInsensitively()
     {
         String russianName = "\u0412\u0437\u0430\u0438\u043C\u043E\u0437\u0430\u0447\u0435\u0442"; //$NON-NLS-1$
@@ -507,4 +530,49 @@ public class GetMetadataObjectsToolTest
         assertNull(tool.normalizeExternalMetadataType(""));  //$NON-NLS-1$
         assertNull(tool.normalizeExternalMetadataType(null));
     }
+    @Test public void headlessReadUsesBmAndLanguageCodeWithoutWorkbench() throws Exception
+    {
+        try (var fixture = new com.ditrix.edt.mcp.server.utils.HeadlessReadFixture())
+        {
+            for (String type : new String[] { "CommonModule", "ОбщийМодуль" })
+            {
+                for (String name : new String[] { "EnglishName", "Код" })
+                {
+                    String result = fixture.call(new GetMetadataObjectsTool(), Map.of("metadataType", type, "nameFilter", name));
+                    assertTrue(result, result.contains("| " + name + " | Translated " + name + " |"));
+                    assertEquals(result, fixture.callWindowed(new GetMetadataObjectsTool(),
+                        Map.of("metadataType", type, "nameFilter", name)));
+                }
+            }
+            String refused = fixture.call(new GetMetadataObjectsTool(), Map.of("nameFilter", "Translated Код"));
+            assertFalse(refused, refused.contains("| Код |"));
+            assertTrue(fixture.reads >= 5);
+        }
+    }
+
+    @Test
+    public void testPaletteColorTypeFilterCollectsOnlyPaletteColors()
+    {
+        var config = MdClassFactory.eINSTANCE.createConfiguration();
+        var palette = MdClassFactory.eINSTANCE.createPaletteColor();
+        palette.setName("Accent");
+        config.getPaletteColors().add(palette);
+        var style = MdClassFactory.eINSTANCE.createStyleItem();
+        style.setName("Accent");
+        config.getStyleItems().add(style);
+        for (String token : new String[] {"PaletteColor", "PaletteColors",
+            "\u0426\u0432\u0435\u0442\u041F\u0430\u043B\u0438\u0442\u0440\u044B", // ЦветПалитры
+            "\u0426\u0432\u0435\u0442\u0430\u041F\u0430\u043B\u0438\u0442\u0440\u044B"}) // ЦветаПалитры
+        {
+            List<GetMetadataObjectsTool.MetadataInfo> rows = new ArrayList<>();
+            int total = new GetMetadataObjectsTool().collectMetadataObjects(config,
+                MetadataTypeUtils.resolve(token), rows, null,
+                GetMetadataObjectsTool.FilterMode.NAME, 10, "en");
+            assertEquals(token, 1, total);
+            assertEquals(1, rows.size());
+            assertEquals("PaletteColor", rows.get(0).type);
+            assertEquals("Accent", rows.get(0).name);
+        }
+    }
+
 }

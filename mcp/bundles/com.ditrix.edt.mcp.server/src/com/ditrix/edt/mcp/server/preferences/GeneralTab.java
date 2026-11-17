@@ -47,6 +47,8 @@ import com.ditrix.edt.mcp.server.UpdateChecker;
 import com.ditrix.edt.mcp.server.protocol.McpConstants;
 import com.ditrix.edt.mcp.server.tools.impl.vanessa.VaRunnerProjectFactory;
 import com.ditrix.edt.mcp.server.transport.HttpTransport;
+import com.ditrix.edt.mcp.server.transport.StdioPluginSupport;
+import com.ditrix.edt.mcp.server.transport.TransportStatus;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 
 /**
@@ -59,12 +61,18 @@ public class GeneralTab
     private final Composite composite;
     private final IPreferenceStore store;
 
+    private Group httpGroup;
+    private Button httpEnabledCheck;
+    private Button copyConfigButton;
+    private Label stdioStatusLabel;
+    private Label stdioLaunchNote;
     private Spinner portSpinner;
     private Button autoStartCheck;
     private Text checksFolderText;
     private Button allowRemoteCheck;
     private Text authTokenText;
     private Button plainTextCheck;
+    private Button allowUiNavigationCheck;
     private Button enhanceNavigatorCheck;
     private Button showTagsCheck;
     private Combo tagStyleCombo;
@@ -79,6 +87,8 @@ public class GeneralTab
     private Text allureReportDirText;
     private Combo vaRunnerProjectCombo;
     private Text vaSourceTemplateText;
+    // A saved enable is still pending until a listener actually runs.
+    private boolean httpEnablePending;
 
     /** Track created images for disposal */
     private final List<org.eclipse.swt.graphics.Image> managedImages = new ArrayList<>();
@@ -112,14 +122,17 @@ public class GeneralTab
         layout.marginHeight = 5;
         composite.setLayout(layout);
 
+        createHttpSection();
         createServerSection();
         createLimitsSection();
         createTagsSection();
         createConsentSection();
         createUpdateSection();
-        createServerControlSection();
         createAllureSection();
         createVaRunnerSection();
+        createConnectionSection();
+        updateHttpVisibility();
+        scheduleStatusRefresh();
     }
 
     public Composite getControl()
@@ -127,19 +140,30 @@ public class GeneralTab
         return composite;
     }
 
-    private void createServerSection()
+    private void createHttpSection()
     {
+        httpEnabledCheck = new Button(composite, SWT.CHECK);
+        httpEnabledCheck.setText(Messages.GeneralTab_HttpEnabled);
+        httpEnabledCheck.setSelection(store.getBoolean(PreferenceConstants.PREF_HTTP_ENABLED));
+        httpEnabledCheck.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false, 3, 1));
+        httpEnabledCheck.addListener(SWT.Selection, event -> updateHttpVisibility());
+
+        httpGroup = new Group(composite, SWT.NONE);
+        httpGroup.setText(Messages.GeneralTab_HttpGroup);
+        httpGroup.setLayout(new GridLayout(3, false));
+        httpGroup.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false, 3, 1));
+
         // Port
-        createLabel(Messages.GeneralTab_ServerPort);
-        portSpinner = new Spinner(composite, SWT.BORDER);
+        createHttpLabel(Messages.GeneralTab_ServerPort);
+        portSpinner = new Spinner(httpGroup, SWT.BORDER);
         portSpinner.setMinimum(1024);
         portSpinner.setMaximum(65535);
         portSpinner.setSelection(store.getInt(PreferenceConstants.PREF_PORT));
         portSpinner.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, false, false));
-        createLabel(""); // spacer //$NON-NLS-1$
+        createHttpLabel(""); // spacer //$NON-NLS-1$
 
         // Auto-start
-        autoStartCheck = new Button(composite, SWT.CHECK);
+        autoStartCheck = new Button(httpGroup, SWT.CHECK);
         autoStartCheck.setText(Messages.GeneralTab_AutoStart);
         autoStartCheck.setSelection(store.getBoolean(PreferenceConstants.PREF_AUTO_START));
         GridData autoStartGd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
@@ -147,7 +171,7 @@ public class GeneralTab
         autoStartCheck.setLayoutData(autoStartGd);
 
         // Allow remote (non-loopback) access — security
-        allowRemoteCheck = new Button(composite, SWT.CHECK);
+        allowRemoteCheck = new Button(httpGroup, SWT.CHECK);
         allowRemoteCheck.setText(Messages.GeneralTab_AllowRemote);
         allowRemoteCheck.setSelection(store.getBoolean(PreferenceConstants.PREF_ALLOW_REMOTE_ACCESS));
         GridData allowRemoteGd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
@@ -155,12 +179,91 @@ public class GeneralTab
         allowRemoteCheck.setLayoutData(allowRemoteGd);
 
         // Auth token (empty = authentication disabled)
-        createLabel(Messages.GeneralTab_AuthToken);
-        authTokenText = new Text(composite, SWT.BORDER | SWT.PASSWORD);
+        createHttpLabel(Messages.GeneralTab_AuthToken);
+        authTokenText = new Text(httpGroup, SWT.BORDER | SWT.PASSWORD);
         authTokenText.setText(store.getString(PreferenceConstants.PREF_AUTH_TOKEN));
         GridData authTokenGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
         authTokenGd.horizontalSpan = 2;
         authTokenText.setLayoutData(authTokenGd);
+        stdioLaunchNote = new Label(httpGroup, SWT.WRAP);
+        stdioLaunchNote.setText(Messages.GeneralTab_StdioLaunchNote);
+        stdioLaunchNote.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false, 3, 1));
+        createServerControlSection();
+    }
+
+    private void createConnectionSection()
+    {
+        stdioStatusLabel = new Label(composite, SWT.NONE);
+        stdioStatusLabel.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false, 3, 1));
+        copyConfigButton = new Button(composite, SWT.PUSH);
+        copyConfigButton.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false, 3, 1));
+        copyConfigButton.addListener(SWT.Selection, event -> {
+            try
+            {
+                copyToClipboard(connectionMode(TransportStatus.read()) == ConnectionMode.STDIO
+                    ? StdioPluginSupport.clientConfiguration() : mcpClientConfigJson());
+            }
+            catch (Exception failure)
+            {
+                MessageDialog.openError(composite.getShell(), Messages.GeneralTab_CopyFailedTitle,
+                    failure.getMessage());
+            }
+        });
+        refreshServerState();
+    }
+
+    private ConnectionMode connectionMode(TransportStatus status)
+    {
+        return ConnectionMode.resolve(httpEnabledCheck.getSelection(),
+            Boolean.getBoolean("edt.mcp.stdioOnly"), status.http()); //$NON-NLS-1$
+    }
+
+    private void updateHttpVisibility()
+    {
+        boolean visible = httpEnabledCheck.getSelection();
+        ((GridData)httpGroup.getLayoutData()).exclude = !visible;
+        httpGroup.setVisible(visible);
+        updateConnectionState();
+        composite.layout(true, true);
+        composite.requestLayout();
+    }
+
+    private void updateConnectionState()
+    {
+        TransportStatus status = TransportStatus.read();
+        boolean noteVisible = Boolean.getBoolean("edt.mcp.stdioOnly") && !status.http(); //$NON-NLS-1$
+        ((GridData)stdioLaunchNote.getLayoutData()).exclude = !noteVisible;
+        stdioLaunchNote.setVisible(noteVisible);
+        if (copyConfigButton != null)
+        {
+            boolean stdio = connectionMode(status) == ConnectionMode.STDIO;
+            copyConfigButton.setText(stdio ? Messages.GeneralTab_CopyStdioConfig : Messages.GeneralTab_CopyConfig);
+            copyConfigButton.setToolTipText(stdio ? Messages.GeneralTab_CopyStdioConfig_Tooltip
+                : Messages.GeneralTab_CopyConfig_Tooltip);
+            stdioStatusLabel.setText(status.ipc() ? Messages.GeneralTab_StdioReady : Messages.GeneralTab_StdioUnavailable);
+        }
+    }
+
+    private void scheduleStatusRefresh()
+    {
+        composite.getDisplay().timerExec(1000, () -> {
+            if (!composite.isDisposed())
+            {
+                refreshServerState();
+                scheduleStatusRefresh();
+            }
+        });
+    }
+
+    private void createServerSection()
+    {
+        allowUiNavigationCheck = new Button(composite, SWT.CHECK);
+        allowUiNavigationCheck.setText(Messages.GeneralTab_AllowUiNavigation);
+        allowUiNavigationCheck.setToolTipText(Messages.GeneralTab_AllowUiNavigation_Tooltip);
+        allowUiNavigationCheck.setSelection(store.getBoolean(PreferenceConstants.PREF_ALLOW_UI_NAVIGATION));
+        GridData navigationGd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
+        navigationGd.horizontalSpan = 3;
+        allowUiNavigationCheck.setLayoutData(navigationGd);
 
         // Checks folder
         createLabel(Messages.GeneralTab_ChecksFolder);
@@ -368,25 +471,31 @@ public class GeneralTab
         }
     }
 
+    /**
+     * A row of controls packed to the LEFT, spanning the section's full width. Buttons live here
+     * rather than in the section grid itself: a grid column shared with a label that stretches
+     * carries every button in it to the far right, away from the controls it belongs with.
+     */
+    private static Composite leftPackedBar(Composite parent, int columns)
+    {
+        Composite bar = new Composite(parent, SWT.NONE);
+        GridLayout barLayout = new GridLayout(columns, false);
+        barLayout.marginWidth = 0;
+        barLayout.marginHeight = 0;
+        bar.setLayout(barLayout);
+        GridData barGd = new GridData(SWT.LEFT, SWT.CENTER, true, false);
+        barGd.horizontalSpan = 2;
+        bar.setLayoutData(barGd);
+        return bar;
+    }
+
     private void createServerControlSection()
     {
-        // Separator
-        Label separator = new Label(composite, SWT.HORIZONTAL | SWT.SEPARATOR);
-        GridData separatorGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
-        separatorGd.horizontalSpan = 3;
-        separatorGd.verticalIndent = 10;
-        separator.setLayoutData(separatorGd);
-
-        // Section title
-        Label sectionTitle = new Label(composite, SWT.NONE);
-        sectionTitle.setText(Messages.GeneralTab_ServerControl);
-        GridData titleGd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
-        titleGd.horizontalSpan = 3;
-        sectionTitle.setLayoutData(titleGd);
-
-        // Container for controls
-        Composite controlComposite = new Composite(composite, SWT.NONE);
-        controlComposite.setLayout(new GridLayout(4, false));
+        Composite controlComposite = new Composite(httpGroup, SWT.NONE);
+        GridLayout controlLayout = new GridLayout(2, false);
+        controlLayout.marginWidth = 0;
+        controlLayout.marginHeight = 0;
+        controlComposite.setLayout(controlLayout);
         GridData compositeGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
         compositeGd.horizontalSpan = 3;
         controlComposite.setLayoutData(compositeGd);
@@ -396,10 +505,10 @@ public class GeneralTab
         statusTitleLabel.setText(Messages.GeneralTab_Status);
 
         statusLabel = new Label(controlComposite, SWT.NONE);
-        GridData statusGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
-        statusGd.horizontalSpan = 3;
-        statusLabel.setLayoutData(statusGd);
+        statusLabel.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
         updateStatusLabel();
+
+        Composite buttonBar = leftPackedBar(controlComposite, 3);
 
         // Control buttons
         ImageDescriptor startIcon = AbstractUIPlugin.imageDescriptorFromPlugin(
@@ -409,7 +518,7 @@ public class GeneralTab
         ImageDescriptor restartIcon = AbstractUIPlugin.imageDescriptorFromPlugin(
             Activator.PLUGIN_ID, "icons/restart.png"); //$NON-NLS-1$
 
-        startButton = new Button(controlComposite, SWT.PUSH);
+        startButton = new Button(buttonBar, SWT.PUSH);
         startButton.setText(Messages.GeneralTab_Start);
         setManagedImage(startButton, startIcon);
         startButton.addSelectionListener(new SelectionAdapter()
@@ -421,7 +530,7 @@ public class GeneralTab
             }
         });
 
-        stopButton = new Button(controlComposite, SWT.PUSH);
+        stopButton = new Button(buttonBar, SWT.PUSH);
         stopButton.setText(Messages.GeneralTab_Stop);
         setManagedImage(stopButton, stopIcon);
         stopButton.addSelectionListener(new SelectionAdapter()
@@ -433,7 +542,7 @@ public class GeneralTab
             }
         });
 
-        restartButton = new Button(controlComposite, SWT.PUSH);
+        restartButton = new Button(buttonBar, SWT.PUSH);
         restartButton.setText(Messages.GeneralTab_Restart);
         setManagedImage(restartButton, restartIcon);
         restartButton.addSelectionListener(new SelectionAdapter()
@@ -445,20 +554,13 @@ public class GeneralTab
             }
         });
 
-        // Empty placeholder for alignment
-        new Label(controlComposite, SWT.NONE);
-
-        // Connection info. The label used to read "http://localhost:<port>/mcp" literally, so the
-        // one thing a user comes here for - the address to paste into their agent - had to be
-        // assembled by hand from the spinner above it (#464). It now shows the real URL and
-        // follows the spinner, and the two buttons put it on the clipboard.
-        endpointLabel = new Label(controlComposite, SWT.NONE);
-        GridData infoGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
-        infoGd.horizontalSpan = 2;
-        endpointLabel.setLayoutData(infoGd);
+        // The endpoint and Copy URL use the running port, or the pending port when stopped.
+        Composite infoBar = leftPackedBar(controlComposite, 2);
+        endpointLabel = new Label(infoBar, SWT.NONE);
+        endpointLabel.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
         updateEndpointLabel();
 
-        Button copyUrlButton = new Button(controlComposite, SWT.PUSH);
+        Button copyUrlButton = new Button(infoBar, SWT.PUSH);
         copyUrlButton.setText(Messages.GeneralTab_CopyUrl);
         copyUrlButton.setToolTipText(Messages.GeneralTab_CopyUrl_Tooltip);
         copyUrlButton.addSelectionListener(new SelectionAdapter()
@@ -467,18 +569,6 @@ public class GeneralTab
             public void widgetSelected(SelectionEvent e)
             {
                 copyToClipboard(serviceUrl());
-            }
-        });
-
-        Button copyConfigButton = new Button(controlComposite, SWT.PUSH);
-        copyConfigButton.setText(Messages.GeneralTab_CopyConfig);
-        copyConfigButton.setToolTipText(Messages.GeneralTab_CopyConfig_Tooltip);
-        copyConfigButton.addSelectionListener(new SelectionAdapter()
-        {
-            @Override
-            public void widgetSelected(SelectionEvent e)
-            {
-                copyToClipboard(mcpClientConfigJson());
             }
         });
 
@@ -627,8 +717,8 @@ public class GeneralTab
      * <p>
      * This is ONE shape, not a universal one, and the button says so: Cursor, VS Code and Claude
      * Code take it as written, while Cline wants {@code type: "streamableHttp"}, Antigravity a
-     * {@code serverUrl} field, and OpenCode an {@code mcp} wrapper with {@code type: "remote"} -
-     * see the README's per-client sections. Generating those from a picker would mean guessing
+     * {@code serverUrl} field -
+     * see docs/clients.md. Generating those from a picker would mean guessing
      * whether each accepts an auth header, which their documented examples do not show, so it
      * stays out until someone can verify it against the real clients.
      * </p>
@@ -695,7 +785,10 @@ public class GeneralTab
             text = text + " " + Messages.GeneralTab_EndpointLockedOut; //$NON-NLS-1$
         }
         endpointLabel.setText(text);
-        endpointLabel.getParent().layout();
+        // The whole SECTION is laid out, not just the bar holding the label: a bar sizes itself
+        // during its parent's layout, so laying out only the bar would keep it at its old width
+        // and push the buttons beside a longer line out of view.
+        composite.layout(true, true);
     }
 
     /**
@@ -725,10 +818,36 @@ public class GeneralTab
      */
     public void performOk()
     {
+        boolean wasEnabled = store.getBoolean(PreferenceConstants.PREF_HTTP_ENABLED);
+        if (!wasEnabled && httpEnabledCheck.getSelection() && autoStartCheck.getSelection())
+        {
+            httpEnablePending = true;
+        }
+        savePreferences();
+        McpServer server = Activator.getDefault().getMcpServer();
+        if (!httpEnabledCheck.getSelection())
+        {
+            httpEnablePending = false;
+            if (server != null && server.isRunning())
+            {
+                stopServer();
+            }
+        }
+        else if (httpEnablePending && autoStartCheck.getSelection() && server != null && !server.isRunning())
+        {
+            startServer();
+        }
+        refreshServerState();
+    }
+
+    private void savePreferences()
+    {
+        store.setValue(PreferenceConstants.PREF_HTTP_ENABLED, httpEnabledCheck.getSelection());
         store.setValue(PreferenceConstants.PREF_PORT, portSpinner.getSelection());
         store.setValue(PreferenceConstants.PREF_AUTO_START, autoStartCheck.getSelection());
         store.setValue(PreferenceConstants.PREF_CHECKS_FOLDER, checksFolderText.getText());
         store.setValue(PreferenceConstants.PREF_PLAIN_TEXT_MODE, plainTextCheck.getSelection());
+        store.setValue(PreferenceConstants.PREF_ALLOW_UI_NAVIGATION, allowUiNavigationCheck.getSelection());
         store.setValue(PreferenceConstants.PREF_ALLOW_REMOTE_ACCESS, allowRemoteCheck.getSelection());
         // Stored the way it is compared. Surrounding whitespace cannot travel in an HTTP header
         // - the authorizer only ever sees the trimmed credential - so keeping it here would save
@@ -772,10 +891,13 @@ public class GeneralTab
      */
     public void performDefaults()
     {
+        httpEnabledCheck.setSelection(PreferenceConstants.DEFAULT_HTTP_ENABLED);
+        updateHttpVisibility();
         portSpinner.setSelection(PreferenceConstants.DEFAULT_PORT);
         autoStartCheck.setSelection(PreferenceConstants.DEFAULT_AUTO_START);
         checksFolderText.setText(PreferenceConstants.DEFAULT_CHECKS_FOLDER);
         plainTextCheck.setSelection(PreferenceConstants.DEFAULT_PLAIN_TEXT_MODE);
+        allowUiNavigationCheck.setSelection(PreferenceConstants.DEFAULT_ALLOW_UI_NAVIGATION);
         allowRemoteCheck.setSelection(PreferenceConstants.DEFAULT_ALLOW_REMOTE_ACCESS);
         authTokenText.setText(PreferenceConstants.DEFAULT_AUTH_TOKEN);
         enhanceNavigatorCheck.setSelection(PreferenceConstants.DEFAULT_ENHANCE_NAVIGATOR);
@@ -867,6 +989,7 @@ public class GeneralTab
         Shell shell = composite.getShell();
         if (server != null && server.isRunning())
         {
+            httpEnablePending = false;
             statusLabel.setText(NLS.bind(Messages.GeneralTab_RunningOnPort, server.getPort()));
             statusLabel.setForeground(shell.getDisplay().getSystemColor(SWT.COLOR_DARK_GREEN));
         }
@@ -886,6 +1009,7 @@ public class GeneralTab
         restartButton.setEnabled(running);
         // The endpoint speaks for the RUNNING port, so it changes meaning here too: this runs on
         // every start, stop and restart.
+        updateConnectionState();
         updateEndpointLabel();
     }
 
@@ -898,7 +1022,7 @@ public class GeneralTab
         }
         try
         {
-            performOk();
+            savePreferences();
             server.start(portSpinner.getSelection());
             updateStatusLabel();
             updateButtons();
@@ -919,9 +1043,14 @@ public class GeneralTab
         {
             return;
         }
-        server.stop();
-        updateStatusLabel();
-        updateButtons();
+        try
+        {
+            server.stop();
+        }
+        finally
+        {
+            refreshServerState();
+        }
     }
 
     private void restartServer()
@@ -933,7 +1062,7 @@ public class GeneralTab
         }
         try
         {
-            performOk();
+            savePreferences();
             server.restart(portSpinner.getSelection());
             updateStatusLabel();
             updateButtons();
@@ -973,6 +1102,13 @@ public class GeneralTab
             }
         }
         managedImages.clear();
+    }
+
+    private Label createHttpLabel(String text)
+    {
+        Label label = new Label(httpGroup, SWT.NONE);
+        label.setText(text);
+        return label;
     }
 
     private Label createLabel(String text)

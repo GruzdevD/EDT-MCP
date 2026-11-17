@@ -22,6 +22,11 @@ import org.eclipse.core.resources.IFolder;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.IPath;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Path;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.resource.ResourceSet;
+import org.eclipse.emf.ecore.resource.URIConverter;
 import org.junit.Test;
 
 /**
@@ -855,6 +860,25 @@ public class BslModuleUtilsTest
         assertFalse(r.contains("\n- ")); //$NON-NLS-1$
     }
 
+    @Test
+    public void testSingleNameNotFoundTextIsByteIdenticalToTheHistoricalShape()
+    {
+        // read_method_source / go_to_definition clients match this text: pin it whole.
+        assertEquals("Error: Method 'Foo' not found in CommonModules/X/Module.bsl\n\n" //$NON-NLS-1$
+            + "**Available methods** (2):\n\n- Alpha\n- Beta\n", //$NON-NLS-1$
+            BslModuleUtils.buildTextMethodNotFoundResponse(
+                "Foo", "CommonModules/X/Module.bsl", List.of("Alpha", "Beta"))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    @Test
+    public void testSeveralNamesNotFoundAreAllNamedInRequestOrder()
+    {
+        assertEquals("Error: Methods 'Zed', 'Foo' not found in CommonModules/X/Module.bsl\n\n" //$NON-NLS-1$
+            + "**Available methods** (1):\n\n- Alpha\n", //$NON-NLS-1$
+            BslModuleUtils.buildMethodsNotFoundResponse(List.of("Zed", "Foo"), //$NON-NLS-1$ //$NON-NLS-2$
+                "CommonModules/X/Module.bsl", List.of("Alpha"))); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     // ========== resolveModuleFile source-folder resolution (A27) ==========
     //
     // "src" is the EDT convention (and EDT's own SRC_FOLDER_NAME), so it is tried
@@ -1205,5 +1229,172 @@ public class BslModuleUtilsTest
             .find());
         assertFalse("a procedure must still not classify as a function", //$NON-NLS-1$
             BslModuleUtils.FUNC_KEYWORD_PATTERN.matcher("Async Procedure Baz(").find()); //$NON-NLS-1$
+    }
+
+    // ========== moduleLoadStatus / uriExists: a missing module is not a failure ==========
+
+    /** The module URI both directions are decided for. */
+    private static final URI MODULE_URI =
+        URI.createPlatformResourceURI("P/src/CommonModules/M/Module.bsl", true); //$NON-NLS-1$
+
+    @Test
+    public void testAbsentModuleLogsAtWarningWithoutAStack()
+    {
+        // A module that simply is not there is the caller asking for something that does not
+        // exist - a refusal, not a defect. loadModule answers null either way.
+        IStatus status = BslModuleUtils.moduleLoadStatus(false, MODULE_URI,
+            new IllegalStateException("does not exist")); //$NON-NLS-1$
+
+        assertEquals("an absent module must not be logged at ERROR", //$NON-NLS-1$
+            IStatus.WARNING, status.getSeverity());
+        assertNull("nothing failed, so there is no stack worth keeping", status.getException()); //$NON-NLS-1$
+        assertTrue(status.getMessage().contains(MODULE_URI.toString()));
+    }
+
+    @Test
+    public void testPresentModuleThatFailsToLoadKeepsErrorAndItsStack()
+    {
+        // The module IS there and the load still failed: a real defect (a broken grammar, a
+        // changed platform API). This is the entry the log triage must not lose.
+        IllegalStateException failure = new IllegalStateException("parser blew up"); //$NON-NLS-1$
+
+        IStatus status = BslModuleUtils.moduleLoadStatus(true, MODULE_URI, failure);
+
+        assertEquals(IStatus.ERROR, status.getSeverity());
+        assertSame("the stack must still reach the log", failure, status.getException()); //$NON-NLS-1$
+        assertTrue(status.getMessage().startsWith("Failed to load BSL module: ")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testUriExistsAsksTheResourceSetsOwnConverter()
+    {
+        URIConverter converter = mock(URIConverter.class);
+        ResourceSet resourceSet = mock(ResourceSet.class);
+        when(resourceSet.getURIConverter()).thenReturn(converter);
+        when(converter.exists(any(), any())).thenReturn(false);
+
+        assertFalse("the probe must report what the converter answered", //$NON-NLS-1$
+            BslModuleUtils.uriExists(resourceSet, MODULE_URI));
+    }
+
+    @Test
+    public void testUnanswerableProbeStaysLoud()
+    {
+        // If we cannot establish that the module is absent, we must NOT demote: an unknown state
+        // silencing an error is exactly the failure this change exists to prevent.
+        ResourceSet resourceSet = mock(ResourceSet.class);
+        when(resourceSet.getURIConverter()).thenThrow(new IllegalStateException("no converter")); //$NON-NLS-1$
+
+        assertTrue("a probe that cannot answer must report 'present' so the ERROR survives", //$NON-NLS-1$
+            BslModuleUtils.uriExists(resourceSet, MODULE_URI));
+    }
+
+    @Test
+    public void testModuleUriAddressesAFileOutsideSrc()
+    {
+        // resolveModuleFile also finds a module in a non-src top-level folder; the load must
+        // address THAT file, not re-derive <project>/src/<path>.
+        IFile elsewhere = mock(IFile.class);
+        when(elsewhere.getFullPath()).thenReturn(new Path("/P/source/CommonModules/M/Module.bsl")); //$NON-NLS-1$
+
+        assertEquals("platform:/resource/P/source/CommonModules/M/Module.bsl", //$NON-NLS-1$
+            BslModuleUtils.moduleUri(elsewhere).toString());
+    }
+
+    @Test
+    public void testModuleUriOfASrcFileIsTheConventionalAddress()
+    {
+        IFile inSrc = mock(IFile.class);
+        when(inSrc.getFullPath()).thenReturn(new Path("/P/src/CommonModules/M/Module.bsl")); //$NON-NLS-1$
+
+        assertEquals("an ordinary src/ module keeps the address it always had", //$NON-NLS-1$
+            MODULE_URI, BslModuleUtils.moduleUri(inSrc));
+    }
+
+    @Test
+    public void testModuleUriOfACyrillicPathInASpacedProjectMatchesTheOldAddress()
+    {
+        // The old construction encoded the joined string; the file's full path must encode the same.
+        String path = "My Project/src/CommonModules/\u041E\u0431\u0449\u0438\u0439/Module.bsl"; //$NON-NLS-1$
+        IFile file = mock(IFile.class);
+        when(file.getFullPath()).thenReturn(new Path("/" + path)); //$NON-NLS-1$
+
+        URI uri = BslModuleUtils.moduleUri(file);
+
+        assertEquals(URI.createPlatformResourceURI(path, true), uri);
+        assertTrue("the space must be escaped: " + uri, uri.toString().contains("My%20Project")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testLoadModuleOfAnAbsolutePathOutsideTheWorkspaceIsNull()
+    {
+        // The resolver finds nothing for this absolute path, so there is no file to load - the
+        // load answers null instead of fabricating <project>/src/<absolute path>.
+        assertNull(BslModuleUtils.loadModule((IProject) null, "C:\\nonexistent\\path\\Module.bsl")); //$NON-NLS-1$
+    }
+
+    // ========== isExportDeclaration ==========
+
+    /** Whether line 0 of {@code lines} declares an exported method, reading up to {@code last}. */
+    private static boolean exported(int last, String... lines)
+    {
+        return BslModuleUtils.isExportDeclaration(BslSyntaxChecker.maskLiteralsAndComments(List.of(lines)), 0,
+            last);
+    }
+
+    @Test
+    public void testExportModifierIsReadInBothDialectsAndAnyCase()
+    {
+        assertTrue(exported(1, "Function Add(A, B) Export", "EndFunction")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(exported(1, "procedure Run() EXPORT", "EndProcedure")); //$NON-NLS-1$ //$NON-NLS-2$
+        // Procedure Test() Export / Async Function Get() export, in the Russian spelling.
+        assertTrue(exported(1, "\u041F\u0440\u043E\u0446\u0435\u0434\u0443\u0440\u0430 Test() " //$NON-NLS-1$
+            + "\u042D\u043A\u0441\u043F\u043E\u0440\u0442", "End")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(exported(1, "\u0410\u0441\u0438\u043D\u0445 \u0424\u0443\u043D\u043A\u0446\u0438\u044F " //$NON-NLS-1$
+            + "Get() \u044D\u043A\u0441\u043F\u043E\u0440\u0442 // note", "End")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testExportModifierAfterAWrappedListOrOnTheNextLineIsRead()
+    {
+        assertTrue(exported(2, "Function Wrapped(A,", "    B = 1) Export", "EndFunction")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue(exported(2, "Procedure Next() // comment", "    Export", "EndProcedure")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    @Test
+    public void testTheWordOutsideTheModifierPositionIsNotExport()
+    {
+        assertFalse("comment", exported(1, "Function F() // Export", "EndFunction")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertFalse("default value", exported(1, "Procedure P(Mode = \"Export\")", "EndProcedure")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertFalse("parenthesis in a string", //$NON-NLS-1$
+            exported(1, "Procedure P(Mode = \")\") ExportX", "EndProcedure")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("body", exported(2, "Procedure P()", "    Exported = 1;", "EndProcedure")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        assertFalse("name", exported(1, "Function ExportFlag()", "EndFunction")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue("parenthesis in a string before a real modifier", //$NON-NLS-1$
+            exported(1, "Procedure P(Mode = \")(\") Export", "EndProcedure")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testTheWalkStopsAtTheGivenLastLine()
+    {
+        assertFalse("the modifier past lastLine is not read", exported(0, "Procedure P()", "Export")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue(exported(1, "Procedure P()", "Export")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("an unclosed list is not exported", exported(1, "Procedure P(A,", "Export")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    @Test
+    public void testANonDeclarationLineOrAnOutOfRangeIndexIsNotExport()
+    {
+        assertFalse(exported(1, "Result = Export;", "x")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse(BslModuleUtils.isExportDeclaration(List.of("Procedure P() Export"), 5, 5)); //$NON-NLS-1$
+        assertFalse(BslModuleUtils.isExportDeclaration(null, 0, 0));
+    }
+
+    @Test
+    public void testMethodReferenceValidatorReadsTheSameSpelling()
+    {
+        // The validator's pattern is built on the shared alternation; the Russian spelling counts.
+        assertTrue(BslModuleUtils.EXPORT_KEYWORD_ALTERNATION.startsWith(
+            "\u042D\u043A\u0441\u043F\u043E\u0440\u0442|")); //$NON-NLS-1$
     }
 }

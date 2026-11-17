@@ -12,18 +12,24 @@ import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.File;
+import java.nio.charset.Charset;
+import java.nio.charset.CodingErrorAction;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.eclipse.core.resources.IContainer;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IFolder;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IPath;
+import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Path;
+import org.eclipse.core.runtime.Status;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
@@ -83,6 +89,18 @@ public final class BslModuleUtils
         Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
 
     /**
+     * The BSL export modifier in both dialects, as a regex alternation to embed in a
+     * case-insensitive pattern: one spelling for every rule that reads the modifier.
+     */
+    public static final String EXPORT_KEYWORD_ALTERNATION =
+        "\u042D\u043A\u0441\u043F\u043E\u0440\u0442|Export"; //$NON-NLS-1$
+
+    /** The export modifier as the first token of a text, not the prefix of a longer identifier. */
+    private static final Pattern LEADING_EXPORT_MODIFIER_PATTERN = Pattern.compile(
+        "^\\s*(?:" + EXPORT_KEYWORD_ALTERNATION + ")(?![\\p{L}\\p{N}_])", //$NON-NLS-1$ //$NON-NLS-2$
+        Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+
+    /**
      * A method declaration this line-based scanner cannot ADDRESS: the keyword and a name with
      * the opening parenthesis on a later line.
      * <p>
@@ -126,8 +144,9 @@ public final class BslModuleUtils
      * add a second declaration of the same name. Refused by name instead of guessed at.
      * </p>
      */
+    // A declaration cannot start with ampersand, so a complete pragma never needs to be given back.
     private static final Pattern PRAGMA_ON_DECLARATION_LINE_PATTERN = Pattern.compile(
-        "^\\s*(?:&[\\p{L}\\p{N}_]+(?:\\([^)]*\\))?\\s+)+"
+        "^\\s*(?:&[\\p{L}\\p{N}_]+(?:\\([^)]*\\))?\\s+)++"
             + "(?:\u0410\u0441\u0438\u043D\u0445\\s+|Async\\s+)?(?:\u041F\u0440\u043E\u0446\u0435\u0434\u0443\u0440\u0430|\u0424\u0443\u043D\u043A\u0446\u0438\u044F|Procedure|Function)"
             + "(?![\\p{L}\\p{N}_])", //$NON-NLS-1$
         Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
@@ -168,10 +187,17 @@ public final class BslModuleUtils
      * The returned file is NOT guaranteed to exist; each caller keeps its own
      * existence check and tool-specific error message.
      *
+     * Exact paths are preferred across all source folders. After exact misses, each
+     * segment is matched against real resource names, preferring an exact name over
+     * a unique case-insensitive match. Ambiguity and unreadable resource trees are
+     * refused before a write can mistake an existing module for a new file.
+     *
      * @param project    the EDT project
      * @param modulePath path from the source folder, e.g.
      *                   "CommonModules/MyModule/Module.bsl" (no leading "src/")
      * @return the resolved IFile (may not exist)
+     * @throws IllegalArgumentException if case-insensitive lookup is ambiguous
+     * @throws IllegalStateException if the resource tree cannot be read
      */
     public static IFile resolveModuleFile(IProject project, String modulePath)
     {
@@ -200,7 +226,8 @@ public final class BslModuleUtils
         }
         try
         {
-            for (IResource member : project.members())
+            IResource[] sourceFolders = project.members();
+            for (IResource member : sourceFolders)
             {
                 if (member.getType() == IResource.FOLDER && !SOURCE_FOLDER.equals(member.getName()))
                 {
@@ -211,12 +238,147 @@ public final class BslModuleUtils
                     }
                 }
             }
+
+            IPath relativePath = new Path(modulePath);
+            IFile sourceTarget = findIgnoringCase(project, new Path(SOURCE_FOLDER).append(relativePath), modulePath);
+            if (sourceTarget != null && sourceTarget.exists())
+            {
+                Activator.logInfo("Resolved modulePath ignoring case: " + modulePath //$NON-NLS-1$
+                    + " -> " + sourceTarget.getFullPath()); //$NON-NLS-1$
+                return sourceTarget;
+            }
+            IFile matched = null;
+            List<IFile> creationTargets = new ArrayList<>();
+            for (IResource member : sourceFolders)
+            {
+                if (member.getType() == IResource.FOLDER && !SOURCE_FOLDER.equals(member.getName()))
+                {
+                    IFile candidate = findIgnoringCase((IFolder) member, relativePath, modulePath);
+                    if (candidate != null)
+                    {
+                        if (!candidate.exists())
+                        {
+                            if (!creationTargets.contains(candidate))
+                            {
+                                creationTargets.add(candidate);
+                            }
+                            continue;
+                        }
+                        if (matched != null && !matched.equals(candidate))
+                        {
+                            throw Refusals.argument("Ambiguous modulePath '" + modulePath //$NON-NLS-1$
+                                + "': matching files exist at '" + matched.getFullPath() //$NON-NLS-1$
+                                + "' and '" + candidate.getFullPath() //$NON-NLS-1$
+                                + "'. Pass an absolute file path to select the intended module."); //$NON-NLS-1$
+                        }
+                        matched = candidate;
+                    }
+                }
+            }
+            if (matched != null)
+            {
+                Activator.logInfo("Resolved modulePath ignoring case: " + modulePath //$NON-NLS-1$
+                    + " -> " + matched.getFullPath()); //$NON-NLS-1$
+                return matched;
+            }
+            // Prefer an existing module in any source root to a missing leaf. Only
+            // then select a creation handle under the canonical existing parent.
+            if (sourceTarget == null && creationTargets.size() > 1)
+            {
+                throw Refusals.argument("Ambiguous modulePath '" + modulePath //$NON-NLS-1$
+                    + "': existing parent folders allow multiple creation targets: " //$NON-NLS-1$
+                    + creationTargets.stream().map(file -> file.getFullPath().toString()).sorted()
+                        .collect(java.util.stream.Collectors.joining(", ")) //$NON-NLS-1$
+                    + ". Create the intended module in EDT, then pass its absolute file path."); //$NON-NLS-1$
+            }
+            IFile target = sourceTarget != null ? sourceTarget
+                : creationTargets.isEmpty() ? null : creationTargets.get(0);
+            if (target != null)
+            {
+                Activator.logInfo("Resolved modulePath ignoring case: " + modulePath //$NON-NLS-1$
+                    + " -> " + target.getFullPath()); //$NON-NLS-1$
+                return target;
+            }
         }
         catch (CoreException e)
         {
-            Activator.logError("Error scanning project folders for module " + modulePath, e); //$NON-NLS-1$
+            throw Refusals.state("Cannot resolve modulePath '" + modulePath //$NON-NLS-1$
+                + "': project resources could not be read. Open and refresh the project in EDT, " //$NON-NLS-1$
+                + "then use list_modules and retry. Details: " + e.getMessage()); //$NON-NLS-1$
         }
         return inSourceFolder;
+    }
+
+    /**
+     * Walks actual resource names without consulting the host filesystem's case rules.
+     * A case-sensitive segment wins even when a differently-cased sibling exists;
+     * otherwise exactly one case-insensitive match is required. A folder at the final
+     * segment is not a module file. A missing leaf under an existing folder returns
+     * a creation handle under that folder, retaining the real parent spelling.
+     */
+    private static IFile findIgnoringCase(IContainer root, IPath relativePath, String modulePath)
+        throws CoreException
+    {
+        IResource current = root;
+        for (int index = 0; index < relativePath.segmentCount(); index++)
+        {
+            String segment = relativePath.segment(index);
+            if (!(current instanceof IContainer container))
+            {
+                return null;
+            }
+            IResource exact = null;
+            IResource matched = null;
+            List<String> matchingNames = new ArrayList<>();
+            for (IResource member : container.members())
+            {
+                String name = member.getName();
+                if (segment.equals(name))
+                {
+                    exact = member;
+                    break;
+                }
+                if (segment.equalsIgnoreCase(name))
+                {
+                    matched = member;
+                    matchingNames.add(name);
+                }
+            }
+            if (exact != null)
+            {
+                current = exact;
+            }
+            else
+            {
+                if (matchingNames.size() > 1)
+                {
+                    matchingNames.sort(String::compareTo);
+                    throw Refusals.argument("Ambiguous modulePath '" + modulePath //$NON-NLS-1$
+                        + "': segment '" + segment + "' matches " + String.join(", ", matchingNames) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + " under '" + container.getFullPath() //$NON-NLS-1$
+                        + "'. Use list_modules and pass the exact resource names."); //$NON-NLS-1$
+                }
+                if (matched == null)
+                {
+                    return index == relativePath.segmentCount() - 1 && container instanceof IFolder folder
+                        ? folder.getFile(new Path(segment)) : null;
+                }
+                current = matched;
+            }
+        }
+        return current instanceof IFile file && file.exists() ? file : null;
+    }
+
+    /**
+     * Returns a module's canonical path relative to its source root, including
+     * nonstandard source folders accepted by {@link #resolveModuleFile}.
+     *
+     * @param file the resolved workspace file
+     * @return the project-relative path without its first (source-root) segment
+     */
+    public static String sourceRelativePath(IFile file)
+    {
+        return file.getProjectRelativePath().removeFirstSegments(1).toString();
     }
 
     /**
@@ -243,15 +405,35 @@ public final class BslModuleUtils
     }
 
     /**
-     * Loads BSL Module EMF model via BmAwareResourceSetProvider.
-     * Tries ServiceTracker first, falls back to IResourceServiceProvider (Guice injector).
+     * Loads the BSL Module EMF model of the file {@link #resolveModuleFile} finds for
+     * {@code modulePath}, so "where is the module" has one answer for both.
      *
      * @param project the EDT project
-     * @param modulePath path from src/, e.g. "CommonModules/MyModule/Module.bsl"
+     * @param modulePath path from the source folder, e.g. "CommonModules/MyModule/Module.bsl",
+     *                   or an absolute filesystem path of a workspace file
      * @return loaded Module or null if not found
      */
     public static Module loadModule(IProject project, String modulePath)
     {
+        IFile file = resolveModuleFile(project, modulePath);
+        if (file == null)
+        {
+            Activator.logWarning("BSL module not found in the workspace: " + modulePath); //$NON-NLS-1$
+            return null;
+        }
+        return loadModule(file);
+    }
+
+    /**
+     * Loads the BSL Module EMF model of a workspace file via BmAwareResourceSetProvider.
+     * Tries ServiceTracker first, falls back to IResourceServiceProvider (Guice injector).
+     *
+     * @param file the module file
+     * @return loaded Module or null if not found
+     */
+    public static Module loadModule(IFile file)
+    {
+        IProject project = file.getProject();
         // Try to obtain BmAwareResourceSetProvider
         BmAwareResourceSetProvider resourceSetProvider = Activator.getDefault().getResourceSetProvider();
 
@@ -288,8 +470,7 @@ public final class BslModuleUtils
             return null;
         }
 
-        // Use createPlatformResourceURI for proper encoding (handles Cyrillic paths)
-        URI uri = URI.createPlatformResourceURI(project.getName() + "/" + SOURCE_FOLDER + "/" + modulePath, true); //$NON-NLS-1$ //$NON-NLS-2$
+        URI uri = moduleUri(file);
         Activator.logInfo("Loading BSL module: " + uri.toString()); //$NON-NLS-1$
 
         try
@@ -314,10 +495,64 @@ public final class BslModuleUtils
         }
         catch (Exception e)
         {
-            Activator.logError("Failed to load BSL module: " + uri, e); //$NON-NLS-1$
+            Log.log(moduleLoadStatus(uriExists(resourceSet, uri), uri, e));
         }
 
         return null;
+    }
+
+    /**
+     * The URI of a module file, built from the file's own full path (encoded, so Cyrillic paths
+     * load), whichever top-level folder it lives in.
+     *
+     * @param file the module file
+     * @return its platform resource URI
+     */
+    static URI moduleUri(IFile file)
+    {
+        return URI.createPlatformResourceURI(file.getFullPath().toString(), true);
+    }
+
+    /**
+     * The status for a failed {@code getResource}: a module that is simply ABSENT is not a failure
+     * (the three checks above already treat "nothing to load" as a warning, and this method's
+     * contract is to answer {@code null}), so it logs at WARNING with no stack. A load that failed
+     * for any OTHER reason keeps its ERROR and its stack - the demotion is decided by whether the
+     * resource EXISTS, never by the exception's class.
+     *
+     * @param resourceExists whether the URI names a resource that is actually there
+     * @param uri the module URI the load was attempted for
+     * @param e the exception the load threw
+     * @return the status to emit
+     */
+    static IStatus moduleLoadStatus(boolean resourceExists, URI uri, Exception e)
+    {
+        if (resourceExists)
+        {
+            return new Status(IStatus.ERROR, Log.pluginId(), "Failed to load BSL module: " + uri, e); //$NON-NLS-1$
+        }
+        return new Status(IStatus.WARNING, Log.pluginId(), "BSL module does not exist: " + uri, null); //$NON-NLS-1$
+    }
+
+    /**
+     * Asks the resource set's own URI converter whether {@code uri} names something that exists -
+     * the same question, about the same URI, that the failed load asked. A probe that cannot answer
+     * reports {@code true} so the caller stays LOUD: an unknown state must never silence an error.
+     *
+     * @param resourceSet the resource set the load was attempted on
+     * @param uri the module URI
+     * @return whether the resource exists ({@code true} also when the probe itself failed)
+     */
+    static boolean uriExists(ResourceSet resourceSet, URI uri)
+    {
+        try
+        {
+            return resourceSet.getURIConverter().exists(uri, null);
+        }
+        catch (RuntimeException probeFailed) // NOSONAR an unanswerable probe must not silence the error
+        {
+            return true;
+        }
     }
 
     /**
@@ -370,6 +605,53 @@ public final class BslModuleUtils
             this.isFunction = isFunction;
             this.complete = complete;
         }
+    }
+
+    /**
+     * Inserts a complete method with exactly one blank line at each occupied junction.
+     * Only surrounding blank lines are normalized; method bodies and preambles stay intact.
+     *
+     * @param moduleLines current module lines
+     * @param insertionLine 0-based insertion position, before a preamble or after a terminator
+     * @param methodLines complete method, optionally surrounded by blank lines
+     * @return new module lines without leading or trailing padding at a touched module edge
+     */
+    public static List<String> insertMethodLines(List<String> moduleLines, int insertionLine,
+        List<String> methodLines)
+    {
+        int left = insertionLine;
+        while (left > 0 && moduleLines.get(left - 1).isBlank())
+        {
+            left--;
+        }
+        int right = insertionLine;
+        while (right < moduleLines.size() && moduleLines.get(right).isBlank())
+        {
+            right++;
+        }
+        int first = 0;
+        while (first < methodLines.size() && methodLines.get(first).isBlank())
+        {
+            first++;
+        }
+        int last = methodLines.size();
+        while (last > first && methodLines.get(last - 1).isBlank())
+        {
+            last--;
+        }
+
+        List<String> result = new ArrayList<>(moduleLines.subList(0, left));
+        if (left > 0)
+        {
+            result.add(""); //$NON-NLS-1$
+        }
+        result.addAll(methodLines.subList(first, last));
+        if (right < moduleLines.size())
+        {
+            result.add(""); //$NON-NLS-1$
+        }
+        result.addAll(moduleLines.subList(right, moduleLines.size()));
+        return result;
     }
 
     /**
@@ -428,6 +710,74 @@ public final class BslModuleUtils
                 startMatcher.group(1), isFunction, complete));
         }
         return spans;
+    }
+
+    /**
+     * Whether the declaration on {@code declarationLine} carries the export modifier.
+     * <p>
+     * The modifier follows the parameter list, so the list is walked to its closing
+     * parenthesis - by depth, and across lines, because a wrapped signature is ordinary
+     * formatting. The first token after it decides; when the rest of that line is empty the
+     * token is read from the next non-blank line, since the newline is hidden trivia
+     * ({@code Procedure P()} followed by {@code Export} on its own line is exported). The walk
+     * stops at {@code lastLine}, the method's own end, so a body can never lend its words.
+     * </p>
+     * <p>
+     * Reads MASKED lines ({@link BslSyntaxChecker#maskLiteralsAndComments}): a parenthesis or the
+     * word inside a default value or a trailing comment is not code. The caller masks once per
+     * module, however many declarations it asks about.
+     * </p>
+     *
+     * @param maskedLines the module lines with literals and comments blanked
+     * @param declarationLine 0-based line of the Procedure/Function keyword
+     * @param lastLine 0-based last line the walk may read (the method's end)
+     * @return whether the declaration is exported; {@code false} when the line is no declaration
+     *     or its parameter list does not close by {@code lastLine}
+     */
+    public static boolean isExportDeclaration(List<String> maskedLines, int declarationLine, int lastLine)
+    {
+        if (maskedLines == null || declarationLine < 0 || declarationLine >= maskedLines.size())
+        {
+            return false;
+        }
+        Matcher opener = METHOD_START_PATTERN.matcher(maskedLines.get(declarationLine));
+        if (!opener.find())
+        {
+            return false;
+        }
+        int last = Math.min(lastLine, maskedLines.size() - 1);
+        int depth = 1;
+        int from = opener.start(2);
+        for (int line = declarationLine; line <= last; line++, from = 0)
+        {
+            String text = maskedLines.get(line);
+            for (int i = from; i < text.length(); i++)
+            {
+                char ch = text.charAt(i);
+                if (ch == '(')
+                {
+                    depth++;
+                }
+                else if (ch == ')' && --depth == 0)
+                {
+                    return startsWithExportModifier(maskedLines, line, i + 1, last);
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Whether the first token at or after {@code (line, from)}, within {@code last}, is Export. */
+    private static boolean startsWithExportModifier(List<String> maskedLines, int line, int from, int last)
+    {
+        int at = line;
+        String rest = maskedLines.get(at).substring(from);
+        while (rest.isBlank() && at < last)
+        {
+            at++;
+            rest = maskedLines.get(at);
+        }
+        return LEADING_EXPORT_MODIFIER_PATTERN.matcher(rest).find();
     }
 
     /**
@@ -1165,14 +1515,57 @@ public final class BslModuleUtils
     public static String buildTextMethodNotFoundResponse(String methodName, String modulePath,
         List<String> allMethodNames)
     {
+        return buildMethodsNotFoundResponse(List.of(methodName), modulePath, allMethodNames);
+    }
+
+    /**
+     * Builds the standard "method not found" listing for one or several requested names: the
+     * single shape every method-addressed read tool returns when none of the requested methods
+     * exists. One requested name gives exactly the singular {@code Error: Method 'X' not found}
+     * text; several give {@code Error: Methods 'A', 'B' not found}. The available-methods list
+     * follows in both cases.
+     *
+     * @param requestedNames the names that were not found, in request order (non-empty)
+     * @param modulePath     the module path (for the message)
+     * @param allMethodNames the methods that exist in the module
+     * @return the markdown error string
+     */
+    public static String buildMethodsNotFoundResponse(List<String> requestedNames, String modulePath,
+        List<String> allMethodNames)
+    {
         StringBuilder sb = new StringBuilder();
-        sb.append("Error: Method '").append(methodName).append("' not found in ").append(modulePath).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        sb.append(requestedNames.size() == 1 ? "Error: Method " : "Error: Methods "); //$NON-NLS-1$ //$NON-NLS-2$
+        for (int i = 0; i < requestedNames.size(); i++)
+        {
+            if (i > 0)
+            {
+                sb.append(", "); //$NON-NLS-1$
+            }
+            sb.append('\'').append(requestedNames.get(i)).append('\'');
+        }
+        sb.append(" not found in ").append(modulePath).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
         sb.append("**Available methods** (").append(allMethodNames.size()).append("):\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
         for (String name : allMethodNames)
         {
             sb.append("- ").append(name).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return sb.toString();
+    }
+
+    /**
+     * Names of every method of a BSL module, in model order.
+     *
+     * @param module the BSL module
+     * @return the method names (never {@code null})
+     */
+    public static List<String> methodNames(Module module)
+    {
+        List<String> names = new ArrayList<>();
+        for (Method m : module.allMethods())
+        {
+            names.add(m.getName());
+        }
+        return names;
     }
 
     /**
@@ -1258,6 +1651,12 @@ public final class BslModuleUtils
      */
     public static String readFileText(IFile file) throws Exception
     {
+        return readFileText(file, false);
+    }
+
+    /** Strict decoding prevents a read/edit/write cycle from replacing malformed source bytes. */
+    public static String readFileText(IFile file, boolean strict) throws Exception
+    {
         InputStream rawIs;
         try
         {
@@ -1296,10 +1695,16 @@ public final class BslModuleUtils
                 }
                 catch (Exception ce)
                 {
+                    if (strict)
+                    {
+                        throw ce;
+                    }
                     charset = UTF_8;
                 }
             }
-            try (InputStreamReader reader = new InputStreamReader(input, charset))
+            CodingErrorAction action = strict ? CodingErrorAction.REPORT : CodingErrorAction.REPLACE;
+            try (InputStreamReader reader = new InputStreamReader(input, Charset.forName(charset).newDecoder()
+                .onMalformedInput(action).onUnmappableCharacter(action)))
             {
                 StringBuilder content = new StringBuilder();
                 char[] buffer = new char[4096];
@@ -1412,22 +1817,7 @@ public final class BslModuleUtils
      */
     public static String buildMethodNotFoundResponse(Module module, String modulePath, String methodName)
     {
-        StringBuilder sb = new StringBuilder();
-        sb.append("Error: Method '").append(methodName).append("' not found in ").append(modulePath).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-
-        List<String> methodNames = new ArrayList<>();
-        for (Method m : module.allMethods())
-        {
-            methodNames.add(m.getName());
-        }
-
-        sb.append("**Available methods** (").append(methodNames.size()).append("):\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
-        for (String name : methodNames)
-        {
-            sb.append("- ").append(name).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        return sb.toString();
+        return buildMethodsNotFoundResponse(List.of(methodName), modulePath, methodNames(module));
     }
 
     /**

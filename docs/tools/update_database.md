@@ -1,6 +1,6 @@
 # update_database
 
-Apply the current EDT configuration to an infobase. DESTRUCTIVE - restructures data and can evict live sessions. Two-phase: call once WITHOUT confirm to preview, then again with confirm=true to apply. Parameters and examples: get_tool_guide('update_database').
+Apply the current EDT configuration to an infobase. Before applying, call infobase_sessions(action='list'); any non-agent session blocks the update, so clear it with action='terminate' and confirm=true. DESTRUCTIVE: call once WITHOUT confirm to preview, then again with confirm=true to apply. Returns a jobId when not finished within waitSeconds; poll get_job_status. Full parameters and examples: call get_tool_guide('update_database').
 
 ## Parameters
 | Parameter | Required | Type | Description |
@@ -15,6 +15,9 @@ Apply the current EDT configuration to an infobase. DESTRUCTIVE - restructures d
 | terminateRunningClients | — | boolean | Before applying, terminate any 1C client THIS EDT launched on the target infobase to free the exclusive lock (default true). false keeps a running client — the update then fails if that client holds the infobase exclusively. |
 | standaloneRestructure | — | string | For a standalone-server target ONLY. Set to 'external' to NOT end user sessions when the platform decides a monopolistic (structural) restructure is needed: the launch aborts cleanly, the standalone server is stopped, the configuration is applied to the file infobase via an external 1cv8 DESIGNER update, the server is restarted, and the launch is retried. Absent/other = current behaviour (the answerer terminates sessions). Requires externalUpdate1cBinary unless the EDT_MCP_1CV8 environment variable is set or 1cv8 is found on disk. |
 | externalUpdate1cBinary | — | string | Absolute path to the 1C '1cv8' executable (ships DESIGNER) used by standaloneRestructure=external. Optional then: falls back to the EDT_MCP_1CV8 environment variable, then a best-effort scan of common install directories. |
+| checkInfobaseSessions | — | boolean | Before applying, refuse when infobase_sessions finds a non-agent standalone-server session (default true). false skips this safety pre-flight. |
+| ignoreBranchBinding | — | boolean | true skips the refusal of a target whose infobase is not bound to the project's current Git branch (default false). |
+| waitSeconds | — | integer | Seconds to wait before returning a jobId; defaults to 20, accepts 0 to 45. |
 
 ## Guide
 Applies the EDT configuration to an application's database (infobase) — the equivalent of "Update database configuration" in Designer. Supports a full reload or an incremental (changes-only) update.
@@ -61,6 +64,30 @@ If you pass `launchConfigurationName` **and** an explicit `applicationId`, the c
 - **confirm** (boolean, default false) — false previews the resolved update without touching the infobase; true applies it.
 - `externalInfobaseChanges` — how to answer EDT's blocking "Infobase configuration changes" modal when the infobase was changed OUTSIDE EDT (Designer, `ibcmd`, a CLI pipeline) since the last EDT interaction: `override` (default) keeps the project configuration and overwrites the infobase, `import` pulls the external changes into the PROJECT sources, `cancel` aborts the update with an error. See ## Infobase changed outside EDT.
 - **terminateRunningClients** (boolean, default true) — before applying, terminate any 1C client THIS EDT launched on the target infobase to free the exclusive lock and stop it running stale modules. Set false to leave a running client in place (the update then fails if that client holds the infobase exclusively). Only affects the apply phase (confirm=true); the preview reports `willTerminateRunningClients` but terminates nothing.
+- **checkInfobaseSessions** (boolean, default true) — after the EDT-launched-client sweep and before entering the update API, list standalone-server sessions and refuse while any non-agent session remains. Set false only when you intentionally accept that risk. The preview reports `willCheckInfobaseSessions`.
+- **ignoreBranchBinding** (boolean, default false) — skips the branch-binding check below. Set true only when you intend to update an infobase that the current branch does not bind.
+
+## Branch binding
+
+When the project's current Git branch has infobases bound to it (`list_git_branches` → Application Bindings), the target's infobase must be one of them, or the call is refused, preview included. It matches by infobase UUID, or, for a standalone server serving a bound file infobase, by the same existing database directory (file-system identity). A branch switch removes the other branches' infobase applications from `get_applications`. A standalone-server application (`ServerApplication.*`) stays listed whichever branch is checked out, so without this check it would receive this branch's configuration. If the current branch has no binding, nothing is checked. The check runs again once the lock is held, before any running client is terminated, and right before every update attempt, including the retry after a stale standalone server is stopped, because the branch can be switched while the consent dialog, the lock, the session check or that stop is waiting. A switch made while a stale standalone server is settling or being stopped can still let that stop act on the old target; the update itself is still refused. The check does not lock out a checkout: a branch switch made from EDT or the git command line in the short window between the check and the moment EDT starts the update (normally milliseconds, longer only while a directory comparison waits on the file system, and whatever EDT itself does before it reads the project) is not caught. Do not switch branches while an update is running.
+
+## Check standalone-server sessions first
+
+Before applying an update, call:
+
+```text
+infobase_sessions(action='list', projectName='MyProject', applicationId='ServerApplication.MyServer')
+```
+
+With the default `checkInfobaseSessions=true`, `update_database(confirm=true)` performs the same check after its existing EDT-launched-client sweep. A readable list containing any non-agent session blocks the update and reports the session details. Clear those sessions with:
+
+```text
+infobase_sessions(action='terminate', projectName='MyProject', applicationId='ServerApplication.MyServer', all=true, confirm=true)
+```
+
+Then retry `update_database`. A session whose raw `app-id` is `Designer` may be EDT's update agent or a human Configurator; the tool cannot distinguish them. It is not treated as a blocker because EDT's agent is present during normal updates, and `all=true` always skips it. If an update fails after seeing Designer sessions, the error names their IDs as likely exclusive-lock holders; terminate one only by its exact full UUID when that risk is intentional.
+
+Reachability matters. `reachable=true` with `sessions=[]` proves the list is empty; `reachable=false` names why it could not be read and is **not** proof that no sessions exist. The update still proceeds on an unreachable pre-flight because EDT may remain able to update through a different path. If that update later fails, its error includes the earlier `unreachableReason`. Set `checkInfobaseSessions=false` only to opt out of this safety pre-flight entirely.
 
 ## Exclusive-lock handling (automatic)
 
@@ -70,7 +97,7 @@ Pass `terminateRunningClients=false` to keep the client running; then the old ma
 
 ## Database restructure (auto-confirmed)
 
-When the update changes the DB structure (new/changed objects), EDT pops a blocking **"Restructure data" / «Реорганизация информации»** confirmation dialog listing the structural changes. Because `confirm=true` has already approved this irreversible update, the tool **auto-presses that dialog's default "Accept" button** so the unattended call completes without a human click — otherwise the MCP call would hang on the modal. The EDT update API offers no per-call switch for this, so it is handled by intercepting the dialog only for the duration of this update; the auto-press is written to the EDT log. A structural restructure can include data-deleting changes (dropped attributes/objects) — that is part of applying the configuration you confirmed. Applies to both file infobases and standalone servers.
+On windowed EDT, a confirmed update auto-accepts the native **Restructure data** dialog for that operation. The explicit headless host uses core synchronization callbacks without opening dialogs: `confirm=true` accepts restructuring, and `externalInfobaseChanges` selects override/import/cancel. Unknown runtime questions fail with their condition and a recovery action. A file infobase with active sessions must return an error; close those sessions before retrying. Confirmed updates run in a server-owned background job, including in headless mode. Structural changes can delete data.
 
 ## Standalone server: "exclusive access to the infobase" (auto-answered)
 
@@ -130,15 +157,15 @@ JSON with `project`, `applicationId`, `applicationName`, `updateType` (FULL/INCR
 
 ## Long-running updates and client timeouts
 
-On a large configuration (thousands of objects) `update_database` can run **5–25 minutes**. Many MCP clients apply their own call timeout (e.g. 120 s) well short of that — the client gives up waiting, but that is purely a client-side timeout: it does **not** cancel the underlying EDT update job, which keeps running in EDT to completion (success or failure) regardless of whether anyone is still listening for the response.
+Only `confirm=true` starts a background job; previews remain synchronous. `waitSeconds` defaults to **20**, accepts **0–45**, and limits only this call's wait. Use `0` to return immediately. A load has no operation deadline and can run for a very long time. Keep EDT running.
 
-If your client times out before the response arrives, do not assume the update failed or retry blindly (a retry while the first update is still running fails with "Application is currently being updated" or races the exclusive lock). Instead, retrieve the real outcome afterwards with `get_mcp_history`:
+If finished within the wait, the response is the usual final JSON. Otherwise it contains `jobId`, `status` and a polling hint. Poll `get_job_status(jobId="<id>", waitSeconds=20)` until terminal; its Result contains the same final JSON, including failure notes. A second confirmed update for the same project/application is refused and names the running jobId. `launch` is refused during the update; poll its jobId before launching.
 
-```
-get_mcp_history(tool="update_database", limit=1)
-```
+The job runs on its own thread: a client timeout, disconnect or interruption of the caller's wait does not cancel the load. `cancel_job` can cancel queued work before it starts. Once started, cancellation is refused: EDT accepts a progress monitor but provides no verified clean-cancel/rollback guarantee for a configuration load, so the job is left to finish.
 
-This returns the recorded call, including its final `status` and `durationMs`, once the update has actually finished — even though the original call's own response was lost to the client-side timeout. Prefer raising the client's call timeout for this tool (well above the 5–25 minute range) over polling `get_mcp_history` in a loop.
+If the client disconnected before receiving a jobId, treat that as an **unknown outcome**. Retrieve the accepted call's response with `get_mcp_history(tool="update_database", limit=10, includeBodies=true)` and poll the jobId it contains. Match the request body and time window. A missing history entry does not prove that nothing happened: recording may be disabled or the entry evicted. Check the infobase state and EDT/platform logs before retrying if the job cannot be recovered.
+
+`Command execution cancelled (ConfigurationLoadException)` means that the platform server reported cancellation. It does not identify the initiator, prove that a client timeout caused it, or establish invalid XML or rollback. Inspect the infobase state and logs before retrying.
 
 ## Known EDT limitation: missing InternalInfo node
 
@@ -229,7 +256,9 @@ Both are handled before the operation runs: the server state is read first, and
 
 A refusal that still arrives (the state can go stale between the check and the start) is repaired
 the same way and the operation is retried ONCE. If the retry fails too, the error says so and names
-the likely reason: an `ibsrv` left over from the previous run still holding the ports.
+the likely reason: an `ibsrv` left over from the previous run still holding the ports. Whenever
+this operation successfully stopped the server and then failed, it attempts one restore and appends
+the outcome to the error. It never restores a server this operation did not stop.
 
 EDT's own background jobs - notably its external-object dump - can still lose this race on their
 own, which is logged in the workbench log without failing the MCP call.

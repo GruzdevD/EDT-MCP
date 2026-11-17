@@ -12,8 +12,6 @@ import java.util.List;
 import java.util.Map;
 
 import org.eclipse.core.resources.IProject;
-import org.eclipse.core.resources.IWorkspace;
-import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.emf.common.util.EMap;
 import org.eclipse.swt.widgets.Display;
 
@@ -25,6 +23,7 @@ import com._1c.g5.v8.dt.core.platform.IExtensionProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com.ditrix.edt.mcp.server.utils.ReadToolExecution;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
@@ -99,20 +98,8 @@ public class GetConfigurationPropertiesTool implements IMcpTool
         
         // Execute in UI thread to avoid blocking
         final String[] result = new String[1];
-        Display display = Display.getDefault();
-        
-        if (display.getThread() == Thread.currentThread())
-        {
-            // Already in UI thread
-            result[0] = getConfigurationPropertiesInternal(projectName);
-        }
-        else
-        {
-            // Execute in UI thread
-            Activator.logInfo("getConfigurationProperties: Switching to UI thread..."); //$NON-NLS-1$
-            display.syncExec(() -> result[0] = getConfigurationPropertiesInternal(projectName));
-        }
-        
+        ReadToolExecution.dispatchOnDefaultDisplay(() -> result[0] = getConfigurationPropertiesInternal(projectName));
+
         return result[0];
     }
     
@@ -147,36 +134,27 @@ public class GetConfigurationPropertiesTool implements IMcpTool
                 return configProjectNotFoundError(projectName);
             }
 
-            // Get configuration object
-            Configuration configuration = matched.configProject.getConfiguration();
-            if (configuration == null)
-            {
-                return ToolResult.error("Configuration object not available").toJson(); //$NON-NLS-1$
-            }
-
-            // Build a human-readable YAML body. Null scalars and empty localized
-            // maps are omitted so the output stays clean (the old JSON path emitted
-            // empty objects like copyright:{}). Errors still go through
-            // ToolResult.error(...).toJson() above and are delivered as structured
-            // JSON via the protocol diversion, independent of this YAML body.
-            StringBuilder yaml = new StringBuilder();
-            appendConfigurationProperties(yaml, configuration);
-
-            // Extension-specific properties — emitted only for a configuration
-            // EXTENSION (a base configuration has no name prefix / purpose / extension
-            // compatibility mode), so a base config's output is unchanged.
-            if (matched.isExtension)
-            {
-                appendExtensionProperties(yaml, configuration);
-            }
-
-            appendScalar(yaml, McpKeys.PROJECT_NAME, matched.project.getName());
-
-            return yaml.toString();
+            java.util.function.Supplier<String> render = () -> {
+                Configuration configuration = matched.configProject.getConfiguration();
+                if (configuration == null)
+                {
+                    return ToolResult.error("Configuration object not available").toJson();
+                }
+                StringBuilder yaml = new StringBuilder();
+                appendConfigurationProperties(yaml, configuration);
+                if (matched.isExtension)
+                {
+                    appendExtensionProperties(yaml, configuration);
+                }
+                appendScalar(yaml, McpKeys.PROJECT_NAME, matched.project.getName());
+                return yaml.toString();
+            };
+            return com.ditrix.edt.mcp.server.HostKind.current() == com.ditrix.edt.mcp.server.HostKind.HEADLESS
+                ? ReadToolExecution.read(matched.project, NAME, render) : render.get();
         }
         catch (Exception e)
         {
-            Activator.logError("Failed to get configuration properties", e); //$NON-NLS-1$
+            com.ditrix.edt.mcp.server.utils.Refusals.log("Failed to get configuration properties", e); //$NON-NLS-1$
             return ToolResult.error(e.getMessage()).toJson();
         }
     }
@@ -215,8 +193,7 @@ public class GetConfigurationPropertiesTool implements IMcpTool
     private static MatchedConfiguration resolveConfigurationProject(String projectName,
         IDtProjectManager dtProjectManager, IV8ProjectManager v8ProjectManager)
     {
-        IWorkspace workspace = ResourcesPlugin.getWorkspace();
-        IProject[] projects = workspace.getRoot().getProjects();
+        IProject[] projects = ProjectContext.allProjects();
 
         for (IProject project : projects) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
         {

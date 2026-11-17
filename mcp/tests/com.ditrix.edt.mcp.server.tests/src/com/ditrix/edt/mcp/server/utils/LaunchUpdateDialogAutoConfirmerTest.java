@@ -12,6 +12,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.swt.widgets.Display;
@@ -1276,5 +1277,145 @@ public class LaunchUpdateDialogAutoConfirmerTest
         LaunchUpdateDialogAutoConfirmer.disarm(false, false);
         LaunchUpdateDialogAutoConfirmer.arm(false, false, false);
         LaunchUpdateDialogAutoConfirmer.disarm(false, false, false);
+    }
+    /**
+     * The UI reconciliation used to block in {@code Display.syncExec} with no bound, ahead of the
+     * cleanup lifecycle and while a restoration held its start claim and the recovery lock, so a
+     * blocked UI thread wedged every later recovery. The hand-off is now bounded.
+     */
+    @Test
+    public void testBoundedHandoffGivesUpWhenTheOtherThreadNeverRunsIt()
+    {
+        AtomicBoolean ran = new AtomicBoolean();
+
+        long startedAt = System.nanoTime();
+        boolean finished = LaunchUpdateDialogAutoConfirmer.runBounded(submitted -> {
+            // A blocked UI thread: the runnable is queued and never executed.
+        }, () -> ran.set(true), 50L);
+        long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L;
+
+        assertFalse("an unanswered hand-off must report failure, not block", finished);
+        assertFalse("the work must not have run", ran.get());
+        assertTrue("the wait must end near its bound: " + elapsedMs, elapsedMs < 30_000L);
+    }
+
+    @Test
+    public void testBoundedHandoffReportsWorkThatRan()
+    {
+        AtomicBoolean ran = new AtomicBoolean();
+
+        boolean finished = LaunchUpdateDialogAutoConfirmer.runBounded(Runnable::run,
+            () -> ran.set(true), 50L);
+
+        assertTrue("work that ran must be reported as finished", finished);
+        assertTrue(ran.get());
+    }
+
+    @Test
+    public void testBoundedHandoffWaitsForAnotherThreadWithinTheBound() throws Exception
+    {
+        AtomicBoolean ran = new AtomicBoolean();
+        AtomicReference<Thread> worker = new AtomicReference<>();
+
+        boolean finished = LaunchUpdateDialogAutoConfirmer.runBounded(submitted -> {
+            Thread thread = new Thread(submitted, "bounded-handoff-test");
+            worker.set(thread);
+            thread.start();
+        }, () -> ran.set(true), 10_000L);
+
+        assertTrue("work finishing inside the bound must be reported as finished", finished);
+        assertTrue(ran.get());
+        worker.get().join(5_000L);
+    }
+
+    /**
+     * An arm that finds the filter already installed hands the reconcile over with a zero
+     * bound. That must still SUBMIT the work: the reconcile ends with the sweep of shells
+     * already on screen, which is the only thing that presses a modal raised before the arm.
+     * Turning the zero bound into a skip would reopen that hang.
+     */
+    @Test
+    public void testBoundedHandoffWithoutWaitingStillSubmitsTheWork()
+    {
+        AtomicReference<Runnable> queued = new AtomicReference<>();
+        AtomicBoolean ran = new AtomicBoolean();
+
+        boolean finished = LaunchUpdateDialogAutoConfirmer.runBounded(queued::set,
+            () -> ran.set(true), 0L);
+
+        assertFalse("a zero bound must not claim the work already ran", finished);
+        assertNotNull("a zero bound must still hand the work to the other thread", queued.get());
+        assertFalse("the work must not have run yet", ran.get());
+        queued.get().run();
+        assertTrue("the work the caller chose not to wait for still runs", ran.get());
+    }
+
+    // ==================== #618: every arm overload reports whether it armed ====================
+
+    /*
+     * The four short arm overloads used to be void and dropped the result of the arm they delegate
+     * to. A caller then could not tell a headless no-op from a real arm, released unconditionally,
+     * and took one count from a concurrent launch that DID arm. No workbench runs in this harness,
+     * so each overload must report false here; one test per overload so a mutation of any single
+     * one fails by name.
+     */
+
+    @Test
+    public void testTheNoArgumentArmReportsAHeadlessNoOp()
+    {
+        assertFalse("arm() must report that nothing was armed without a workbench display",
+            LaunchUpdateDialogAutoConfirmer.arm());
+    }
+
+    @Test
+    public void testTheTwoArgumentArmReportsAHeadlessNoOp()
+    {
+        assertFalse("arm(update, session) must report that nothing was armed without a display",
+            LaunchUpdateDialogAutoConfirmer.arm(true, true));
+    }
+
+    @Test
+    public void testTheThreeArgumentArmReportsAHeadlessNoOp()
+    {
+        assertFalse("arm(update, session, restructure) must report that nothing was armed without a display",
+            LaunchUpdateDialogAutoConfirmer.arm(true, true, true));
+    }
+
+    @Test
+    public void testTheFourArgumentArmReportsAHeadlessNoOp()
+    {
+        assertFalse("arm(update, session, restructure, policy) must report that nothing was armed without a display",
+            LaunchUpdateDialogAutoConfirmer.arm(true, true, true, ExternalInfobaseChangesPolicy.OVERRIDE));
+    }
+
+    /**
+     * Demonstrates why the reported result matters: a caller that conditions its release on it
+     * leaves intact the count a concurrent launch took in between. The condition is written here,
+     * in the test, so what this pins is the returned value; the production caller's own condition
+     * is pinned in {@code BuildExternalObjectsToolTest}.
+     */
+    @Test
+    public void testANoOpArmDoesNotReleaseTheCountAConcurrentLaunchTook()
+    {
+        int before = LaunchUpdateDialogAutoConfirmer.armCountsForTest()[0];
+        boolean armed = LaunchUpdateDialogAutoConfirmer.arm(true, true, true);
+        // A concurrent launch arms for real between this caller's arm and its finally.
+        LaunchUpdateDialogAutoConfirmer.armMatchersForTest(true, false, false);
+        try
+        {
+            if (armed)
+            {
+                LaunchUpdateDialogAutoConfirmer.disarm(true, true, true);
+            }
+            assertEquals("the concurrent launch's update arm must survive this caller's release",
+                before + 1, LaunchUpdateDialogAutoConfirmer.armCountsForTest()[0]);
+        }
+        finally
+        {
+            // Give back exactly the count the simulated concurrent launch took.
+            LaunchUpdateDialogAutoConfirmer.disarm(true, false, false);
+        }
+        assertEquals("the test must leave the shared count as it found it", before,
+            LaunchUpdateDialogAutoConfirmer.armCountsForTest()[0]);
     }
 }

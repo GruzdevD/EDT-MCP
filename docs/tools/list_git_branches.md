@@ -8,7 +8,7 @@ Inspect available Git branches and their EDT infobase bindings. Parameters and e
 | projectName | yes | string | EDT project to list git branches for (required). |
 
 ## Guide
-List a project's git branches (local and remote-tracking), flag the current one (and detached HEAD), and show the 1C application/infobase binding each branch **context** carries, when EDT tracks one.
+List local and remote-tracking Git branches for `projectName`, mark the current branch/detached HEAD, and show each branch context's application/infobase bindings when EDT tracks them.
 
 ## When to use
 - Before `switch_git_branch`, to see which branches exist and confirm the exact name to pass.
@@ -25,7 +25,7 @@ If neither resolves, the tool returns an actionable error naming the project and
 A Markdown report:
 - **Current** - the checked-out branch's short name, or `(detached HEAD at <commit>)` when HEAD does not point at a branch tip.
 - A branch table: `Branch | Type | Current` - `Type` is `local` (`refs/heads/...`), `remote` (`refs/remotes/...`), or `other` (e.g. a tag ref, rare in this list); `Current` is `Yes` on the checked-out branch's row (never set when detached).
-- An **Application Bindings** table: `Branch Context | Infobases | Default` - one row per context `IInfobaseAssociationManager` tracks for the project. `(default)` means the context with no branch name (the project-level binding used when no branch-specific override exists). `Infobases` lists the bound infobase names (or `(none)`); `Default` names the context's default infobase when set.
+- An **Application Bindings** table: `Branch Context | Infobases | Default` - one row per context `IInfobaseAssociationManager` tracks for the project. A branch context is shown by its branch name (EDT stores it as `refs/heads/<branch>`). `(default)` means the context with no branch name (the project-level binding used when no branch-specific override exists). Any other key is shown as is with a marker: `legacy short key - matches no branch, EDT never reads it; detach it with set_branch_infobase` for a binding that older versions of `set_branch_infobase` / `create_git_branch` wrote under the bare short name; `not a local branch ref` for any other ref; `detached-HEAD commit` for a commit id (EDT reads that one only while HEAD is detached at that commit). `Infobases` lists the bound infobase names (or `(none)`); `Default` names the context's default infobase when set.
 
 ## Notes & gotchas
 - Read-only: never touches the BM model, never mutates the repository or the workspace.

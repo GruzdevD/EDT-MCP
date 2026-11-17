@@ -9,9 +9,13 @@ package com.ditrix.edt.mcp.server.preferences;
 import static org.junit.Assert.*;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
+import org.junit.After;
 import org.junit.Test;
+
+import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
 
 /**
  * Tests for {@link ToolPreset} enum.
@@ -19,6 +23,12 @@ import org.junit.Test;
  */
 public class ToolPresetTest
 {
+    @After
+    public void tearDown()
+    {
+        McpToolRegistry.getInstance().clear();
+    }
+
     // === Preset definitions ===
 
     @Test
@@ -69,6 +79,7 @@ public class ToolPresetTest
         assertTrue("Should disable launch", disabled.contains("launch"));
         assertTrue("Should disable set_breakpoint", disabled.contains("set_breakpoint"));
         assertTrue("Should disable set_error_breakpoint", disabled.contains("set_error_breakpoint")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("Should disable debug_pause", disabled.contains("debug_pause")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("Should disable write_module_source", disabled.contains("write_module_source"));
         assertTrue("Should disable rename_metadata_object", disabled.contains("rename_metadata_object"));
         assertTrue("Should disable adopt_metadata_object", //$NON-NLS-1$
@@ -82,7 +93,7 @@ public class ToolPresetTest
         assertTrue("Should disable get_job_status with its disabled job owners", //$NON-NLS-1$
             disabled.contains("get_job_status")); //$NON-NLS-1$
 
-        // Should NOT disable core, problems, code intelligence, tags
+        // Keep the read tools in core, problems, code intelligence and tags
         assertFalse("Should not disable get_edt_version", disabled.contains("get_edt_version"));
         assertFalse("Should not disable get_project_errors", disabled.contains("get_project_errors"));
         assertFalse("Should not disable get_metadata_objects", disabled.contains("get_metadata_objects"));
@@ -108,6 +119,7 @@ public class ToolPresetTest
         assertTrue("Should disable rename_metadata_object", disabled.contains("rename_metadata_object"));
         assertTrue("Should disable set_breakpoint", disabled.contains("set_breakpoint"));
         assertTrue("Should disable set_error_breakpoint", disabled.contains("set_error_breakpoint")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("Should disable debug_pause", disabled.contains("debug_pause")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("Should disable adopt_metadata_object", //$NON-NLS-1$
             disabled.contains("adopt_metadata_object")); //$NON-NLS-1$
         assertTrue("Should disable build_external_objects", //$NON-NLS-1$
@@ -134,6 +146,7 @@ public class ToolPresetTest
         assertTrue("Should disable set_breakpoint", disabled.contains("set_breakpoint"));
         assertTrue("Should disable set_error_breakpoint", disabled.contains("set_error_breakpoint")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("Should disable resume", disabled.contains("resume"));
+        assertTrue("Should disable debug_pause", disabled.contains("debug_pause")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("Should disable stop_profiling", //$NON-NLS-1$
             disabled.contains("stop_profiling")); //$NON-NLS-1$
 
@@ -286,5 +299,31 @@ public class ToolPresetTest
             assertTrue(preset.getDisplayName() + " must keep the default-off tools disabled", //$NON-NLS-1$
                 disabled.containsAll(defaultOff));
         }
+    }
+
+    /**
+     * The two halves of the comparison family part ways here, and that is the decision rather than
+     * an oversight: {@code merge_rules} WRITES files, while starting a comparison and expanding a
+     * node read the model and change no code. Comparison occupies EDT's single comparison slot,
+     * so its write hint is an explicit exception in the read-only policy. Revalidation also stays
+     * enabled; workspace cleaning and disk resynchronization are excluded.
+     */
+    @Test
+    public void testReadOnlyPresetsDisableMergeRulesButKeepTheComparisonReadHalf()
+    {
+        for (ToolPreset preset : List.of(ToolPreset.ANALYSIS_ONLY, ToolPreset.CODE_REVIEW))
+        {
+            Set<String> disabled = preset.getDisabledTools();
+            assertTrue(preset.getDisplayName() + " must disable merge_rules: " + disabled, //$NON-NLS-1$
+                disabled.contains("merge_rules")); //$NON-NLS-1$
+            assertTrue(preset.getDisplayName() + " must disable delete_project: " + disabled, //$NON-NLS-1$
+                disabled.contains("delete_project")); //$NON-NLS-1$
+            assertFalse(preset.getDisplayName() + " must keep compare_configurations: " + disabled, //$NON-NLS-1$
+                disabled.contains("compare_configurations")); //$NON-NLS-1$
+            assertFalse(preset.getDisplayName() + " must keep get_comparison_node: " + disabled, //$NON-NLS-1$
+                disabled.contains("get_comparison_node")); //$NON-NLS-1$
+        }
+        assertFalse("Development authors merge rules, so it must NOT disable merge_rules", //$NON-NLS-1$
+            ToolPreset.DEVELOPMENT.getDisabledTools().contains("merge_rules")); //$NON-NLS-1$
     }
 }

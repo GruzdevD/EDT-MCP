@@ -46,7 +46,7 @@ public final class Toolsets
     public static final String TESTING = "testing"; //$NON-NLS-1$
     /** Performance profiling (start / stop / results). */
     public static final String PROFILING = "profiling"; //$NON-NLS-1$
-    /** Form rendering (layout snapshot / screenshot). */
+    /** Form rendering (layout snapshot / screenshot) and structural validation. */
     public static final String FORMS = "forms"; //$NON-NLS-1$
     /** Tag-based organization and lookup. */
     public static final String TAGS = "tags"; //$NON-NLS-1$
@@ -106,19 +106,21 @@ public final class Toolsets
         define(CODE, "Code",
             "BSL code: write/read methods, call hierarchy, go-to-definition, references, content assist, queries."); //$NON-NLS-1$
         define(DEBUG, "Debug",
-            "Runtime debugging: launch/attach, breakpoints, step/resume, variables, expression evaluation."); //$NON-NLS-1$
+            "Runtime debugging: launch/attach, breakpoints, step/resume/pause, variables, expression evaluation."); //$NON-NLS-1$
         define(TESTING, "Testing",
             "YAXUnit unit testing, 1C:Workmate assistance, and shared background-job polling."); //$NON-NLS-1$
         define(PROFILING, "Profiling",
-            "Performance profiling: start/stop a measurement and read the results."); //$NON-NLS-1$
+            "Performance profiling and 1C technological logs: capture, inspect, compare and exchange."); //$NON-NLS-1$
         define(FORMS, "Forms",
-            "Form and template rendering: form layout snapshot, form screenshot, template screenshot."); //$NON-NLS-1$
+            "Forms: layout snapshot, form screenshot, template screenshot, and structural " //$NON-NLS-1$
+                + "validation of a form model."); //$NON-NLS-1$
         define(TAGS, "Tags",
             "Tag-based organization: list tags and find objects by tag."); //$NON-NLS-1$
         define(TRANSLATION, "Translation",
             "Configuration translation via LanguageTool: extract, translate, project info."); //$NON-NLS-1$
         define(PROJECT, "Project",
-            "Project operations: clean/revalidate, update DB, export/import XML, problems and markers, docs."); //$NON-NLS-1$
+            "Project operations: clean/revalidate, inspect infobase sessions/update DB, " //$NON-NLS-1$
+                + "export/import XML, problems and markers, docs."); //$NON-NLS-1$
         define(COMPARISON, "Comparison",
             "Read a three-way configuration comparison: start one against two git revisions, " //$NON-NLS-1$
                 + "expand a node's differences, and read or author the merge-rules file EDT " //$NON-NLS-1$
@@ -130,6 +132,7 @@ public final class Toolsets
             + "MCP Server Tools preference tab to enable."); //$NON-NLS-1$
 
         assign(CORE,
+            "edt_dialog",
             "list_toolsets", "enable_toolset", //$NON-NLS-1$ //$NON-NLS-2$
             "get_tool_guide", "get_server_status", "get_edt_version", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "list_projects", "list_modules", "get_module_structure", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -138,14 +141,15 @@ public final class Toolsets
             "plugin_check_for_update", "plugin_update"); //$NON-NLS-1$ //$NON-NLS-2$
 
         assign(METADATA,
-            "create_metadata", "modify_metadata", "delete_metadata", "dcs", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            "rename_metadata_object", "adopt_metadata_object", //$NON-NLS-1$ //$NON-NLS-2$
+            "sort_metadata", "create_metadata", "modify_metadata", "delete_metadata", "dcs", "business_process_route_map", "search_in_dcs", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+            "rename_metadata_object", "clone_metadata_object", "adopt_metadata_object", //$NON-NLS-1$ //$NON-NLS-2$
             "list_common_pictures", "export_common_picture", //$NON-NLS-1$ //$NON-NLS-2$
             "get_subsystem_content", "list_subsystems", //$NON-NLS-1$ //$NON-NLS-2$
             "get_configuration_properties", "list_configurations", //$NON-NLS-1$ //$NON-NLS-2$
             "create_launch_config", "delete_launch_config"); //$NON-NLS-1$ //$NON-NLS-2$
 
         assign(CODE,
+            "open_editor",
             "write_module_source", "read_method_source", "get_method_call_hierarchy", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "get_outgoing_structures", "go_to_definition", "get_symbol_info", "find_references", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "get_content_assist", "validate_query"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -154,10 +158,12 @@ public final class Toolsets
             "launch", "debug_status", "set_breakpoint", "set_error_breakpoint", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "remove_breakpoint", "list_breakpoints", "wait_for_break", "get_variables", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "set_variable", //$NON-NLS-1$
-            "step", "resume", "evaluate_expression", "get_applications", "terminate_launch"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            "step", "resume", "debug_pause", "evaluate_expression", "get_applications", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            "terminate_launch", "get_launch_state"); //$NON-NLS-1$ //$NON-NLS-2$
 
         assign(TESTING,
             "run_yaxunit_tests", "debug_yaxunit_tests", "list_yaxunit_tests", "ask_workmate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            "create_specter_launch_config", //$NON-NLS-1$
             "get_job_status", "cancel_job", //$NON-NLS-1$ //$NON-NLS-2$
             "vanessa_list_launches", "vanessa_run_feature", //$NON-NLS-1$ //$NON-NLS-2$
             "vanessa_get_execution_status", "vanessa_get_test_report", //$NON-NLS-1$ //$NON-NLS-2$
@@ -166,10 +172,12 @@ public final class Toolsets
             "vanessa_doctor", "vanessa_setup", "vanessa_open_allure_report"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
         assign(PROFILING,
-            "start_profiling", "stop_profiling", "get_profiling_results"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "get_tech_log", "manage_tech_log", //$NON-NLS-1$ //$NON-NLS-2$
+            "start_profiling", "stop_profiling", "get_profiling_results", "manage_profiling_results"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 
         assign(FORMS,
-            "get_form_layout_snapshot", "get_form_screenshot", "get_template_screenshot"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "get_form_layout_snapshot", "get_form_screenshot", "get_template_screenshot", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "validate_form_model"); //$NON-NLS-1$
 
         assign(TAGS,
             "get_tags", "get_objects_by_tags"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -181,13 +189,16 @@ public final class Toolsets
             "clean_project", "revalidate_objects", "resync_to_disk", "update_database", "delete_project", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
             "export_configuration_to_xml", "import_configuration_from_xml", "build_external_objects", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "import_project", //$NON-NLS-1$
-            "create_infobase", "delete_infobase", "set_infobase_credentials", "create_project", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            "export_configuration_to_file", //$NON-NLS-1$
+            "create_infobase", "delete_infobase", "infobase_sessions", "infobase_extensions", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            "standalone_server", "remove_standalone_server", "set_infobase_credentials", "create_project", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "list_infobases", "create_project_application", "delete_project_application", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "remove_standalone_server", "set_project_checks", //$NON-NLS-1$ //$NON-NLS-2$
+            "set_project_checks", "import_project_from_file", //$NON-NLS-1$ //$NON-NLS-2$
             "get_problem_summary", "get_project_errors", "validate_xdto_package", "get_markers", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "get_event_log", //$NON-NLS-1$
             "get_mcp_history", //$NON-NLS-1$
             "list_git_branches", "switch_git_branch", "set_branch_infobase", "create_git_branch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            "project_checks", //$NON-NLS-1$
             "get_check_description", "apply_quick_fix", "get_platform_documentation"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
         assign(COMPARISON,

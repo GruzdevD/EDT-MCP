@@ -17,13 +17,14 @@ import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextHover;
 import org.eclipse.jface.text.ITextHoverExtension2;
+import org.eclipse.jface.text.source.Annotation;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPage;
-import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.ide.IDE;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.ILeafNode;
@@ -32,6 +33,7 @@ import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.XtextEditor;
+import org.eclipse.xtext.ui.editor.hover.AnnotationWithQuickFixesHover.AnnotationInfo;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
@@ -43,11 +45,13 @@ import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 
+import com.ditrix.edt.mcp.server.utils.ReadToolExecution;
 import com.ditrix.edt.mcp.server.Activator;
-import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.utils.FrontMatter;
 import com.ditrix.edt.mcp.server.utils.MarkdownUtils;
+import com.ditrix.edt.mcp.server.utils.PlatformFailures;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
+import com.ditrix.edt.mcp.server.utils.Refusals;
 import com.ditrix.edt.mcp.server.utils.ReflectionUtils;
 import com.ditrix.edt.mcp.server.utils.BslModuleUtils;
 
@@ -80,81 +84,80 @@ public class SymbolInfoService
      * Gets symbol info at the specified position.
      * Must run on UI thread to access editors.
      */
-    public String getSymbolInfo(String projectName, String filePath, int line, int column)
+    public record Outcome(String text, String error, boolean canFallback)
+    {
+        static Outcome value(String text) { return new Outcome(meaningfulOrNull(text), null, false); }
+        static Outcome failure(String message) { return new Outcome(null, message == null ? "Unknown error" : message, false); }
+        static Outcome unavailable(String message) { return new Outcome(null, message, true); }
+    }
+
+    public Outcome getSymbolInfo(String projectName, String filePath, int line, int column)
     {
         // Find the project
         ProjectContext ctx = ProjectContext.of(projectName);
 
         if (!ctx.exists())
         {
-            return ToolResult.error(ProjectContext.notFoundMessage(projectName)).toJson();
+            return Outcome.failure(ProjectContext.notFoundMessage(projectName));
         }
 
         if (!ctx.isOpen())
         {
-            return ToolResult.error("Project is closed: " + projectName).toJson(); //$NON-NLS-1$
+            return Outcome.failure("Project is closed: " + projectName); //$NON-NLS-1$
         }
 
         IProject project = ctx.project();
 
         // Build the full path: project/src/filePath
-        IFile file = BslModuleUtils.resolveModuleFile(project, filePath);
+        IFile file;
+        try
+        {
+            file = BslModuleUtils.resolveModuleFile(project, filePath);
+        }
+        catch (RuntimeException e)
+        {
+            Refusals.log("Failed to resolve module", e); //$NON-NLS-1$
+            return Outcome.failure(e.getMessage());
+        }
 
         if (!file.exists())
         {
-            return ToolResult.error("File not found: " + file.getProjectRelativePath().toString() + //$NON-NLS-1$
-                   " in project " + projectName).toJson(); //$NON-NLS-1$
+            return Outcome.failure("File not found: " + file.getProjectRelativePath().toString() + //$NON-NLS-1$
+                   " in project " + projectName); //$NON-NLS-1$
         }
 
         final IFile targetFile = file;
         final int targetLine = line;
         final int targetColumn = column;
 
-        AtomicReference<String> resultRef = new AtomicReference<>();
+        AtomicReference<Outcome> resultRef = new AtomicReference<>();
 
         // Execute on UI thread
-        Display display = PlatformUI.getWorkbench().getDisplay();
-        display.syncExec(() -> {
+        ReadToolExecution.dispatch(() -> {
             try
             {
-                String result = executeOnUiThread(targetFile, targetLine, targetColumn);
+                Outcome result = executeOnUiThread(targetFile, targetLine, targetColumn);
                 resultRef.set(result);
             }
             catch (Exception e)
             {
                 Activator.logError("Error getting symbol info", e); //$NON-NLS-1$
-                resultRef.set("Error: " + e.getMessage()); //$NON-NLS-1$
+                resultRef.set(Outcome.failure(String.valueOf(e.getMessage()).trim())); //$NON-NLS-1$
             }
         });
 
-        String result = resultRef.get();
-
-        // If editor-based approach failed, try EMF fallback
-        if (result == null || result.startsWith("Error: No active workbench") //$NON-NLS-1$
-            || result.startsWith("Error: Could not open editor")) //$NON-NLS-1$
+        Outcome result = resultRef.get();
+        if (result == null || result.canFallback() || result.error() == null && result.text() == null)
         {
-            String emfResult = getSymbolInfoViaEmf(project, filePath, line, column);
-            if (emfResult != null)
-            {
-                result = emfResult;
-            }
+            Outcome emfResult = ReadToolExecution.readModel(project, "get_symbol_info",
+                () -> getSymbolInfoViaEmf(project, filePath, targetLine, targetColumn));
+            if (emfResult != null && (emfResult.text() != null || emfResult.error() != null)) result = emfResult;
         }
-
-        if (result == null)
+        if (result == null || result.error() == null && result.text() == null)
         {
-            return ToolResult.error("Could not get symbol info").toJson(); //$NON-NLS-1$
+            return Outcome.failure("Could not get symbol info");
         }
-
-        // Wrap result with frontmatter (skip for error messages). The
-        // workbench/editor/document failures bubble up here as internal "Error:"
-        // sentinel strings (set by executeOnUiThread and the syncExec catch block,
-        // and used above to trigger the EMF fallback); convert them to the
-        // structured ToolResult.error contract at this single boundary so the
-        // protocol's isJsonErrorPayload diversion delivers them as isError JSON.
-        if (result.startsWith("Error:")) //$NON-NLS-1$
-        {
-            return ToolResult.error(result.substring("Error:".length()).trim()).toJson(); //$NON-NLS-1$
-        }
+        if (result.error() != null) return result;
 
         FrontMatter fm = FrontMatter.create()
             .put("projectName", projectName) //$NON-NLS-1$
@@ -162,24 +165,25 @@ public class SymbolInfoService
             .put("line", line) //$NON-NLS-1$
             .put("column", column); //$NON-NLS-1$
 
-        return fm.wrapContent(result);
+        return Outcome.value(fm.wrapContent(result.text()));
     }
 
     /**
      * Executes symbol info retrieval on UI thread.
      */
-    private String executeOnUiThread(IFile file, int line, int column) throws Exception // NOSONAR reflective per-kind dispatch; further decomposition deferred
+    private Outcome executeOnUiThread(IFile file, int line, int column) throws Exception // NOSONAR reflective per-kind dispatch; further decomposition deferred
     {
+        if (!PlatformUI.isWorkbenchRunning()) { return Outcome.unavailable("No active workbench window"); }
         IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
         if (window == null)
         {
-            return "Error: No active workbench window"; //$NON-NLS-1$
+            return Outcome.unavailable("No active workbench window"); //$NON-NLS-1$
         }
 
         IWorkbenchPage page = window.getActivePage();
         if (page == null)
         {
-            return "Error: No active workbench page"; //$NON-NLS-1$
+            return Outcome.unavailable("No active workbench page"); //$NON-NLS-1$
         }
 
         // Check if the editor is already open to avoid leaving extra tabs
@@ -190,7 +194,7 @@ public class SymbolInfoService
         IEditorPart editorPart = IDE.openEditor(page, file, true);
         if (editorPart == null)
         {
-            return "Error: Could not open editor for file"; //$NON-NLS-1$
+            return Outcome.unavailable("Could not open editor for file"); //$NON-NLS-1$
         }
 
         try
@@ -199,19 +203,19 @@ public class SymbolInfoService
             XtextEditor xtextEditor = editorPart.getAdapter(XtextEditor.class);
             if (xtextEditor == null)
             {
-                return "Error: File is not a BSL module (not an Xtext editor)"; //$NON-NLS-1$
+                return Outcome.failure("File is not a BSL module (not an Xtext editor)"); //$NON-NLS-1$
             }
 
             ISourceViewer sourceViewer = xtextEditor.getInternalSourceViewer();
             if (sourceViewer == null)
             {
-                return "Error: Could not get source viewer"; //$NON-NLS-1$
+                return Outcome.failure("Could not get source viewer"); //$NON-NLS-1$
             }
 
             IDocument document = sourceViewer.getDocument();
             if (document == null)
             {
-                return "Error: Could not get document"; //$NON-NLS-1$
+                return Outcome.failure("Could not get document"); //$NON-NLS-1$
             }
 
             // Calculate offset from line and column (1-based to 0-based)
@@ -224,12 +228,12 @@ public class SymbolInfoService
                 // Validate offset is within document
                 if (offset < 0 || offset > document.getLength())
                 {
-                    return "Error: Position is outside document bounds"; //$NON-NLS-1$
+                    return Outcome.failure("Position is outside document bounds"); //$NON-NLS-1$
                 }
             }
             catch (BadLocationException e)
             {
-                return "Error: Invalid line number: " + line; //$NON-NLS-1$
+                return Outcome.failure("Invalid line number: " + line); //$NON-NLS-1$
             }
 
             // Pre-check: verify there is a meaningful token at the position
@@ -237,25 +241,25 @@ public class SymbolInfoService
             // (spaces, tabs, end of line, comment markers) which confuses AI agents
             if (!hasTokenAtPosition(document, offset, line))
             {
-                return "No symbol at this position."; //$NON-NLS-1$
+                return Outcome.value("No symbol at this position."); //$NON-NLS-1$
             }
 
             // === Level 1: Try hover ===
             String hoverResult = tryGetHoverInfo(sourceViewer, offset);
             if (hoverResult != null && !hoverResult.isEmpty())
             {
-                return hoverResult;
+                return Outcome.value(hoverResult);
             }
 
             // === Level 2: EObject analysis ===
             String eobjectResult = resolveEObjectInfoFromDocument(xtextEditor.getDocument(), offset);
             if (eobjectResult != null && !eobjectResult.isEmpty())
             {
-                return eobjectResult;
+                return Outcome.value(eobjectResult);
             }
 
             // Nothing found at this position
-            return "No symbol found at this position.\n"; //$NON-NLS-1$
+            return Outcome.value("No symbol found at this position.\n"); //$NON-NLS-1$
         }
         finally
         {
@@ -321,6 +325,10 @@ public class SymbolInfoService
                 Object info2 = ((ITextHoverExtension2) textHover).getHoverInfo2(sourceViewer, hoverRegion);
                 if (info2 != null)
                 {
+                    if (info2 instanceof AnnotationInfo)
+                    {
+                        return getAnnotationHoverInfo(info2, sourceViewer, offset);
+                    }
                     String infoStr = extractHoverContent(info2);
                     if (infoStr != null && !infoStr.isEmpty())
                     {
@@ -339,10 +347,32 @@ public class SymbolInfoService
         }
         catch (Exception e)
         {
-            Activator.logWarning("Could not get hover info: " + e.getMessage()); //$NON-NLS-1$
+            Activator.logWarning("Could not get hover info; using symbol information: " + PlatformFailures.describe(e)); //$NON-NLS-1$
         }
 
         return null;
+    }
+
+    private String getAnnotationHoverInfo(Object info, ISourceViewer viewer, int offset) throws Exception
+    {
+        String message = null;
+        try
+        {
+            message = meaningfulOrNull(extractHoverContent(info));
+        }
+        catch (Exception e)
+        {
+            Activator.logWarning("Could not read annotation hover; using symbol information: " + PlatformFailures.describe(e)); //$NON-NLS-1$
+        }
+
+        String symbol = viewer.getDocument() instanceof IXtextDocument document
+            ? resolveEObjectInfoFromDocument(document, offset) : null;
+        if (symbol == null && message == null)
+        {
+            return null;
+        }
+        String annotation = "### Annotation\n\n" + (message != null ? message : "Message unavailable."); //$NON-NLS-1$ //$NON-NLS-2$
+        return symbol != null ? symbol + "\n\n" + annotation : annotation; //$NON-NLS-1$
     }
 
     /**
@@ -387,64 +417,70 @@ public class SymbolInfoService
      * The object may be a String, or an Xtext-specific hover information object
      * that contains HTML content.
      */
-    private String extractHoverContent(Object hoverInfo)
+    private String extractHoverContent(Object hoverInfo) throws Exception
     {
         if (hoverInfo instanceof String)
         {
             return (String) hoverInfo;
         }
 
-        // Try to get HTML content from Xtext hover objects via reflection
-        try
+        if (hoverInfo instanceof AnnotationInfo)
         {
-            // XtextBrowserInformationControlInput has getHtml() method
-            Object html = ReflectionUtils.invokeMethod(hoverInfo, "getHtml"); //$NON-NLS-1$
-            if (html instanceof String)
+            // BslAnnotationInfo inherits AnnotationInfo.annotation; EDT renders annotation.getText().
+            Object annotation = ReflectionUtils.getFieldValue(hoverInfo, "annotation"); //$NON-NLS-1$
+            if (annotation instanceof Annotation marker)
             {
-                return (String) html;
+                return marker.getText();
             }
-        }
-        catch (Exception e)
-        {
-            // Try toString as last resort
+            throw new IllegalStateException("Annotation hover has no readable annotation field"); //$NON-NLS-1$
         }
 
-        // Try getInputElement and then toString
-        try
+        if (ReflectionUtils.findMethod(hoverInfo.getClass(), "getHtml") != null) //$NON-NLS-1$
         {
-            Object inputElement = ReflectionUtils.invokeMethod(hoverInfo, "getInputElement"); //$NON-NLS-1$
-            if (inputElement != null)
+            try
             {
-                return meaningfulOrNull(inputElement.toString());
+                Object html = ReflectionUtils.invokeMethod(hoverInfo, "getHtml"); //$NON-NLS-1$
+                if (html instanceof String)
+                {
+                    return (String) html;
+                }
+            }
+            catch (Exception e)
+            {
+                Activator.logWarning("Could not read hover getHtml; trying remaining content: " //$NON-NLS-1$
+                    + PlatformFailures.describe(e));
             }
         }
-        catch (Exception e)
+        if (ReflectionUtils.findMethod(hoverInfo.getClass(), "getInputElement") != null) //$NON-NLS-1$
         {
-            // Ignore
+            try
+            {
+                Object inputElement = ReflectionUtils.invokeMethod(hoverInfo, "getInputElement"); //$NON-NLS-1$
+                if (inputElement != null)
+                {
+                    return meaningfulOrNull(inputElement.toString());
+                }
+            }
+            catch (Exception e)
+            {
+                Activator.logWarning("Could not read hover getInputElement; trying remaining content: " //$NON-NLS-1$
+                    + PlatformFailures.describe(e));
+            }
         }
-
-        // Last resort: the object's own toString. Some hovers (e.g. an
-        // annotation/quick-fix hover at a position carrying a validation marker, like
-        // BslAnnotationWithQuickFixesHover$BslAnnotationInfo) have no extractable text
-        // here and would yield a bare "ClassName@hexhash" — which is NOT useful symbol
-        // info and must not leak to the caller. Returning null lets the caller fall
-        // through to the real EObject/type resolution (Level 2) instead.
         return meaningfulOrNull(hoverInfo.toString());
     }
 
     /**
-     * Returns {@code s} unless it is null/blank or a bare {@code Object.toString()}
-     * reference ({@code ClassName@hexhash}), in which case it returns {@code null} so
-     * the caller treats the hover as "no content" and falls through to real symbol
-     * resolution rather than leaking a raw object reference.
+     * Drops blank content and bare object references, including Markdown-escaped references.
      */
     static String meaningfulOrNull(String s)
     {
-        if (s == null || s.trim().isEmpty() || s.matches("[\\w.$]+@[0-9a-fA-F]+")) //$NON-NLS-1$
+        if (s == null || s.trim().isEmpty())
         {
             return null;
         }
-        return s;
+        String unescaped = s.replace("\\", "").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+        return PlatformFailures.isObjectIdentity(unescaped) ? null : s;
     }
 
     /**
@@ -870,7 +906,7 @@ public class SymbolInfoService
     /**
      * Fallback: gets symbol info via EMF model without opening editor.
      */
-    private String getSymbolInfoViaEmf(IProject project, String filePath, int line, int column)
+    private Outcome getSymbolInfoViaEmf(IProject project, String filePath, int line, int column)
     {
         try
         {
@@ -919,16 +955,22 @@ public class SymbolInfoService
 
             if (semanticElement != null)
             {
-                return buildEObjectInfo(semanticElement);
+                return Outcome.value(buildEObjectInfo(semanticElement));
             }
 
             StringBuilder sb = new StringBuilder();
             sb.append(MarkdownUtils.tableHeader(PROPERTY, VALUE));
             sb.append(codeCell("Token", leafNode.getText())); //$NON-NLS-1$
-            return sb.toString();
+            return Outcome.value(sb.toString());
         }
         catch (Exception e)
         {
+            String refusal = Refusals.messageOf(e);
+            if (refusal != null)
+            {
+                Refusals.log("EMF fallback refused", e); //$NON-NLS-1$
+                return Outcome.failure(refusal.trim()); //$NON-NLS-1$
+            }
             Activator.logWarning("EMF fallback failed: " + e.getMessage()); //$NON-NLS-1$
             return null;
         }
@@ -971,9 +1013,9 @@ public class SymbolInfoService
      */
     private String cleanHtmlToMarkdown(String html)
     {
-        if (html == null || html.isEmpty())
+        if (meaningfulOrNull(html) == null)
         {
-            return ""; //$NON-NLS-1$
+            return null;
         }
 
         try
@@ -991,13 +1033,13 @@ public class SymbolInfoService
             // Normalize excessive line breaks
             markdown = markdown.replaceAll("\n{3,}", "\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
 
-            return markdown.trim();
+            return meaningfulOrNull(markdown.trim());
         }
         catch (Exception e)
         {
             Activator.logError("Error converting HTML to Markdown", e); //$NON-NLS-1$
             // Fallback: just strip tags
-            return html.replaceAll("<[^>]+>", " ").replaceAll("\\s+", " ").trim(); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            return meaningfulOrNull(html.replaceAll("<[^>]+>", " ").replaceAll("\\s+", " ").trim()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         }
     }
 }

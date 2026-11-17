@@ -4,9 +4,8 @@
 package com.ditrix.edt.mcp.server.utils;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-
-import com.ditrix.edt.mcp.server.Activator;
 
 /**
  * Utility class for common reflection operations used in tools that interact
@@ -17,6 +16,40 @@ public final class ReflectionUtils
     private ReflectionUtils()
     {
         // Utility class
+    }
+
+    /** Looks up an optional public API once, including inherited interface methods. */
+    public static Method publicMethodOrNull(Class<?> type, String name, Class<?>... parameterTypes)
+    {
+        try
+        {
+            return type.getMethod(name, parameterTypes);
+        }
+        catch (NoSuchMethodException e)
+        {
+            return null;
+        }
+    }
+
+    /** Invokes a resolved API while preserving the platform failure across the reflection boundary. */
+    public static Object invoke(Method method, Object target, Object... arguments) throws Exception
+    {
+        try
+        {
+            return method.invoke(target, arguments);
+        }
+        catch (InvocationTargetException e)
+        {
+            if (e.getCause() instanceof Exception cause)
+            {
+                throw cause;
+            }
+            if (e.getCause() instanceof Error cause)
+            {
+                throw cause;
+            }
+            throw new IllegalStateException("EDT API invocation failed: " + method.getName(), e.getCause());
+        }
     }
 
     /**
@@ -83,44 +116,5 @@ public final class ReflectionUtils
             }
         }
         return null;
-    }
-
-    /**
-     * Attempts to force-set a static final boolean field using {@code sun.misc.Unsafe}.
-     * This is a last-resort mechanism for patching internal platform flags.
-     *
-     * @param targetClass the class containing the field
-     * @param fieldName the static final boolean field name
-     * @param value the value to set
-     * @return {@code true} if successful
-     */
-    public static boolean forceStaticFinalBoolean(Class<?> targetClass, String fieldName, boolean value)
-    {
-        try
-        {
-            Class<?> unsafeClass = Class.forName("sun.misc.Unsafe"); //$NON-NLS-1$
-            Field theUnsafeField = unsafeClass.getDeclaredField("theUnsafe"); //$NON-NLS-1$
-            theUnsafeField.setAccessible(true); // NOSONAR reflective access is required (EDT internals, no Require-Bundle)
-            Object unsafe = theUnsafeField.get(null);
-
-            Field targetField = targetClass.getDeclaredField(fieldName);
-            targetField.setAccessible(true); // NOSONAR reflective access is required (EDT internals, no Require-Bundle)
-
-            Method staticFieldBase = unsafeClass.getMethod("staticFieldBase", Field.class); //$NON-NLS-1$
-            Method staticFieldOffset = unsafeClass.getMethod("staticFieldOffset", Field.class); //$NON-NLS-1$
-            Method putBooleanVolatile =
-                unsafeClass.getMethod("putBooleanVolatile", Object.class, long.class, boolean.class); //$NON-NLS-1$
-
-            Object fieldBase = staticFieldBase.invoke(unsafe, targetField);
-            long fieldOffset = (Long)staticFieldOffset.invoke(unsafe, targetField);
-            putBooleanVolatile.invoke(unsafe, fieldBase, fieldOffset, value);
-
-            return true;
-        }
-        catch (Exception e)
-        {
-            Activator.logWarning("Unsafe patch for static final boolean failed: " + e.getMessage()); //$NON-NLS-1$
-            return false;
-        }
     }
 }

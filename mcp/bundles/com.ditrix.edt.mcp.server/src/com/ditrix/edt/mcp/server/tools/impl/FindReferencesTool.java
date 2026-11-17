@@ -6,11 +6,15 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.PlatformUI;
 
+import com.ditrix.edt.mcp.server.utils.ReadToolExecution;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.McpKeys;
@@ -18,6 +22,10 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.reference.MetadataReferenceService;
+import com.ditrix.edt.mcp.server.tools.reference.ReferenceSearchBound;
+import com.ditrix.edt.mcp.server.utils.Pagination;
+import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
+import com.ditrix.edt.mcp.server.utils.ProjectStateChecker.SearchDependenciesResult;
 
 /**
  * Tool to find all references to a metadata object.
@@ -27,6 +35,70 @@ import com.ditrix.edt.mcp.server.tools.reference.MetadataReferenceService;
 public class FindReferencesTool implements IMcpTool
 {
     public static final String NAME = "find_references"; //$NON-NLS-1$
+
+    /** Fixed, shared budget for the pure-query search-scope settle before entering the UI thread. */
+    static final long SEARCH_SCOPE_SETTLE_TIMEOUT_MS = 10_000L;
+
+    /** The bounded pre-scan readiness wait; production is {@link ProjectStateChecker#awaitSearchScopeReady}. */
+    interface SearchScopeSettler
+    {
+        /**
+         * @return the last snapshot the wait saw; the scan ignores it and captures its own fresh one,
+         *     the value exists so the production wiring is observable
+         */
+        SearchDependenciesResult settle(String projectName, long budgetMs);
+    }
+
+    /** The bounded reference search itself; production is {@link MetadataReferenceService#findReferences}. */
+    interface ReferenceSearch
+    {
+        String find(String projectName, String objectFqn, ReferenceSearchBound bound);
+    }
+
+    private final SearchScopeSettler searchScopeSettler;
+    private final Consumer<Runnable> uiRunner;
+    /** Whether the calling thread is the SWT UI thread; there the settle must not sleep. */
+    private final BooleanSupplier onUiThread;
+    private final ReferenceSearch referenceSearch;
+    /** Monotonic clock the time budget is measured on. */
+    private final LongSupplier nanoClock;
+
+    public FindReferencesTool()
+    {
+        this(ProjectStateChecker::awaitSearchScopeReady, ReadToolExecution::dispatch,
+            () -> Display.getCurrent() != null);
+    }
+
+    FindReferencesTool(SearchScopeSettler searchScopeSettler, Consumer<Runnable> uiRunner,
+        BooleanSupplier onUiThread)
+    {
+        this(searchScopeSettler, uiRunner, onUiThread,
+            (projectName, objectFqn, bound) -> new MetadataReferenceService().findReferences(projectName,
+                objectFqn, bound),
+            System::nanoTime);
+    }
+
+    FindReferencesTool(SearchScopeSettler searchScopeSettler, Consumer<Runnable> uiRunner,
+        BooleanSupplier onUiThread, ReferenceSearch referenceSearch, LongSupplier nanoClock)
+    {
+        this.searchScopeSettler = searchScopeSettler;
+        this.uiRunner = uiRunner;
+        this.onUiThread = onUiThread;
+        this.referenceSearch = referenceSearch;
+        this.nanoClock = nanoClock;
+    }
+
+    /** Package-visible so a headless test can prove what the public constructor wired. */
+    BooleanSupplier onUiThread()
+    {
+        return onUiThread;
+    }
+
+    /** Package-visible so a headless test can prove what the public constructor wired. */
+    SearchScopeSettler searchScopeSettler()
+    {
+        return searchScopeSettler;
+    }
 
     /** Input param: FQN of the metadata object to find references to. */
     private static final String KEY_OBJECT_FQN = "objectFqn"; //$NON-NLS-1$
@@ -54,8 +126,8 @@ public class FindReferencesTool implements IMcpTool
                 "FQN of the object to search for, e.g. 'Catalog.Products' " + //$NON-NLS-1$
                 "(type token may be English or Russian) (required)", true) //$NON-NLS-1$
             .integerProperty("limit", //$NON-NLS-1$
-                "Result-size hint (default 100, max 500); caps the overall reference count " //$NON-NLS-1$
-                + "(at limit*10), not per category.") //$NON-NLS-1$
+                "Max references to collect (default 100, max 500), overall, not per category; " //$NON-NLS-1$
+                + "the search itself stops one past it and says that more exist.") //$NON-NLS-1$
             .build();
     }
 
@@ -71,7 +143,7 @@ public class FindReferencesTool implements IMcpTool
         String objectFqn = JsonUtils.extractStringArgument(params, KEY_OBJECT_FQN);
         if (objectFqn != null && !objectFqn.isEmpty())
         {
-            String safeName = objectFqn.replace(".", "-").toLowerCase(); //$NON-NLS-1$ //$NON-NLS-2$
+            String safeName = objectFqn.replace(".", "-").toLowerCase(Locale.ROOT); //$NON-NLS-1$ //$NON-NLS-2$
             return "references-" + safeName + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
         }
         return "references.md"; //$NON-NLS-1$
@@ -96,19 +168,35 @@ public class FindReferencesTool implements IMcpTool
         String projectName = JsonUtils.extractStringArgument(params, McpKeys.PROJECT_NAME);
         String objectFqn = JsonUtils.extractStringArgument(params, KEY_OBJECT_FQN);
 
-        // Shared typed accessor (handles the "42.0" form and invalid/missing -> default),
-        // replacing the inline Double.parseDouble. Default 100, upper clamp 500 preserved.
-        int limit = Math.min(JsonUtils.extractIntArgument(params, "limit", 100), 500); //$NON-NLS-1$
+        // Shared typed accessor (handles the "42.0" form and invalid/missing -> default), clamped to
+        // [1, 500]. The limit bounds the search itself (issue #931): the scan stops one reference past
+        // it, and the time budget - counted from here, so the readiness wait below is paid out of it -
+        // stops it with a labelled partial answer before the client's transport timeout.
+        int limit = Pagination.clampLimit(
+            JsonUtils.extractIntArgument(params, "limit", ReferenceSearchBound.DEFAULT_LIMIT), //$NON-NLS-1$
+            ReferenceSearchBound.MAX_LIMIT);
+        ReferenceSearchBound bound =
+            ReferenceSearchBound.of(limit, ReferenceSearchBound.TIME_BUDGET_MS, nanoClock);
+
+        // EDT can need the UI thread while settling, so the wait runs only off it. The in-process
+        // bridge dispatches on its caller's thread, which can be the UI thread: sleeping there would
+        // freeze EDT and stall the very derived-data work being awaited. The scan captures its own
+        // fresh snapshot either way, so a skipped wait still reports the adopted copies it missed.
+        if (!onUiThread.getAsBoolean())
+        {
+            searchScopeSettler.settle(projectName, SEARCH_SCOPE_SETTLE_TIMEOUT_MS);
+        }
 
         // Execute on UI thread
         AtomicReference<String> resultRef = new AtomicReference<>();
-        final int maxResults = limit;
 
-        Display display = PlatformUI.getWorkbench().getDisplay();
-        display.syncExec(() -> {
+        uiRunner.accept(() -> {
             try
             {
-                String result = new MetadataReferenceService().findReferences(projectName, objectFqn, maxResults);
+                String result = com.ditrix.edt.mcp.server.HostKind.current() == com.ditrix.edt.mcp.server.HostKind.HEADLESS
+                    ? ReadToolExecution.read(projectName, NAME,
+                        () -> referenceSearch.find(projectName, objectFqn, bound))
+                    : referenceSearch.find(projectName, objectFqn, bound);
                 resultRef.set(result);
             }
             catch (Exception e)

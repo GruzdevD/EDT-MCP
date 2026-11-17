@@ -47,6 +47,82 @@ import org.junit.Test;
  */
 public class FormStructureReaderTest
 {
+    @Test
+    public void testRenderCanonicalFormHeaders()
+    {
+        var form = com._1c.g5.v8.dt.form.model.FormFactory.eINSTANCE.createForm();
+        for (String[] address : new String[][] {
+            { "Catalog.Products.forms.ItemForm", "Catalog.Products.Form.ItemForm" },
+            { "Catalogs.Products.Forms.ItemForm", "Catalog.Products.Form.ItemForm" },
+            { "Справочник.Товары.Форма.ФормаЭлемента", "Catalog.Товары.Form.ФормаЭлемента" },
+            { "CommonForm.Picker", "CommonForm.Picker" },
+            { "ОбщаяФорма.Выбор", "CommonForm.Выбор" }
+        })
+        {
+            String heading = "# Form Structure: " + address[1] + "\n\n";
+            assertTrue(address[0], FormStructureReader.render(address[0], form, "en").startsWith(heading));
+            assertTrue(address[0], FormStructureReader.render(address[0], form, "ru", 1).startsWith(heading));
+        }
+    }
+
+    @Test
+    public void testCommandCellIsCappedButRefusalKeepsAllHandlers()
+    {
+        var factory = com._1c.g5.v8.dt.form.model.FormFactory.eINSTANCE;
+        var form = factory.createForm();
+        var command = factory.createFormCommand();
+        command.setName("Print");
+        var action = factory.createFormExtensionCommandHandlerContainer();
+        for (int i = 1; i <= 13; i++)
+        {
+            var handler = factory.createCommandHandlerExtension();
+            handler.setName("Handler" + i);
+            action.getHandlers().add(handler);
+        }
+        command.setAction(action);
+        form.getFormCommands().add(command);
+        String md = FormStructureReader.render("CommonForm.F", form, "en");
+        String commands = md.substring(md.indexOf("## Commands"), md.indexOf("## Event handlers"));
+        assertTrue(commands.contains("Handler10 \u2026 (+3 more)"));
+        assertFalse(commands.contains("Handler11"));
+        assertTrue(FormStructureReader.actionHandlerOf(command).endsWith("Handler12, Handler13"));
+    }
+
+    @Test
+    public void testTypeCellsAreCappedInAllThreeTables()
+    {
+        var factory = com._1c.g5.v8.dt.form.model.FormFactory.eINSTANCE;
+        var form = factory.createForm();
+        var attribute = factory.createFormAttribute();
+        attribute.setName("Values");
+        attribute.setValueType(manyTypes());
+        var column = factory.createFormAttributeColumn();
+        column.setName("Column");
+        column.setValueType(manyTypes());
+        attribute.getColumns().add(column);
+        form.getAttributes().add(attribute);
+        var parameter = factory.createFormParameter();
+        parameter.setName("Input");
+        parameter.setValueType(manyTypes());
+        form.getParameters().add(parameter);
+        String md = FormStructureReader.render("CommonForm.F", form, "en");
+        assertEquals(3, md.split("\\QType10 \u2026 (+3 more)\\E", -1).length - 1);
+        assertFalse(md.contains("Type11"));
+    }
+
+    private static com._1c.g5.v8.dt.mcore.TypeDescription manyTypes()
+    {
+        var factory = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE;
+        var description = factory.createTypeDescription();
+        for (int i = 1; i <= 13; i++)
+        {
+            var type = factory.createType();
+            type.setName("Type" + i);
+            description.getTypes().add(type);
+        }
+        return description;
+    }
+
     // ==================== resolveMdForm: pure FQN parsing (null config tolerated) ====================
 
     @Test
@@ -195,7 +271,7 @@ public class FormStructureReaderTest
 
         String md = FormStructureReader.render("Catalog.Products.Forms.ItemForm", form, "en"); //$NON-NLS-1$ //$NON-NLS-2$
 
-        assertTrue(md.startsWith("# Form Structure: Catalog.Products.Forms.ItemForm")); //$NON-NLS-1$
+        assertTrue(md.startsWith("# Form Structure: Catalog.Products.Form.ItemForm")); //$NON-NLS-1$
         assertTrue(md.contains("## Items")); //$NON-NLS-1$
         assertTrue(md.contains("- MainGroup (type: FormGroup, id: 1)")); //$NON-NLS-1$
         // The child field is indented one level under its container.
@@ -626,6 +702,108 @@ public class FormStructureReaderTest
             names.add(row[2]);
         }
         return names;
+    }
+
+    /**
+     * A form root's {@code extInfo} is an event-handler container of its own, and EDT binds a record
+     * form's write and read events inside it. The walk has to read that list too: reading only the
+     * root's own reported "no event handlers" for a form that has one (issue #592).
+     */
+    @Test
+    public void testTheHandlerWalkReportsBindingsThatLiveInTheExtInfo()
+    {
+        EObject root = rootWithExtInfoBinding();
+        FormStructureReader.HandlerRows rows = new FormStructureReader.HandlerRows(10);
+
+        FormStructureReader.collectHandlers(root, "Form", "en", rows, //$NON-NLS-1$ //$NON-NLS-2$
+            new int[] {MAX_NODES}, new boolean[] {false}, new ArrayDeque<>());
+
+        assertEquals("the binding inside the extInfo is a handler of this form", //$NON-NLS-1$
+            List.of("OnCreateAtServer", "BeforeWriteAtServer"), keptHandlerNames(rows)); //$NON-NLS-1$ //$NON-NLS-2$
+        for (String[] row : rows.kept())
+        {
+            assertEquals("both belong to the FORM, not to a node called extInfo", //$NON-NLS-1$
+                "Form", row[0]); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * A form root carrying {@code OnCreateAtServer} on itself and {@code BeforeWriteAtServer} inside
+     * its {@code extInfo} - the shape EDT's wizard writes for an information-register record form.
+     */
+    private static EObject rootWithExtInfoBinding()
+    {
+        EcoreFactory f = EcoreFactory.eINSTANCE;
+        EPackage pkg = f.createEPackage();
+        pkg.setName("form"); //$NON-NLS-1$
+        pkg.setNsURI("http://g5.1c.ru/v8/dt/form/extinfohandlerstest"); //$NON-NLS-1$
+        pkg.setNsPrefix("form"); //$NON-NLS-1$
+
+        EClass eventType = f.createEClass();
+        eventType.setName("Event"); //$NON-NLS-1$
+        EAttribute eventName = f.createEAttribute();
+        eventName.setName("name"); //$NON-NLS-1$
+        eventName.setEType(EcorePackage.Literals.ESTRING);
+        eventType.getEStructuralFeatures().add(eventName);
+        pkg.getEClassifiers().add(eventType);
+
+        EClass handlerType = f.createEClass();
+        handlerType.setName("EventHandler"); //$NON-NLS-1$
+        EAttribute handlerName = f.createEAttribute();
+        handlerName.setName("name"); //$NON-NLS-1$
+        handlerName.setEType(EcorePackage.Literals.ESTRING);
+        handlerType.getEStructuralFeatures().add(handlerName);
+        EReference handlerEvent = f.createEReference();
+        handlerEvent.setName("event"); //$NON-NLS-1$
+        handlerEvent.setEType(eventType);
+        handlerEvent.setContainment(true);
+        handlerType.getEStructuralFeatures().add(handlerEvent);
+        pkg.getEClassifiers().add(handlerType);
+
+        EClass extInfoType = f.createEClass();
+        extInfoType.setName("InformationRegisterManagerFormExtInfo"); //$NON-NLS-1$
+        extInfoType.getEStructuralFeatures().add(handlerList(f, handlerType));
+        pkg.getEClassifiers().add(extInfoType);
+
+        EClass formType = f.createEClass();
+        formType.setName("Form"); //$NON-NLS-1$
+        formType.getEStructuralFeatures().add(handlerList(f, handlerType));
+        EReference extInfo = f.createEReference();
+        extInfo.setName("extInfo"); //$NON-NLS-1$
+        extInfo.setEType(extInfoType);
+        extInfo.setContainment(true);
+        formType.getEStructuralFeatures().add(extInfo);
+        pkg.getEClassifiers().add(formType);
+
+        EObject form = pkg.getEFactoryInstance().create(formType);
+        EObject extInfoObject = pkg.getEFactoryInstance().create(extInfoType);
+        form.eSet(extInfo, extInfoObject);
+        bindTestHandler(pkg, handlerType, eventType, form, "OnCreateAtServer"); //$NON-NLS-1$
+        bindTestHandler(pkg, handlerType, eventType, extInfoObject, "BeforeWriteAtServer"); //$NON-NLS-1$
+        return form;
+    }
+
+    private static EReference handlerList(EcoreFactory f, EClass handlerType)
+    {
+        EReference handlers = f.createEReference();
+        handlers.setName("handlers"); //$NON-NLS-1$
+        handlers.setEType(handlerType);
+        handlers.setContainment(true);
+        handlers.setUpperBound(-1);
+        return handlers;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void bindTestHandler(EPackage pkg, EClass handlerType, EClass eventType,
+        EObject container, String eventName)
+    {
+        EObject event = pkg.getEFactoryInstance().create(eventType);
+        event.eSet(eventType.getEStructuralFeature("name"), eventName); //$NON-NLS-1$
+        EObject handler = pkg.getEFactoryInstance().create(handlerType);
+        handler.eSet(handlerType.getEStructuralFeature("name"), eventName); //$NON-NLS-1$
+        handler.eSet(handlerType.getEStructuralFeature("event"), event); //$NON-NLS-1$
+        ((List<EObject>)container.eGet(container.eClass().getEStructuralFeature("handlers"))) //$NON-NLS-1$
+            .add(handler);
     }
 
     @Test

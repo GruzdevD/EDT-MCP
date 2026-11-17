@@ -21,6 +21,7 @@ repeatable and leaves no workspace residue. assert_no_diff guards the committed 
 import os
 import shutil
 import tempfile
+from pathlib import Path
 
 from harness import (
     call,
@@ -33,6 +34,10 @@ from harness import (
     wait_for_project_ready,
     e2e_test,
     PROJECT,
+    TESTS_PROJECT,
+    ALL_FIXTURE_PROJECTS,
+    settle_or_fail,
+    wait_for_named_projects_ready,
 )
 
 # A new project name unlikely to collide with anything in the workspace.
@@ -123,12 +128,18 @@ def test_export_import_roundtrip_then_delete_project():
             "no-confirm delete must be a preview"
         lp_after_prev = call("list_projects", {})
         assert_contains(lp_after_prev.text, NEW_PROJECT, "a preview must not delete the project")
+        paths = call("list_projects", {"format": "json"})
+        assert_ok(paths, "resolve the imported project's disk location")
+        project_path = Path(next(row["path"] for row in paths.structured["projects"]
+                                 if row["name"] == NEW_PROJECT))
+        assert project_path.is_dir(), "the imported project must exist on disk before deletion"
 
         dele = call("delete_project",
                     {"projectName": NEW_PROJECT, "deleteContent": True, "confirm": True})
         assert_ok(dele, "delete the imported project (confirm)")
         assert dele.structured and dele.structured.get("action") == "deleted", \
             "confirm delete must report action='deleted'"
+        assert not project_path.exists(), "confirmed deletion must remove the project directory before another call"
 
         # 5) Verify it is gone.
         wait_for_project_ready()
@@ -141,3 +152,47 @@ def test_export_import_roundtrip_then_delete_project():
         shutil.rmtree(EXPORT_DIR, ignore_errors=True)
 
     assert_no_diff("the round-trip must not touch the committed fixture (TestConfiguration)")
+
+
+@e2e_test(tool="delete_project", kind="action")
+def test_delete_then_immediate_clean_of_the_base_leaves_every_fixture_project_ready():
+    """#789: the deletion must release EDT's context before the next workspace operation.
+
+    The old jar deterministically fails the state contract; the original race also strands
+    siblings when the base clean beats EDT's asynchronous deletion job.
+    """
+    settle_or_fail("delete/reclean regression precondition")
+    name = PROJECT + ".DelRelease_e2e"
+    _ensure_absent(name)
+    try:
+        created = call("create_project", {"projectKind": "extension", "name": "DelRelease_e2e",
+                                          "baseProjectName": PROJECT})
+        assert_ok(created, "create extension for delete/reclean regression")
+        settle_or_fail("delete the new extension")
+        before = call("list_projects", {"format": "json"})
+        assert_ok(before, "fixture projects before deletion")
+        rows = before.structured.get("projects") if isinstance(before.structured, dict) else None
+        assert isinstance(rows, list), "list_projects must return structured project rows"
+        fixture_names = {row["name"] for row in rows if row["name"] in ALL_FIXTURE_PROJECTS}
+        assert {PROJECT, TESTS_PROJECT} <= fixture_names, "both required fixture projects must exist"
+
+        deleted = call("delete_project", {"projectName": name, "deleteContent": True, "confirm": True})
+        # No intervening MCP call or readiness poll: reproduce the sequential caller from #789.
+        cleaned = call("clean_project", {"projectName": PROJECT})
+        assert_ok(deleted, "delete extension before immediately cleaning its base")
+        assert isinstance(deleted.structured, dict), "delete must return structuredContent"
+        assert deleted.structured.get("action") == "deleted", deleted.structured
+        assert deleted.structured.get("state") == "released", deleted.structured
+        assert_ok(cleaned, "immediate clean of the deleted extension's base")
+        assert "notRestarted" not in cleaned.structured, cleaned.structured
+        failures = []
+        assert wait_for_project_ready(failure_details=failures), \
+            "fixture projects did not recover after delete/clean: %s" % failures
+        states = wait_for_named_projects_ready(fixture_names, ctx="fixtures after immediate clean")
+        assert name not in states, "deleted extension must be absent: %r" % states
+        assert all(states.get(fixture) == "ready" for fixture in fixture_names), \
+            "every fixture project must be ready, got %r" % states
+    finally:
+        _ensure_absent(name)
+        settle_or_fail("delete/reclean regression cleanup")
+    assert_no_diff("deleting a temporary extension and cleaning its base must preserve the fixture")

@@ -25,6 +25,7 @@ public enum ToolGroup
         "get_configuration_properties", //$NON-NLS-1$
         "clean_project", "revalidate_objects", "resync_to_disk", "get_check_description", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "export_configuration_to_xml", "import_configuration_from_xml", //$NON-NLS-1$ //$NON-NLS-2$
+        "import_project_from_file", //$NON-NLS-1$
         "delete_project", "create_project", "get_event_log", "get_mcp_history", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "import_project", //$NON-NLS-1$
         "plugin_check_for_update", "plugin_update"), //$NON-NLS-1$ //$NON-NLS-2$
@@ -32,13 +33,14 @@ public enum ToolGroup
     PROBLEMS("problems", "Errors & Problems", //$NON-NLS-1$ //$NON-NLS-2$
         "Error reporting, validation, and workspace markers (bookmarks, tasks)", //$NON-NLS-1$
         "get_problem_summary", "get_project_errors", "get_markers", "apply_quick_fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "get_tech_log", "manage_tech_log", "project_checks", //$NON-NLS-1$
         "validate_xdto_package"), //$NON-NLS-1$
 
     CODE_INTELLIGENCE("codeIntelligence", "Code Intelligence", //$NON-NLS-1$ //$NON-NLS-2$
         "Content assist, documentation, metadata and common-picture browsing, and references", //$NON-NLS-1$
         "get_content_assist", "get_platform_documentation", "get_metadata_objects", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "get_metadata_details", "list_subsystems", "get_subsystem_content", "find_references", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "list_common_pictures", "export_common_picture"), //$NON-NLS-1$ //$NON-NLS-2$
+        "list_common_pictures", "export_common_picture", "search_in_dcs"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
     TAGS("tags", "Tags", //$NON-NLS-1$ //$NON-NLS-2$
         "Metadata tag management", //$NON-NLS-1$
@@ -47,13 +49,16 @@ public enum ToolGroup
     APPLICATIONS("applications", "Applications & Testing", //$NON-NLS-1$ //$NON-NLS-2$
         "Application and infobase management, external-object builds, launch, testing, " //$NON-NLS-1$
             + "background jobs, and Workmate", //$NON-NLS-1$
-        "get_applications", "list_configurations", "create_launch_config", "delete_launch_config", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "edt_dialog", "get_applications", "infobase_sessions", "infobase_extensions", "standalone_server", "list_configurations", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "create_launch_config", "delete_launch_config", //$NON-NLS-1$ //$NON-NLS-2$
         "create_infobase", "delete_infobase", "update_database", "launch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "terminate_launch", "run_yaxunit_tests", "list_yaxunit_tests", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "get_launch_state", "create_specter_launch_config", //$NON-NLS-1$ //$NON-NLS-2$
         "ask_workmate", "get_job_status", //$NON-NLS-1$ //$NON-NLS-2$
         "cancel_job", "build_external_objects", "set_infobase_credentials", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "list_infobases", "create_project_application", "delete_project_application", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "remove_standalone_server", "set_project_checks", //$NON-NLS-1$ //$NON-NLS-2$
+        "export_configuration_to_file", //$NON-NLS-1$
         "vanessa_list_launches", "vanessa_list_features", "vanessa_get_feature", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "vanessa_run_feature", "vanessa_run_by_tags", "vanessa_get_execution_status", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "vanessa_get_test_report", "vanessa_get_log", "vanessa_get_artifacts", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -63,22 +68,23 @@ public enum ToolGroup
         "Breakpoints, stepping, variables, expression evaluation, and profiling", //$NON-NLS-1$
         "set_breakpoint", "set_error_breakpoint", "remove_breakpoint", "list_breakpoints", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "wait_for_break", //$NON-NLS-1$
-        "get_variables", "set_variable", "step", "resume", "evaluate_expression", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        "get_variables", "set_variable", "step", "resume", "debug_pause", "evaluate_expression", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
         "debug_yaxunit_tests", "debug_status", "start_profiling", "stop_profiling", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "get_profiling_results"), //$NON-NLS-1$
+        "get_profiling_results", "manage_profiling_results"), //$NON-NLS-1$
 
     BSL_CODE("bslCode", "BSL Code", //$NON-NLS-1$ //$NON-NLS-2$
         "Module source reading/writing, structure, search, call hierarchy, navigation, and forms", //$NON-NLS-1$
-        "read_module_source", "write_module_source", "get_module_structure", "list_modules", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "open_editor", "read_module_source", "write_module_source", "get_module_structure", "list_modules", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "search_in_code", "read_method_source", "get_method_call_hierarchy", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "get_outgoing_structures", "go_to_definition", "get_symbol_info", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "get_form_layout_snapshot", //$NON-NLS-1$
-        "get_form_screenshot", "get_template_screenshot", "validate_query"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "get_form_screenshot", "get_template_screenshot", "validate_query", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "validate_form_model"), //$NON-NLS-1$
 
     REFACTORING("refactoring", "Refactoring", //$NON-NLS-1$ //$NON-NLS-2$
         "Metadata and DCS create, inspect, rename, adopt, delete, and property management", //$NON-NLS-1$
         "rename_metadata_object", "delete_metadata", "create_metadata", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "modify_metadata", "adopt_metadata_object", "dcs"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "sort_metadata", "modify_metadata", "clone_metadata_object", "adopt_metadata_object", "dcs", "business_process_route_map"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 
     TRANSLATION("translation", "Translation (LanguageTool)", //$NON-NLS-1$ //$NON-NLS-2$
         "LanguageTool: translation strings generation, configuration sync, project info", //$NON-NLS-1$

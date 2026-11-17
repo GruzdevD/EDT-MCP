@@ -13,10 +13,15 @@ import com.ditrix.edt.mcp.server.utils.privacy.PiiRuleCodec;
  */
 public final class PreferenceConstants
 {
+    /** Explicit opt-in for MCP calls that open editors in the EDT workbench. */
+    public static final String PREF_ALLOW_UI_NAVIGATION = "mcpAllowUiNavigation";
+    public static final boolean DEFAULT_ALLOW_UI_NAVIGATION = false;
+
     /** MCP server port */
     public static final String PREF_PORT = "mcpServerPort"; //$NON-NLS-1$
     
     /** Auto-start on EDT startup */
+    public static final String PREF_HTTP_ENABLED = "mcpServerHttpEnabled"; //$NON-NLS-1$
     public static final String PREF_AUTO_START = "mcpServerAutoStart"; //$NON-NLS-1$
     
     /** Path to check descriptions folder */
@@ -41,6 +46,7 @@ public final class PreferenceConstants
     public static final int DEFAULT_PORT = 8765;
     
     /** Default auto-start */
+    public static final boolean DEFAULT_HTTP_ENABLED = true;
     public static final boolean DEFAULT_AUTO_START = false;
     
     /** Default checks folder (empty - the descriptions shipped in the plugin are used) */
@@ -85,6 +91,9 @@ public final class PreferenceConstants
     /** Comma-separated list of disabled tool names */
     public static final String PREF_DISABLED_TOOLS = "mcpDisabledTools"; //$NON-NLS-1$
 
+    /** Stable ID of the selected tool preset; custom selections explicitly store "custom". */
+    public static final String PREF_TOOL_PRESET_ID = "mcpToolPresetId"; //$NON-NLS-1$
+
     /**
      * Schema version of the tool-enablement preferences, so a NEW default-disabled tool also lands
      * disabled on an installation whose store already persisted an explicit {@link #PREF_DISABLED_TOOLS}
@@ -98,12 +107,32 @@ public final class PreferenceConstants
      * its disabled set; 3 = {@code ask_workmate} ships disabled; 4 = stored preset shapes gain the
      * tools newly disabled through group membership; 5 = the renamed {@code debug_launch} entry
      * becomes {@code launch}, so a deliberate disable survives the rename; 6 = a stored no-debug
-     * preset gains {@code set_error_breakpoint}, a tool that did not exist when it was saved.
+     * preset gains {@code set_error_breakpoint}, a tool that did not exist when it was saved;
+     * 7 = a stored Analysis Only / Code Review profile gains the destructive tools it missed -
+     * {@code merge_rules} (new in the release after 2.15.1) and {@code delete_project}; 8 = those
+     * stored read-only profiles gain the new destructive {@code infobase_sessions} tool; 9 = they
+     * gain three older tools whose own descriptions declare them destructive; 10 = a stored
+     * no-debug preset gains {@code debug_pause}, a tool that did not exist when it was saved;
+     * 11 = stored read-only profiles gain the new {@code import_project_from_file} project importer;
+     * 12 = they gain the new {@code export_configuration_to_file} infobase dump;
+     * 13 = record preset provenance after the legacy migrations, without adding disabled tools;
+     * 14 = a stored read-only profile, identified by its recorded provenance, gains the six
+     * workspace/git writers the presets had missed;
+     * 15 = every stored list gains the now-default-disabled {@code get_form_screenshot}.
+     * 16 = recorded read-only presets gain the destructive {@code business_process_route_map}.
+     * 17 = a stored read-only profile gains {@code project_checks}.
+     * 18 = recorded read-only profiles gain {@code infobase_extensions}.
+     * 19 = a stored Analysis Only profile gains {@code open_editor}.
+     * 20 = recorded read-only profiles gain {@code clone_metadata_object}.
+     * 21 = recorded read-only profiles gain {@code sort_metadata}.
+     * 22 = recorded read-only profiles gain {@code edt_dialog}.
+     * 23 = recorded read-only profiles gain {@code standalone_server};
+     * 24 = recorded read-only profiles gain {@code manage_profiling_results} and {@code manage_tech_log}.
      */
-    public static final int TOOL_PREFS_MIGRATION_VERSION = 6;
+    public static final int TOOL_PREFS_MIGRATION_VERSION = 24;
 
-    /** The raw {@code git} command tool is powerful, so it ships DISABLED by default (opt-in). */
-    public static final String DEFAULT_DISABLED_TOOLS = "git,ask_workmate"; //$NON-NLS-1$
+    /** Explicit opt-ins: raw git commands, the external Workmate agent and buffered form screenshots. */
+    public static final String DEFAULT_DISABLED_TOOLS = "git,ask_workmate,get_form_screenshot"; //$NON-NLS-1$
 
     // === Progressive tool disclosure (dynamic toolsets) ===
 

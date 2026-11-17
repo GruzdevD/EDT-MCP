@@ -27,8 +27,8 @@ touch the base project, so assert_no_diff() (which is scoped to it) holds throug
 from harness import (
     call, assert_ok, assert_error, assert_error_quality, assert_contains,
     assert_not_contains, assert_no_diff, assert_no_diff_rel, poll_diff_contains_rel,
-    read_fixture_file, reset_fixture_rel, wait_for_project_ready, e2e_test, PROJECT,
-    EXT_OBJECTS_PROJECT, EXT_OBJECTS_REL,
+    poll_disk_contains_all, read_fixture_file, reset_fixture_rel, wait_for_project_ready,
+    e2e_test, PROJECT, EXT_OBJECTS_PROJECT, EXT_OBJECTS_REL, _fail, assert_marker_contract,
 )
 
 # The Russian TYPE tokens for the two external-objects types. The bilingual token catalogue
@@ -125,6 +125,32 @@ def test_extobj_details_resolve_the_russian_type_token():
                     "the Russian token must resolve to the same object")
     assert_contains(r.text, "ExternalReport: ExtReport", "and so must the report token")
     assert_no_diff_rel(EXT_OBJECTS_REL, "a read tool must not touch the fixture")
+
+
+@e2e_test(tool="get_project_errors", kind="read")
+def test_extobj_project_errors_resolve_its_own_object():
+    """Exact error scopes resolve against this project's roots in both token languages."""
+    english = "ExternalDataProcessor.ExtProc"
+    r = call("get_project_errors",
+             {"projectName": EXT_OBJECTS_PROJECT, "objectFqns": [english]})
+    assert_ok(r, "get_project_errors on an external-objects project")
+    if (r.structured or {}).get("objectsResolved") != [english]:
+        _fail("the external data processor must resolve: %r" % (r.structured,))
+    if (r.structured or {}).get("objectsNotFound") != []:
+        _fail("the resolved external data processor must not be reported missing: %r"
+              % (r.structured,))
+
+    russian = RU_EXTERNAL_DATA_PROCESSOR + ".ExtProc"
+    ru = call("get_project_errors",
+              {"projectName": EXT_OBJECTS_PROJECT, "objectFqns": [russian]})
+    assert_ok(ru, "get_project_errors with the Russian external-object type token")
+    if (ru.structured or {}).get("objectsResolved") != [russian]:
+        _fail("the Russian type token must resolve the same external data processor: %r"
+              % (ru.structured,))
+    if (ru.structured or {}).get("objectsNotFound") != []:
+        _fail("the Russian spelling must not be reported missing: %r" % (ru.structured,))
+    assert_no_diff("a read tool must not touch the base project on disk")
+    assert_no_diff_rel(EXT_OBJECTS_REL, "a read tool must not touch the external fixture")
 
 
 @e2e_test(tool="get_metadata_details", kind="error")
@@ -256,15 +282,130 @@ def test_extobj_unsupported_member_kind_is_refused_by_name():
     assert_no_diff_rel(EXT_OBJECTS_REL, "a refused call must not touch the fixture")
 
 
-@e2e_test(tool="create_metadata", kind="error")
-def test_extobj_top_level_create_is_refused_with_the_way_to_do_it():
-    """create_metadata cannot create the ROOT object — and says where one comes from."""
+@e2e_test(tool="adopt_metadata_object", kind="write")
+def test_extobj_project_is_no_adoption_source():
+    """An external-objects project is refused by its KIND: an extension extends only a configuration.
+
+    The refusal comes before the address is resolved. This project's scope holds its own external
+    objects only, so the base catalog's valid FQN would otherwise come back "Object not found ...
+    Check the FQN" - blaming the address instead of the project. It names the project, its kind and
+    what to pass instead, and nothing is written. The refusal's text is unit-pinned; asking for it
+    sits inside executeOnUiThread, which no unit test reaches - this test is that call's pin."""
+    r = call("adopt_metadata_object", {"projectName": EXT_OBJECTS_PROJECT, "fqn": "Catalog.Catalog"})
+    e = assert_error(r, "adopting from an external-objects project")
+    assert_error_quality(e, names=[EXT_OBJECTS_PROJECT, "EXTERNAL-OBJECTS"],
+                         suggests=["pass the BASE configuration as projectName"],
+                         ctx="the refusal names the project and its kind, and what to pass instead")
+    assert_not_contains(e, "Object not found", "a valid base FQN must not be blamed")
+    assert_no_diff("a refused adopt must not touch the base project")
+    assert_no_diff_rel(EXT_OBJECTS_REL, "a refused adopt must not touch the external-objects project")
+
+
+# A NEW root is an untracked file, which a `git diff` based poll never sees: its checks poll the file
+# itself, through the poll every fixture shares (poll_disk_contains_all with fixture_rel).
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_extobj_create_a_new_root_data_processor():
+    """#658: a top-level ExternalDataProcessor FQN adds a NEW root to the existing project.
+
+    It must carry what EDT's "New" wizard gives one - uuid, producedTypes with both type ids,
+    the data-processor containedObjects entry - and be a working root: its own members are
+    creatable right after."""
     reset_fixture_rel(EXT_OBJECTS_REL)
-    r = call("create_metadata",
-             {"projectName": EXT_OBJECTS_PROJECT, "fqn": "ExternalDataProcessor.E2eNewProc"})
-    e = assert_error(r, "a top-level external data processor")
-    assert_error_quality(e, names=["ExternalDataProcessor", "create_project", "externalObject"],
-                         ctx="the refusal must say what DOES create such an object")
+    name = "E2eNewProc"
+    fqn = "ExternalDataProcessor." + name
+    try:
+        created = call("create_metadata",
+                       {"projectName": EXT_OBJECTS_PROJECT, "fqn": fqn,
+                        "properties": [{"name": "synonym", "value": "E2e loader", "language": "en"},
+                                       {"name": "comment", "value": "e2e root"}],
+                        "expectedNotExists": True})
+        assert_ok(created, "create a new external data processor root")
+        s = created.structured or {}
+        if s.get("fqn") != fqn or s.get("kind") != "ExternalDataProcessor":
+            _fail("the result must name the new root and its kind: %r" % (s,))
+        if s.get("persisted") is not True or s.get("synonym") != "E2e loader" \
+                or s.get("language") != "en":
+            _fail("the result must report the export and the written synonym: %r" % (s,))
+
+        listed = call("get_metadata_objects", {"projectName": EXT_OBJECTS_PROJECT})
+        assert_ok(listed, "list the project's roots")
+        assert_contains(listed.text, name, "MODEL read-back: the new root must be listed")
+        assert_contains(listed.text, "ExtProc", "the existing roots must still be listed")
+
+        mdo = poll_disk_contains_all(
+            "src/ExternalDataProcessors/%s/%s.mdo" % (name, name),
+            ["<name>%s</name>" % name, "<producedTypes>", "<objectType typeId=", "valueTypeId=",
+             '<containedObjects classId="c3831ec8-d8d5-4f93-8a22-f9bfae07327f"',
+             "<value>E2e loader</value>", "<comment>e2e root</comment>"],
+            ctx="the root must reach disk with the wizard's default content",
+            fixture_rel=EXT_OBJECTS_REL)
+        assert_contains(mdo, "uuid=", "the root must carry its own uuid")
+
+        member = call("create_metadata",
+                      {"projectName": EXT_OBJECTS_PROJECT, "fqn": fqn + ".Attribute.Note",
+                       "expectedNotExists": True})
+        assert_ok(member, "a member of the new root must be creatable")
+        poll_disk_contains_all("src/ExternalDataProcessors/%s/%s.mdo" % (name, name),
+                               ["<name>Note</name>"], ctx="the member must reach the root's .mdo",
+                               fixture_rel=EXT_OBJECTS_REL)
+    finally:
+        reset_fixture_rel(EXT_OBJECTS_REL)
+        call("clean_project", {"projectName": EXT_OBJECTS_PROJECT})
+    assert_no_diff_rel(EXT_OBJECTS_REL, "the fixture must be back at its baseline")
+    assert_no_diff("the base project must never be touched by this test")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_extobj_create_a_new_root_report_by_its_russian_type_token():
+    """#658: the TYPE token is bilingual - the Russian external-report token creates an ExternalReport."""
+    reset_fixture_rel(EXT_OBJECTS_REL)
+    name = "E2eNewReport"
+    try:
+        created = call("create_metadata",
+                       {"projectName": EXT_OBJECTS_PROJECT, "fqn": RU_EXTERNAL_REPORT + "." + name,
+                        "expectedNotExists": True})
+        assert_ok(created, "create a new external report root by the Russian type token")
+        s = created.structured or {}
+        if s.get("fqn") != "ExternalReport." + name or s.get("kind") != "ExternalReport":
+            _fail("the Russian token must create the canonical ExternalReport root: %r" % (s,))
+        poll_disk_contains_all(
+            "src/ExternalReports/%s/%s.mdo" % (name, name),
+            ["<mdclass:ExternalReport", "<name>%s</name>" % name, "<producedTypes>",
+             '<containedObjects classId="e41aff26-25cf-4bb6-b6c1-3f478a75f374"'],
+            ctx="the report root must reach disk with the wizard's default content",
+            fixture_rel=EXT_OBJECTS_REL)
+        details = call("get_metadata_details",
+                       {"projectName": EXT_OBJECTS_PROJECT, "objectFqns": ["ExternalReport." + name]})
+        assert_ok(details, "read the new report back")
+        assert_contains(details.text, "ExternalReport: " + name, "MODEL read-back of the new report")
+    finally:
+        reset_fixture_rel(EXT_OBJECTS_REL)
+        call("clean_project", {"projectName": EXT_OBJECTS_PROJECT})
+    assert_no_diff_rel(EXT_OBJECTS_REL, "the fixture must be back at its baseline")
+
+
+@e2e_test(tool="create_metadata", kind="error")
+def test_extobj_new_root_name_must_be_free_among_all_roots():
+    """A root name already taken - by the same type in any case, or by the OTHER root type - is refused."""
+    reset_fixture_rel(EXT_OBJECTS_REL)
+    same = call("create_metadata",
+                {"projectName": EXT_OBJECTS_PROJECT, "fqn": "ExternalDataProcessor.extproc"})
+    e = assert_error(same, "a root name the project already has (other case)")
+    assert_error_quality(e, names=["ExternalDataProcessor.extproc", "already exists"],
+                         ctx="the duplicate refusal must name the address")
+
+    other = call("create_metadata",
+                 {"projectName": EXT_OBJECTS_PROJECT, "fqn": "ExternalDataProcessor.ExtReport"})
+    e = assert_error(other, "a data processor named like the project's external report")
+    assert_error_quality(e, names=["ExternalReport.ExtReport", "distinct names"],
+                         ctx="the refusal must name the root that holds the name")
+
+    bad = call("create_metadata",
+               {"projectName": EXT_OBJECTS_PROJECT, "fqn": "ExternalDataProcessor.1Bad"})
+    e = assert_error(bad, "an invalid root name")
+    assert_error_quality(e, names=["1Bad"], ctx="the refusal must name the invalid Name")
     assert_no_diff_rel(EXT_OBJECTS_REL, "a refused call must not touch the fixture")
 
 
@@ -546,11 +687,11 @@ def test_extobj_type_asked_of_a_configuration_says_where_it_lives():
     """
     r = call("go_to_definition",
              {"projectName": PROJECT, "symbol": "ExternalDataProcessor.ExtProc"})
-    assert_ok(r, "a standalone type asked of the configuration project")
-    assert_contains(r.text, "Symbol not found", "it cannot resolve here")
-    assert_contains(r.text, "EXTERNAL-OBJECTS type",
+    message = assert_error(r, "a standalone type asked of the configuration project")
+    assert_contains(message, "Symbol not found", "it cannot resolve here")
+    assert_contains(message, "EXTERNAL-OBJECTS type",
                     "the answer must say the type lives in another project KIND")
-    assert_contains(r.text, "list_projects", "and how to find that project")
+    assert_contains(message, "list_projects", "and how to find that project")
     assert_no_diff("a read tool must not touch the base project on disk")
 
 
@@ -603,11 +744,11 @@ def test_extobj_go_to_definition_hints_for_a_type_shaped_module_name():
     """
     r = call("go_to_definition",
              {"projectName": EXT_OBJECTS_PROJECT, "symbol": "Catalog.SomeMethod"})
-    assert_ok(r, "a type-shaped module name on an external-objects project")
-    assert_contains(r.text, "Symbol not found", "neither reading resolves in this project")
-    assert_contains(r.text, "no common modules",
+    message = assert_error(r, "a type-shaped module name on an external-objects project")
+    assert_contains(message, "Symbol not found", "neither reading resolves in this project")
+    assert_contains(message, "no common modules",
                     "the module reading must be answered, not silently dropped")
-    assert_contains(r.text, PROJECT, "the base project must be named as where to ask")
+    assert_contains(message, PROJECT, "the base project must be named as where to ask")
     assert_no_diff("a read tool must not touch the base project on disk")
     assert_no_diff_rel(EXT_OBJECTS_REL, "a read tool must not touch the external-objects project")
 
@@ -624,12 +765,12 @@ def test_extobj_go_to_definition_never_reaches_the_base_common_modules():
     """
     r = call("go_to_definition",
              {"projectName": EXT_OBJECTS_PROJECT, "symbol": "Calc.Add"})
-    assert_ok(r, "a base common module name asked of an external-objects project")
-    assert_not_contains(r.text, "CommonModules/Calc/Module.bsl",
+    message = assert_error(r, "a base common module name asked of an external-objects project")
+    assert_not_contains(message, "CommonModules/Calc/Module.bsl",
                         "the answer must not blame a path in the project the caller named")
-    assert_contains(r.text, "Symbol not found", "the symbol is not in this project")
+    assert_contains(message, "Symbol not found", "the symbol is not in this project")
     # A dead end would be truthful but useless: the refusal names where common modules live.
-    assert_contains(r.text, PROJECT,
+    assert_contains(message, PROJECT,
                     "the refusal must name the base project that does hold common modules")
     assert_no_diff("a read tool must not touch the base project on disk")
     assert_no_diff_rel(EXT_OBJECTS_REL, "a read tool must not touch the external-objects project")
@@ -645,15 +786,39 @@ def test_extobj_go_to_definition_never_suggests_from_the_base_configuration():
     """
     r = call("go_to_definition",
              {"projectName": EXT_OBJECTS_PROJECT, "symbol": "Catalog.Catalo"})
-    assert_ok(r, "go_to_definition for a configuration type on an external-objects project")
-    assert_contains(r.text, "Symbol not found", "this project holds no catalogs")
-    assert_not_contains(r.text, "Did you mean",
+    message = assert_error(r, "go_to_definition for a configuration type on an external-objects project")
+    assert_contains(message, "Symbol not found", "this project holds no catalogs")
+    assert_not_contains(message, "Did you mean",
                         "a suggestion here could only come from the base configuration")
     # The same tool DOES suggest, from this project's own root, for a type it does hold.
     own = call("go_to_definition",
                {"projectName": EXT_OBJECTS_PROJECT, "symbol": "ExternalDataProcessor.ExtPro"})
-    assert_ok(own, "go_to_definition for a near-miss on the project's own type")
-    assert_contains(own.text, "ExternalDataProcessor.ExtProc",
+    own_message = assert_error(own, "go_to_definition for a near-miss on the project's own type")
+    assert_contains(own_message, "ExternalDataProcessor.ExtProc",
                     "the suggestion must come from the project's own objects")
     assert_no_diff("a read tool must not touch the base project on disk")
     assert_no_diff_rel(EXT_OBJECTS_REL, "a read tool must not touch the external-objects project")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_extobj_create_reports_the_external_object_markers():
+    """#643 on an external-objects project: the markers are scoped to the external object
+    itself, resolved in that project's own model."""
+    reset_fixture_rel(EXT_OBJECTS_REL)
+    owner = "ExternalDataProcessor.ExtProc"
+    fqn = owner + ".Attribute.E2eMarkersAttr"
+    created = call("create_metadata", {"projectName": EXT_OBJECTS_PROJECT, "fqn": fqn})
+    try:
+        assert_ok(created, "create an attribute on an external data processor")
+        _incomplete, rows = assert_marker_contract(created.structured, "external-object create")
+        strays = [row for row in rows if row.get("object") != owner]
+        if strays:
+            _fail("every row must belong to %s: %r" % (owner, strays))
+        poll_diff_contains_rel(EXT_OBJECTS_REL, "E2eMarkersAttr",
+                               ctx="the attribute must reach the .mdo on disk")
+    finally:
+        removed = call("delete_metadata",
+                       {"projectName": EXT_OBJECTS_PROJECT, "fqn": fqn, "confirm": True})
+        assert_ok(removed, "delete the attribute again")
+    assert_no_diff_rel(EXT_OBJECTS_REL, "the create/delete round trip must leave no diff")
+    assert_no_diff("the base project must never be touched by this test")

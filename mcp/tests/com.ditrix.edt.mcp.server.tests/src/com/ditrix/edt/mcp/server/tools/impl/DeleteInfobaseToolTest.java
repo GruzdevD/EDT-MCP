@@ -7,15 +7,40 @@
 package com.ditrix.edt.mcp.server.tools.impl;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertSame;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
+import org.eclipse.core.resources.IProject;
 import org.junit.Test;
 
+import com._1c.g5.v8.dt.platform.services.model.FileConnectionString;
+import com._1c.g5.v8.dt.platform.services.model.IConnectionString;
+import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
+import com.ditrix.edt.mcp.server.utils.StandaloneServerSupport;
+import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
+import com.e1c.g5.dt.applications.ApplicationException;
+import com.e1c.g5.dt.applications.IApplication;
+import com.e1c.g5.dt.applications.IApplicationManager;
+import com.e1c.g5.dt.applications.IApplicationType;
+import com.e1c.g5.dt.applications.infobases.IInfobaseApplication;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 /**
  * Tests for {@link DeleteInfobaseTool}.
@@ -26,6 +51,325 @@ import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
  */
 public class DeleteInfobaseToolTest
 {
+    @Test
+    public void applicationDeletionClearsSharedFileBindingsLeftByEdt() throws Exception
+    {
+        assertApplicationDeletionClearsSharedFileBindings(false);
+    }
+
+    @Test
+    public void applicationDeletionExcludesSharedFileBindingsClearedByEdt() throws Exception
+    {
+        assertApplicationDeletionClearsSharedFileBindings(true);
+    }
+
+    private void assertApplicationDeletionClearsSharedFileBindings(boolean reset) throws Exception
+    {
+        var target = new com.ditrix.edt.mcp.server.utils.InfobaseBindingsTest.State();
+        var other = new com.ditrix.edt.mcp.server.utils.InfobaseBindingsTest.State();
+        var factory = com._1c.g5.v8.dt.platform.services.model.ModelFactory.eINSTANCE;
+        var connection = factory.createFileConnectionString();
+        connection.setFile("C:/bases/shared");
+        var ref = factory.createInfobaseReference();
+        ref.setUuid(java.util.UUID.randomUUID());
+        ref.setName("shared");
+        ref.setConnectionString(connection);
+        when(((IInfobaseApplication)target.prior).getInfobase()).thenReturn(ref);
+        when(target.prior.getName()).thenReturn("shared");
+        when(((IInfobaseApplication)other.prior).getInfobase()).thenReturn(ref);
+        when(other.project.getName()).thenReturn("other");
+        when(other.configuration.getAttribute(LaunchConfigUtils.ATTR_PROJECT_NAME, (String)null)).thenReturn("other");
+        when(other.copy.getAttribute(LaunchConfigUtils.ATTR_PROJECT_NAME, (String)null)).thenReturn("other");
+        when(target.manager.getApplication(other.project, "prior")).thenReturn(Optional.of(other.prior));
+        org.mockito.Mockito.doAnswer(call -> {
+            IApplication application = call.getArgument(1);
+            other.defaultId.set(application == null ? null : application.getId());
+            return null;
+        }).when(target.manager).setDefaultApplication(org.mockito.ArgumentMatchers.eq(other.project),
+            org.mockito.ArgumentMatchers.any());
+        var associations = mock(com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager.class);
+        var infobases = mock(com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager.class);
+        var context = com.ditrix.edt.mcp.server.utils.git.BranchContexts.toContext("feat/bindings");
+        var tool = new DeleteInfobaseTool() {
+            @Override String checkDestructiveConsent(String name, String subtitle) { return null; }
+
+            @Override com.ditrix.edt.mcp.server.utils.InfobaseBindings captureBindings(IApplicationManager manager)
+            {
+                return com.ditrix.edt.mcp.server.utils.InfobaseBindings.capture(manager,
+                    new IProject[] {target.project, other.project},
+                    new org.eclipse.debug.core.ILaunchConfiguration[] {target.configuration, other.configuration},
+                    project -> project == target.project ? target.defaultId.get() : other.defaultId.get());
+            }
+
+            @Override String deregisterFileInfobase(
+                    com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager manager,
+                    InfobaseReference captured, IbIdentity id, DbFileOutcome db, boolean remove, Runnable guard)
+            {
+                assertTrue(remove);
+                assertEquals(ref.getUuid(), captured.getUuid());
+                when(target.manager.getApplication(target.project, "prior")).thenReturn(Optional.empty());
+                when(target.manager.getApplication(other.project, "prior")).thenReturn(Optional.empty());
+                if (reset) { target.reset(); other.reset(); }
+                return null; // Simulate confirmed launcher removal through the existing service seam.
+            }
+        };
+        var result = parse(tool.deleteInfobase(
+            DeleteInfobaseTool.DeleteContext.of(target.project, target.manager, associations, infobases),
+            "project", "prior", null, null, true, false, true, () -> context));
+        assertTrue(result.toString(), result.get("success").getAsBoolean());
+        assertEquals(ref.getUuid().toString(), result.get("registrationId").getAsString());
+        assertNull(result.toString(), target.defaultId.get());
+        assertNull(result.toString(), target.launchId.get());
+        assertNull(result.toString(), other.defaultId.get());
+        assertNull(result.toString(), other.launchId.get());
+        assertEquals(4, result.getAsJsonArray("removedBindings").size());
+        assertEquals(0, result.getAsJsonArray("restoredBindings").size());
+        assertEquals(0, result.getAsJsonArray("unrestoredBindings").size());
+        org.mockito.Mockito.verify(associations).dissociate(target.project, ref, context);
+    }
+
+    @Test
+    public void partialDeregistrationPreservesOtherProjectsSharingTheUuid() throws Exception
+    {
+        for (boolean resetOther : new boolean[] {false, true})
+        {
+            var target = new com.ditrix.edt.mcp.server.utils.InfobaseBindingsTest.State();
+            var other = new com.ditrix.edt.mcp.server.utils.InfobaseBindingsTest.State();
+            var ref = new com.ditrix.edt.mcp.server.utils.ServerInfobaseTarget("host", "base").reference("base");
+            when(((IInfobaseApplication)target.prior).getInfobase()).thenReturn(ref);
+            when(((IInfobaseApplication)other.prior).getInfobase()).thenReturn(ref);
+            when(other.project.getName()).thenReturn("other");
+            when(other.configuration.getAttribute(LaunchConfigUtils.ATTR_PROJECT_NAME, (String)null)).thenReturn("other");
+            when(other.copy.getAttribute(LaunchConfigUtils.ATTR_PROJECT_NAME, (String)null)).thenReturn("other");
+            when(target.manager.getApplication(other.project, "prior")).thenReturn(Optional.of(other.prior));
+            org.mockito.Mockito.doAnswer(call -> {
+                IApplication application = call.getArgument(1);
+                other.defaultId.set(application == null ? null : application.getId());
+                return null;
+            }).when(target.manager).setDefaultApplication(org.mockito.ArgumentMatchers.eq(other.project),
+                org.mockito.ArgumentMatchers.any());
+            var infobases = mock(com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager.class);
+            when(infobases.getLoadStatus()).thenReturn(org.eclipse.core.runtime.Status.OK_STATUS);
+            when(infobases.findInfobaseByUuid(ref.getUuid())).thenReturn(Optional.of(ref));
+            var tool = new DeleteInfobaseTool() {
+                @Override protected void clearRegistrationCredentials(InfobaseReference reference,
+                        com.ditrix.edt.mcp.server.utils.InfobaseAccessSupport.CredentialWriteGuard guard) throws Exception
+                {
+                    guard.run(current -> { throw new IllegalStateException("secure storage unavailable"); });
+                }
+            };
+            var snapshot = com.ditrix.edt.mcp.server.utils.InfobaseBindings.capture(target.manager,
+                new IProject[] {target.project, other.project},
+                new org.eclipse.debug.core.ILaunchConfiguration[] {target.configuration, other.configuration},
+                project -> project == target.project ? target.defaultId.get() : other.defaultId.get());
+            var result = parse(snapshot.run(() -> {
+                target.reset();
+                if (resetOther) { other.reset(); }
+                return tool.deregisterFileInfobase(infobases, ref,
+                    new DeleteInfobaseTool.IbIdentity("project", "prior", "base"),
+                    new DeleteInfobaseTool.DbFileOutcome(false, null, false,
+                        DeleteInfobaseTool.SharedDatabase.NOT_SHARED), true, () -> { });
+            }, "project", false, true));
+            assertTrue(result.toString(), result.get("success").getAsBoolean());
+            assertFalse(result.get("deleteRegistration").getAsBoolean());
+            assertEquals(ref.getUuid().toString(), result.get("registrationId").getAsString());
+            assertNull(target.defaultId.get());
+            assertNull(target.launchId.get());
+            assertEquals("prior", other.defaultId.get());
+            assertEquals("prior", other.launchId.get());
+            assertEquals(2, result.getAsJsonArray("removedBindings").size());
+            assertEquals(resetOther ? 2 : 0, result.getAsJsonArray("restoredBindings").size());
+            org.mockito.Mockito.verify(infobases, org.mockito.Mockito.never()).delete(org.mockito.ArgumentMatchers.any());
+        }
+    }
+
+    @Test
+    public void registrationDeletionResultExcludesTheCapturedBoundApplication() throws Exception
+    {
+        var state = new com.ditrix.edt.mcp.server.utils.InfobaseBindingsTest.State();
+        var reference = new com.ditrix.edt.mcp.server.utils.ServerInfobaseTarget("host", "base").reference("base");
+        when(((IInfobaseApplication)state.prior).getInfobase()).thenReturn(reference);
+        var result = JsonParser.parseString(state.snapshot().run(() -> {
+            when(state.manager.getApplication(state.project, "prior")).thenReturn(Optional.empty());
+            return DeleteInfobaseTool.registrationResult("project", "base", reference.getUuid(), true).toJson();
+        }, "project", false, true)).getAsJsonObject();
+        assertTrue(result.toString(), result.get("success").getAsBoolean());
+        assertFalse("registration cleanup keeps its existing response identity", result.has("applicationId"));
+        assertEquals(2, result.getAsJsonArray("removedBindings").size());
+        assertEquals(0, result.getAsJsonArray("unrestoredBindings").size());
+        assertNull(state.defaultId.get());
+        assertNull(state.launchId.get());
+        org.mockito.Mockito.verify(state.manager).setDefaultApplication(state.project, null);
+        org.mockito.Mockito.verify(state.copy).doSave();
+    }
+
+    @Test
+    public void deletingNonDefaultInfobasePreservesOtherBindingsOrReportsFailure() throws Exception
+    {
+        for (boolean failRestore : new boolean[] {false, true})
+        {
+            var state = new com.ditrix.edt.mcp.server.utils.InfobaseBindingsTest.State();
+            state.failDefault = failRestore;
+            var app = mock(IInfobaseApplication.class);
+            var ref = new com.ditrix.edt.mcp.server.utils.ServerInfobaseTarget("host", "base").reference("temporary");
+            when(app.getInfobase()).thenReturn(ref);
+            when(app.getId()).thenReturn("non-default");
+            when(app.getName()).thenReturn("temporary");
+            when(state.manager.getApplication(state.project, "non-default")).thenReturn(Optional.of(app));
+            var associations = mock(com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager.class);
+            var context = com.ditrix.edt.mcp.server.utils.git.BranchContexts.toContext("feat/bindings");
+            org.mockito.Mockito.doAnswer(call -> { state.reset(); return null; })
+                .when(associations).dissociate(state.project, ref, context);
+            var tool = new DeleteInfobaseTool()
+            {
+                @Override
+                String checkDestructiveConsent(String targetName, String subtitle)
+                {
+                    return null;
+                }
+
+                @Override
+                com.ditrix.edt.mcp.server.utils.InfobaseBindings captureBindings(IApplicationManager manager)
+                {
+                    return state.snapshot();
+                }
+            };
+            var result = JsonParser.parseString(tool.deleteInfobase(
+                DeleteInfobaseTool.DeleteContext.of(state.project, state.manager, associations, null),
+                "project", "non-default", null, null, false, false, true, () -> context)).getAsJsonObject();
+            assertEquals(result.toString(), !failRestore, result.get("success").getAsBoolean());
+            assertEquals(failRestore ? null : "prior", state.defaultId.get());
+            assertEquals("prior", state.launchId.get());
+            assertEquals(failRestore ? 1 : 0, result.getAsJsonArray("unrestoredBindings").size());
+            assertEquals("non-default", result.get("applicationId").getAsString());
+            org.mockito.Mockito.verify(associations).dissociate(state.project, ref, context);
+        }
+    }
+
+    @Test
+    public void unavailableAssociationContextDoesNotBlockStandaloneDispatch() throws Exception
+    {
+        for (boolean standalone : new boolean[] {false, true})
+        {
+            for (boolean confirm : new boolean[] {false, true})
+            {
+                var project = mock(IProject.class);
+                var manager = mock(IApplicationManager.class);
+                var associations = mock(com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager.class);
+                var infobases = mock(com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager.class);
+                var app = mock(IApplication.class);
+                var type = mock(IApplicationType.class);
+                when(type.getId()).thenReturn(standalone ? StandaloneServerSupport.WST_SERVER_APP_TYPE
+                    : "com.e1c.g5.dt.applications.type.infobase"); //$NON-NLS-1$
+                when(app.getType()).thenReturn(type);
+                var captureAttempts = new java.util.concurrent.atomic.AtomicInteger();
+                when(manager.getApplication(project, "target")).thenAnswer(call -> { //$NON-NLS-1$
+                    assertEquals("context capture must remain before file/application lookup", 1, captureAttempts.get()); //$NON-NLS-1$
+                    return Optional.of(app);
+                });
+                var dispatched = new java.util.concurrent.atomic.AtomicBoolean();
+                var tool = new DeleteInfobaseTool()
+                {
+                    @Override
+                    String deleteStandaloneServer(String name, IProject target,
+                            IApplicationManager applications, IApplication resolved,
+                            boolean deleteRegistration, boolean deleteFiles, boolean accepted)
+                    {
+                        assertTrue(standalone);
+                        assertEquals(confirm, accepted);
+                        assertSame(app, resolved);
+                        dispatched.set(true);
+                        return com.ditrix.edt.mcp.server.protocol.ToolResult.success().put("standaloneDispatched", true).toJson(); //$NON-NLS-1$
+                    }
+                };
+                var context = DeleteInfobaseTool.DeleteContext.of(project, manager, associations, infobases);
+                var response = JsonParser.parseString(tool.deleteInfobase(context, "project", "target", //$NON-NLS-1$ //$NON-NLS-2$
+                    null, null, true, false, confirm, () -> {
+                        captureAttempts.incrementAndGet();
+                        throw new IllegalStateException("provider temporarily unavailable"); //$NON-NLS-1$
+                    })).getAsJsonObject();
+                assertEquals(standalone, response.get("success").getAsBoolean()); //$NON-NLS-1$
+                assertEquals(standalone, dispatched.get());
+                if (!standalone)
+                {
+                    assertTrue(response.get("error").getAsString().contains("current infobase context")); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                org.mockito.Mockito.verifyZeroInteractions(associations, infobases);
+            }
+        }
+    }
+
+    @Test
+    public void explicitUuidCleanupStillRequiresCapturedContextBeforeAnyLookup()
+    {
+        var project = mock(IProject.class);
+        var manager = mock(IApplicationManager.class);
+        var associations = mock(com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager.class);
+        var infobases = mock(com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager.class);
+        var result = JsonParser.parseString(new DeleteInfobaseTool().deleteInfobase(
+            DeleteInfobaseTool.DeleteContext.of(project, manager, associations, infobases),
+            "project", null, "exact-name", java.util.UUID.randomUUID().toString(), true, false, true, //$NON-NLS-1$ //$NON-NLS-2$
+            () -> null)).getAsJsonObject();
+        assertFalse(result.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertTrue(result.get("error").getAsString().contains("current infobase context")); //$NON-NLS-1$ //$NON-NLS-2$
+        org.mockito.Mockito.verifyZeroInteractions(manager, associations, infobases);
+    }
+
+    @Test
+    public void normalApplicationDeregistrationClearsCredentialsAndRetainsRetryHandleOnFailure() throws Exception
+    {
+        for (boolean failClear : new boolean[] {false, true})
+        {
+            var manager = mock(com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager.class);
+            when(manager.getLoadStatus()).thenReturn(org.eclipse.core.runtime.Status.OK_STATUS);
+            var ref = new com.ditrix.edt.mcp.server.utils.ServerInfobaseTarget("host", "base").reference("launcher-name"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            var record = new java.util.concurrent.atomic.AtomicReference<>(ref);
+            when(manager.findInfobaseByUuid(ref.getUuid())).thenAnswer(call -> Optional.ofNullable(record.get()));
+            var cleared = new java.util.concurrent.atomic.AtomicBoolean();
+            org.mockito.Mockito.doAnswer(call -> {
+                assertTrue("native removal must follow credential clearing", cleared.get()); //$NON-NLS-1$
+                assertFalse(Thread.holdsLock(manager));
+                record.set(null);
+                return null;
+            }).when(manager).delete(org.mockito.ArgumentMatchers.any());
+            DeleteInfobaseTool tool = new DeleteInfobaseTool() {
+                @Override
+                protected void clearRegistrationCredentials(InfobaseReference reference,
+                        com.ditrix.edt.mcp.server.utils.InfobaseAccessSupport.CredentialWriteGuard guard) throws Exception
+                {
+                    guard.run(current -> {
+                        assertEquals(ref.getUuid(), current.getUuid());
+                        if (failClear)
+                        {
+                            throw new IllegalStateException("password-do-not-echo"); //$NON-NLS-1$
+                        }
+                        cleared.set(true);
+                    });
+                }
+            };
+            String result = tool.deregisterFileInfobase(manager, ref, ibId(),
+                new DeleteInfobaseTool.DbFileOutcome(true, DB_DIR, false,
+                    DeleteInfobaseTool.SharedDatabase.NOT_SHARED), true, () -> { });
+            if (failClear)
+            {
+                JsonObject data = parse(result);
+                assertFalse(data.get("deleteRegistration").getAsBoolean()); //$NON-NLS-1$
+                assertFalse(data.get("databaseFilesDeleted").getAsBoolean()); //$NON-NLS-1$
+                assertEquals(ref.getUuid().toString(), data.get("registrationId").getAsString()); //$NON-NLS-1$
+                assertEquals(ref.getName(), data.get("infobaseName").getAsString()); //$NON-NLS-1$
+                assertFalse(result.contains("password-do-not-echo")); //$NON-NLS-1$
+                assertNotNull(record.get());
+                org.mockito.Mockito.verify(manager, org.mockito.Mockito.never()).delete(org.mockito.ArgumentMatchers.any());
+            }
+            else
+            {
+                assertNull(result);
+                assertNull(record.get());
+                assertTrue(cleared.get());
+            }
+        }
+    }
+
     @Test
     public void testName()
     {
@@ -126,6 +470,34 @@ public class DeleteInfobaseToolTest
     }
 
     @Test
+    public void testOutputSchemaDeclaresEveryKeepReasonTheCodeCanProduce()
+    {
+        // databaseFilesDeleted=false is six different answers, and until now only the prose told
+        // them apart - so a client could not separate a MEASURED co-owner from a shared check that
+        // never concluded. The declared vocabulary must cover exactly the reasons the code emits:
+        // no invented value, and no omitted one (deregistrationFailed is a real branch).
+        String schema = new DeleteInfobaseTool().getOutputSchema();
+        assertTrue("outputSchema must declare databaseFilesKept", //$NON-NLS-1$
+            schema.contains("\"databaseFilesKept\"")); //$NON-NLS-1$
+        assertTrue("it must be a closed enum, not a free string", schema.contains("\"enum\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        for (String value : new String[] { DeleteInfobaseTool.KEPT_NOT_REQUESTED,
+            DeleteInfobaseTool.KEPT_NO_DIRECTORY, DeleteInfobaseTool.KEPT_SHARED,
+            DeleteInfobaseTool.KEPT_UNKNOWN, DeleteInfobaseTool.KEPT_DELETE_FAILED,
+            DeleteInfobaseTool.KEPT_DEREGISTRATION_FAILED })
+        {
+            assertTrue("outputSchema must declare the keep reason " + value, //$NON-NLS-1$
+                schema.contains("\"" + value + "\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        // The values themselves are the wire vocabulary; pin the spelling.
+        assertEquals("notRequested", DeleteInfobaseTool.KEPT_NOT_REQUESTED); //$NON-NLS-1$
+        assertEquals("noDirectory", DeleteInfobaseTool.KEPT_NO_DIRECTORY); //$NON-NLS-1$
+        assertEquals("shared", DeleteInfobaseTool.KEPT_SHARED); //$NON-NLS-1$
+        assertEquals("unknown", DeleteInfobaseTool.KEPT_UNKNOWN); //$NON-NLS-1$
+        assertEquals("deleteFailed", DeleteInfobaseTool.KEPT_DELETE_FAILED); //$NON-NLS-1$
+        assertEquals("deregistrationFailed", DeleteInfobaseTool.KEPT_DEREGISTRATION_FAILED); //$NON-NLS-1$
+    }
+
+    @Test
     public void testApplicationKindIsOutputOnlyNotAnInputParam()
     {
         // The application kind is AUTO-DETECTED from the resolved application — it must NOT be an input
@@ -196,5 +568,768 @@ public class DeleteInfobaseToolTest
         String result = new DeleteInfobaseTool().execute(params);
         assertTrue("missing both applicationId and infobaseName must produce an error", //$NON-NLS-1$
             result.contains("applicationId") && result.contains("infobaseName")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    // ==================== #622: a wedged lookup refuses before anything is deleted ==============
+
+    @Test
+    public void testAWedgedApplicationLookupRefusesWithoutDeletingAnything() throws Exception
+    {
+        // This resolution names what a DESTRUCTIVE call is about to delete, so a lookup that
+        // never concluded must refuse in its own words - "Application not found" would be a
+        // claim about the project that nothing measured.
+        IProject project = mock(IProject.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
+        when(mgr.getApplication(project, "Infobase.Doomed")).thenAnswer(invocation -> { //$NON-NLS-1$
+            try
+            {
+                release.await(30, TimeUnit.SECONDS);
+                return Optional.empty();
+            }
+            finally
+            {
+                finished.countDown();
+            }
+        });
+
+        try
+        {
+            DeleteInfobaseTool.TargetApplication target = DeleteInfobaseTool
+                .resolveTargetApplication(mgr, project, "Proj", "Infobase.Doomed", null, 250L); //$NON-NLS-1$ //$NON-NLS-2$
+
+            assertNull("a wedged lookup must not resolve a deletion target", target.app); //$NON-NLS-1$
+            assertNotNull("a wedged lookup must be refused", target.error); //$NON-NLS-1$
+            assertTrue("the refusal must carry the deadline diagnosis", //$NON-NLS-1$
+                target.error.contains(
+                    "the EDT application lookup for application 'Infobase.Doomed'")); //$NON-NLS-1$
+            assertTrue("the refusal must state that nothing was deleted", //$NON-NLS-1$
+                target.error.contains("Nothing was deleted")); //$NON-NLS-1$
+            assertFalse("an unread lookup must not be reported as a measured not-found", //$NON-NLS-1$
+                target.error.contains("Application not found")); //$NON-NLS-1$
+        }
+        finally
+        {
+            release.countDown();
+            assertTrue(finished.await(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void testAConcludedEmptyLookupIsStillAMeasuredNotFound() throws Exception
+    {
+        // The other edge: bounding the read must not have turned a real not-found into a
+        // deadline-flavoured refusal.
+        IProject project = mock(IProject.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(project, "Infobase.Missing")).thenReturn(Optional.empty()); //$NON-NLS-1$
+
+        DeleteInfobaseTool.TargetApplication target = DeleteInfobaseTool
+            .resolveTargetApplication(mgr, project, "Proj", "Infobase.Missing", null, 60_000L); //$NON-NLS-1$ //$NON-NLS-2$
+
+        assertNotNull(target.error);
+        assertTrue("a measured absence must keep the not-found wording", //$NON-NLS-1$
+            target.error.contains("Application not found")); //$NON-NLS-1$
+        assertFalse("a measured absence must not be dressed up as a deadline", //$NON-NLS-1$
+            target.error.contains("did not finish within")); //$NON-NLS-1$
+    }
+
+    // ============ #622: an unreadable read-back is "unknown", not a confirmed deletion ==========
+
+    @Test
+    public void testAnUnreadableReadBackIsNotAConfirmedRemoval() throws Exception
+    {
+        // The read-back used to map "could not read" straight onto "removed". #622 gave that read
+        // a 30 s deadline on exactly the wedge this work exists for, so on a DESTRUCTIVE tool the
+        // likeliest new outcome was a claim nobody measured.
+        IProject project = mock(IProject.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplications(project))
+            .thenThrow(new ApplicationException("delegates are not up")); //$NON-NLS-1$
+
+        DeleteInfobaseTool.ReadBack outcome =
+            DeleteInfobaseTool.confirmApplicationRemoved(mgr, project, "app-doomed", 1); //$NON-NLS-1$
+
+        assertEquals("an unreadable read-back establishes nothing", //$NON-NLS-1$
+            DeleteInfobaseTool.ReadBack.UNREADABLE, outcome);
+    }
+
+    @Test
+    public void testAnUnknownBeforeCountDoesNotTurnASuccessfulTwinDeletionIntoAFailure()
+        throws Exception
+    {
+        // The twin case (2 -> 1) is recognised by `now < beforeCount`. With beforeCount unknown
+        // (-1) that comparison can never hold, so a successful deletion was reported unconfirmed.
+        // With no baseline the honest answer is UNKNOWN, not "still listed".
+        IProject project = mock(IProject.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        // Built BEFORE the outer stubbing: app() stubs its own mock, and a nested when(...)
+        // inside thenReturn(...) is an UnfinishedStubbingException.
+        List<IApplication> twin = Collections.singletonList(app("app-twin")); //$NON-NLS-1$
+        when(mgr.getApplications(project)).thenReturn(twin);
+
+        DeleteInfobaseTool.ReadBack outcome = DeleteInfobaseTool.confirmApplicationRemoved(mgr,
+            project, "app-twin", DeleteInfobaseTool.COUNT_UNKNOWN); //$NON-NLS-1$
+
+        assertEquals("with no baseline a surviving twin is unknown, not a failure", //$NON-NLS-1$
+            DeleteInfobaseTool.ReadBack.UNREADABLE, outcome);
+    }
+
+    @Test
+    public void testAMeasuredCountDropStillConfirms() throws Exception
+    {
+        // The other edge: the tri-state must not have cost the ordinary confirmations.
+        IProject project = mock(IProject.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        List<IApplication> twin = Collections.singletonList(app("app-twin")); //$NON-NLS-1$
+        when(mgr.getApplications(project)).thenReturn(twin);
+
+        assertEquals("2 -> 1 is a confirmed twin deletion", //$NON-NLS-1$
+            DeleteInfobaseTool.ReadBack.CONFIRMED,
+            DeleteInfobaseTool.confirmApplicationRemoved(mgr, project, "app-twin", 2)); //$NON-NLS-1$
+
+        IApplicationManager empty = mock(IApplicationManager.class);
+        when(empty.getApplications(project)).thenReturn(Collections.emptyList());
+        assertEquals("a measured zero confirms even with no baseline", //$NON-NLS-1$
+            DeleteInfobaseTool.ReadBack.CONFIRMED,
+            DeleteInfobaseTool.confirmApplicationRemoved(empty, project, "app-gone", //$NON-NLS-1$
+                DeleteInfobaseTool.COUNT_UNKNOWN));
+    }
+
+    @Test
+    public void testACountThatNeverDropsIsStillListed() throws Exception
+    {
+        IProject project = mock(IProject.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        List<IApplication> stuck = Collections.singletonList(app("app-stuck")); //$NON-NLS-1$
+        when(mgr.getApplications(project)).thenReturn(stuck);
+
+        assertEquals("a count read every time that never dropped is still listed", //$NON-NLS-1$
+            DeleteInfobaseTool.ReadBack.STILL_LISTED,
+            DeleteInfobaseTool.confirmApplicationRemoved(mgr, project, "app-stuck", 1)); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testEachReadBackStateGetsItsOwnNote()
+    {
+        assertEquals("a confirmed removal adds nothing", //$NON-NLS-1$
+            "", DeleteInfobaseTool.readBackNote(DeleteInfobaseTool.ReadBack.CONFIRMED)); //$NON-NLS-1$
+        assertTrue("a surviving entry keeps the 'briefly' note", //$NON-NLS-1$
+            DeleteInfobaseTool.readBackNote(DeleteInfobaseTool.ReadBack.STILL_LISTED)
+                .contains("may still appear in get_applications briefly")); //$NON-NLS-1$
+        String unreadable = DeleteInfobaseTool.readBackNote(DeleteInfobaseTool.ReadBack.UNREADABLE);
+        assertTrue("an unreadable read-back must say the removal is unconfirmed", //$NON-NLS-1$
+            unreadable.contains("could not be CONFIRMED")); //$NON-NLS-1$
+        // The wrong answers: silence (which reads as a confirmation) and the "briefly" note (which
+        // claims the entry was SEEN, and nothing was).
+        assertFalse("an unreadable read-back must not pass silently", unreadable.isEmpty()); //$NON-NLS-1$
+        assertFalse("an unreadable read-back must not claim the entry was seen", //$NON-NLS-1$
+            unreadable.contains("may still appear in get_applications briefly")); //$NON-NLS-1$
+    }
+
+    // ========== #622/D: an expired shared-infobase check is not measured co-ownership ==========
+
+    @Test
+    public void testAnUnconcludedSharedCheckIsUnknownNotShared() throws Exception
+    {
+        // The enumeration cannot finish inside the deadline, so nothing about co-ownership was
+        // established. The conservative KEEP is right; calling it SHARED is the claim that is not.
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
+        try
+        {
+            DeleteInfobaseTool.SharedDatabase shared = DeleteInfobaseTool.sharedCheckBounded(250L,
+                () -> {
+                    try
+                    {
+                        release.await(30, TimeUnit.SECONDS);
+                        return DeleteInfobaseTool.SharedDatabase.NOT_SHARED;
+                    }
+                    catch (InterruptedException e)
+                    {
+                        Thread.currentThread().interrupt();
+                        return DeleteInfobaseTool.SharedDatabase.NOT_SHARED;
+                    }
+                    finally
+                    {
+                        finished.countDown();
+                    }
+                });
+
+            assertEquals(DeleteInfobaseTool.SharedDatabase.UNKNOWN, shared);
+            assertTrue("an unconcluded check must still keep the files", shared.keepsFiles()); //$NON-NLS-1$
+        }
+        finally
+        {
+            release.countDown();
+            assertTrue(finished.await(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void testAConcludedSharedCheckKeepsBothMeasuredAnswers()
+    {
+        assertEquals("a concluded 'yes' is SHARED", DeleteInfobaseTool.SharedDatabase.SHARED, //$NON-NLS-1$
+            DeleteInfobaseTool.sharedCheckBounded(30_000L, () -> DeleteInfobaseTool.SharedDatabase.SHARED));
+        assertEquals("a concluded 'no' is NOT_SHARED", //$NON-NLS-1$
+            DeleteInfobaseTool.SharedDatabase.NOT_SHARED,
+            DeleteInfobaseTool.sharedCheckBounded(30_000L, () -> DeleteInfobaseTool.SharedDatabase.NOT_SHARED));
+        assertFalse("only a measured 'no' may delete the files", //$NON-NLS-1$
+            DeleteInfobaseTool.SharedDatabase.NOT_SHARED.keepsFiles());
+        assertTrue(DeleteInfobaseTool.SharedDatabase.SHARED.keepsFiles());
+    }
+
+    @Test
+    public void testARaisedSharedCheckIsUnknownNotShared()
+    {
+        // A raised enumeration established nothing: the files stay, but no co-owner is claimed.
+        DeleteInfobaseTool.SharedDatabase shared = DeleteInfobaseTool.sharedCheckBounded(30_000L, () -> {
+            throw new IllegalStateException("workspace enumeration failed"); //$NON-NLS-1$
+        });
+        assertEquals(DeleteInfobaseTool.SharedDatabase.UNKNOWN, shared);
+        assertTrue(shared.keepsFiles());
+    }
+
+    @Test
+    public void testAnApplicationWhosePathCannotBeReadIsUnknownNotNotShared()
+    {
+        Path target = Paths.get("C:/ib/Shared").toAbsolutePath().normalize(); //$NON-NLS-1$
+        IProject other = mock(IProject.class);
+        when(other.getName()).thenReturn("Other"); //$NON-NLS-1$
+
+        assertEquals("an unreadable application may be the co-owner", //$NON-NLS-1$
+            DeleteInfobaseTool.SharedDatabase.UNKNOWN,
+            DeleteInfobaseTool.applicationsServeDir(List.of(unreadableFileApp()), target, other, target));
+        // A readable match after it still wins: the scan goes on past the unreadable one.
+        assertEquals(DeleteInfobaseTool.SharedDatabase.SHARED,
+            DeleteInfobaseTool.applicationsServeDir(List.of(unreadableFileApp(), fileApp(target.toString())),
+                target, other, target));
+        assertEquals("a readable application elsewhere is a measured no", //$NON-NLS-1$
+            DeleteInfobaseTool.SharedDatabase.NOT_SHARED,
+            DeleteInfobaseTool.applicationsServeDir(List.of(fileApp("C:/ib/Elsewhere")), target, other, target)); //$NON-NLS-1$
+
+        // A FILE application that names no directory, or has no infobase, is unreadable too.
+        IInfobaseApplication noInfobase = mock(IInfobaseApplication.class);
+        for (IInfobaseApplication app : List.of(fileApp(null), fileApp("  "), noInfobase)) //$NON-NLS-1$
+        {
+            assertEquals(DeleteInfobaseTool.SharedDatabase.UNKNOWN,
+                DeleteInfobaseTool.applicationsServeDir(List.of(app), target, other, target));
+        }
+        // The other edge: a SERVER infobase really has no local directory, so it is a measured no.
+        InfobaseReference serverRef = mock(InfobaseReference.class);
+        when(serverRef.getConnectionString()).thenReturn(mock(IConnectionString.class));
+        IInfobaseApplication serverApp = mock(IInfobaseApplication.class);
+        when(serverApp.getInfobase()).thenReturn(serverRef);
+        assertEquals(DeleteInfobaseTool.SharedDatabase.NOT_SHARED,
+            DeleteInfobaseTool.applicationsServeDir(List.of(serverApp), target, other, target));
+    }
+
+    @Test
+    public void testAnInfobaseTypedApplicationWithoutTheInterfaceIsUnknown()
+    {
+        // The kind is known, so its missing infobase is unreadable, not "no local directory".
+        Path target = Paths.get("C:/ib/Shared").toAbsolutePath().normalize(); //$NON-NLS-1$
+        IProject other = mock(IProject.class);
+        IApplicationType type = mock(IApplicationType.class);
+        when(type.getId()).thenReturn("com.e1c.g5.dt.applications.type.infobase"); //$NON-NLS-1$
+        IApplication app = mock(IApplication.class);
+        when(app.getType()).thenReturn(type);
+        assertEquals(DeleteInfobaseTool.SharedDatabase.UNKNOWN,
+            DeleteInfobaseTool.applicationsServeDir(List.of(app), target, other, target));
+        // The other edge: an application of an unrelated kind really has no directory.
+        IApplicationType otherType = mock(IApplicationType.class);
+        when(otherType.getId()).thenReturn("some.other.type"); //$NON-NLS-1$
+        IApplication unrelated = mock(IApplication.class);
+        when(unrelated.getType()).thenReturn(otherType);
+        assertEquals(DeleteInfobaseTool.SharedDatabase.NOT_SHARED,
+            DeleteInfobaseTool.applicationsServeDir(List.of(unrelated), target, other, target));
+    }
+
+    @Test
+    public void testASiblingInTheSameProjectIsACoOwnerButTheTargetIsNot() throws Exception
+    {
+        Path target = Paths.get("C:/ib/Shared").toAbsolutePath().normalize(); //$NON-NLS-1$
+        IProject project = mock(IProject.class);
+        IInfobaseApplication doomed = fileApp(target.toString());
+        when(doomed.getId()).thenReturn("doomed"); //$NON-NLS-1$
+        IInfobaseApplication sibling = fileApp(target.toString());
+        when(sibling.getId()).thenReturn("sibling"); //$NON-NLS-1$
+        IApplicationManager mgr = mock(IApplicationManager.class);
+
+        when(mgr.getApplications(project)).thenReturn(List.of(doomed, sibling));
+        assertEquals("a sibling serving the same directory keeps the files", //$NON-NLS-1$
+            DeleteInfobaseTool.SharedDatabase.SHARED,
+            DeleteInfobaseTool.projectShares(mgr, project, doomed, target, target));
+        when(mgr.getApplications(project)).thenReturn(List.of(doomed));
+        assertEquals("the deletion target alone is not its own co-owner", //$NON-NLS-1$
+            DeleteInfobaseTool.SharedDatabase.NOT_SHARED,
+            DeleteInfobaseTool.projectShares(mgr, project, doomed, target, target));
+
+        // A same-named twin shares the target's id but is a different application.
+        IInfobaseApplication twin = fileApp(target.toString());
+        when(twin.getId()).thenReturn("doomed"); //$NON-NLS-1$
+        when(mgr.getApplications(project)).thenReturn(List.of(doomed, twin));
+        assertEquals("a twin with the same id is still a co-owner", //$NON-NLS-1$
+            DeleteInfobaseTool.SharedDatabase.SHARED,
+            DeleteInfobaseTool.projectShares(mgr, project, doomed, target, target));
+        // The target gone from a later snapshot: the twin alone must not be taken for it.
+        when(mgr.getApplications(project)).thenReturn(List.of(twin));
+        assertEquals("a twin left alone is still a co-owner", //$NON-NLS-1$
+            DeleteInfobaseTool.SharedDatabase.SHARED,
+            DeleteInfobaseTool.projectShares(mgr, project, doomed, target, target));
+    }
+
+    @Test
+    public void testOnlyOneEqualApplicationIsExcluded()
+    {
+        // Value equality, as EDT's applications have: two associations of one infobase are equal.
+        assertEquals(List.of("b", "a"), DeleteInfobaseTool.withoutOneEqual(List.of("a", "b", "a"), "a")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        assertEquals("a target absent from the snapshot removes nothing", //$NON-NLS-1$
+            List.of("b"), DeleteInfobaseTool.withoutOneEqual(List.of("b"), "a")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(List.of("a"), DeleteInfobaseTool.withoutOneEqual(List.of("a"), null)); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testANullApplicationListIsUnreadNotEmpty() throws Exception
+    {
+        Path target = Paths.get("C:/ib/Shared").toAbsolutePath().normalize(); //$NON-NLS-1$
+        IProject project = mock(IProject.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplications(project)).thenReturn(null);
+        assertEquals(DeleteInfobaseTool.SharedDatabase.UNKNOWN,
+            DeleteInfobaseTool.projectShares(mgr, project, null, target, target));
+        assertEquals("a null read-back must not confirm the removal", //$NON-NLS-1$
+            DeleteInfobaseTool.COUNT_UNKNOWN, DeleteInfobaseTool.countAppsWithId(mgr, project, "doomed")); //$NON-NLS-1$
+        when(mgr.getApplications(project)).thenReturn(Collections.emptyList());
+        assertEquals("an empty list is a measured zero", //$NON-NLS-1$
+            0, DeleteInfobaseTool.countAppsWithId(mgr, project, "doomed")); //$NON-NLS-1$
+    }
+
+    private static IInfobaseApplication unreadableFileApp()
+    {
+        InfobaseReference ref = mock(InfobaseReference.class);
+        when(ref.getConnectionString()).thenThrow(new IllegalStateException("unresolvable")); //$NON-NLS-1$
+        IInfobaseApplication app = mock(IInfobaseApplication.class);
+        when(app.getInfobase()).thenReturn(ref);
+        return app;
+    }
+
+    private static IInfobaseApplication fileApp(String dir)
+    {
+        FileConnectionString connection = mock(FileConnectionString.class);
+        when(connection.getFile()).thenReturn(dir);
+        InfobaseReference ref = mock(InfobaseReference.class);
+        when(ref.getConnectionString()).thenReturn(connection);
+        IInfobaseApplication app = mock(IInfobaseApplication.class);
+        when(app.getInfobase()).thenReturn(ref);
+        return app;
+    }
+
+    @Test
+    public void testAnUnreadableProjectDoesNotStopTheScanForARealCoOwner()
+    {
+        // The unreadable project comes first; the co-owner behind it must still be found.
+        assertEquals(DeleteInfobaseTool.SharedDatabase.SHARED,
+            DeleteInfobaseTool.combineProjectAnswers(List.of(
+                () -> DeleteInfobaseTool.SharedDatabase.UNKNOWN,
+                () -> DeleteInfobaseTool.SharedDatabase.NOT_SHARED,
+                () -> DeleteInfobaseTool.SharedDatabase.SHARED)));
+    }
+
+    @Test
+    public void testAnUnreadableProjectWithNoCoOwnerIsUnknownNotShared()
+    {
+        assertEquals(DeleteInfobaseTool.SharedDatabase.UNKNOWN,
+            DeleteInfobaseTool.combineProjectAnswers(List.of(
+                () -> DeleteInfobaseTool.SharedDatabase.NOT_SHARED,
+                () -> DeleteInfobaseTool.SharedDatabase.UNKNOWN,
+                () -> DeleteInfobaseTool.SharedDatabase.NOT_SHARED)));
+    }
+
+    @Test
+    public void testCombiningProjectAnswersIsMeasuredOnlyWhenEveryProjectAnswered()
+    {
+        assertEquals("every project read, none serves the directory", //$NON-NLS-1$
+            DeleteInfobaseTool.SharedDatabase.NOT_SHARED,
+            DeleteInfobaseTool.combineProjectAnswers(List.of(
+                () -> DeleteInfobaseTool.SharedDatabase.NOT_SHARED,
+                () -> DeleteInfobaseTool.SharedDatabase.NOT_SHARED)));
+        assertEquals("no other project at all", DeleteInfobaseTool.SharedDatabase.NOT_SHARED, //$NON-NLS-1$
+            DeleteInfobaseTool.combineProjectAnswers(List.of()));
+        // A found co-owner ends the scan: projects after it are never read.
+        java.util.concurrent.atomic.AtomicInteger readsAfter = new java.util.concurrent.atomic.AtomicInteger();
+        DeleteInfobaseTool.combineProjectAnswers(List.of(
+            () -> DeleteInfobaseTool.SharedDatabase.SHARED,
+            () -> {
+                readsAfter.incrementAndGet();
+                return DeleteInfobaseTool.SharedDatabase.NOT_SHARED;
+            }));
+        assertEquals(0, readsAfter.get());
+    }
+
+    @Test
+    public void testAnUnknownSharedCheckIsNotReportedAsCoOwnership()
+    {
+        Path dbDir = Paths.get("C:", "bases", "Demo"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        String unknown = DeleteInfobaseTool.databaseResultNote(new DeleteInfobaseTool.DbFileOutcome(
+            true, dbDir, false, DeleteInfobaseTool.SharedDatabase.UNKNOWN));
+        String shared = DeleteInfobaseTool.databaseResultNote(new DeleteInfobaseTool.DbFileOutcome(
+            true, dbDir, false, DeleteInfobaseTool.SharedDatabase.SHARED));
+
+        assertTrue("it must say the files were kept", unknown.contains("were KEPT")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("it must say the check could not be completed", //$NON-NLS-1$
+            unknown.contains("could not be completed")); //$NON-NLS-1$
+        assertTrue("it must say the sharing itself is unknown", //$NON-NLS-1$
+            unknown.contains("is shared is UNKNOWN")); //$NON-NLS-1$
+        // The sentence this replaced, which stated an unmeasured fact as a measured one.
+        assertFalse("an unconcluded check must not claim another project uses the database", //$NON-NLS-1$
+            unknown.contains("still used by other project(s)")); //$NON-NLS-1$
+        // And the genuinely-shared case must keep saying exactly that.
+        assertTrue("a measured co-owner must still be named as one", //$NON-NLS-1$
+            shared.contains("still used by other project(s)")); //$NON-NLS-1$
+        assertFalse(shared.contains("UNKNOWN")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testAnUnknownPreviewSaysTheConfirmReRunsTheCheck()
+    {
+        Path dbDir = Paths.get("C:", "bases", "Demo"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        String unknown = DeleteInfobaseTool.databasePreviewNote(true, dbDir,
+            DeleteInfobaseTool.SharedDatabase.UNKNOWN);
+        String shared = DeleteInfobaseTool.databasePreviewNote(true, dbDir,
+            DeleteInfobaseTool.SharedDatabase.SHARED);
+
+        // Preview and confirm are separate calls, each running its OWN bounded enumeration, so a
+        // deadline that flips between them makes the preview non-binding. The preview has to say so.
+        assertTrue("the preview must say the files would be kept", unknown.contains("KEPT")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("the preview must say the check did not complete", //$NON-NLS-1$
+            unknown.contains("did not complete")); //$NON-NLS-1$
+        assertTrue("the preview must say confirm=true re-runs the check", //$NON-NLS-1$
+            unknown.contains("confirm=true re-runs that check")); //$NON-NLS-1$
+        assertTrue("the preview must admit the files may be deleted after all", //$NON-NLS-1$
+            unknown.contains("may be DELETED after all")); //$NON-NLS-1$
+        assertFalse("an unconcluded preview must not claim other projects use it", //$NON-NLS-1$
+            unknown.contains("still used by other projects")); //$NON-NLS-1$
+        assertTrue("the measured-shared preview keeps its own wording", //$NON-NLS-1$
+            shared.contains("still used by other projects")); //$NON-NLS-1$
+    }
+
+    // ===== #622: the keep reason is DECLARED on the payload, not only spelled out in the prose =====
+
+    /** The identity every payload test reuses; the names are irrelevant to the discriminator. */
+    private static DeleteInfobaseTool.IbIdentity ibId()
+    {
+        return new DeleteInfobaseTool.IbIdentity("Proj", "app-1", "Demo"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    private static final Path DB_DIR = Paths.get("C:", "bases", "Demo"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+    private static JsonObject parse(String json)
+    {
+        return JsonParser.parseString(json).getAsJsonObject();
+    }
+
+    private static String keptOf(JsonObject payload)
+    {
+        return payload.has("databaseFilesKept") //$NON-NLS-1$
+            ? payload.get("databaseFilesKept").getAsString() : null; //$NON-NLS-1$
+    }
+
+    @Test
+    public void testEveryKeepReasonThatCanReachADeletionPayloadIsNamedOnIt()
+    {
+        // One assertion per branch databaseResultNote can take - the serialized payload, because
+        // that is what a client reads. A record or a sentence proves nothing about the wire.
+        JsonObject notRequested = parse(DeleteInfobaseTool.buildDeleteSuccessResult(ibId(), true, null,
+            new DeleteInfobaseTool.DbFileOutcome(false, DB_DIR, false,
+                DeleteInfobaseTool.SharedDatabase.NOT_SHARED)));
+        JsonObject noDirectory = parse(DeleteInfobaseTool.buildDeleteSuccessResult(ibId(), true, null,
+            new DeleteInfobaseTool.DbFileOutcome(true, null, false,
+                DeleteInfobaseTool.SharedDatabase.NOT_SHARED)));
+        JsonObject shared = parse(DeleteInfobaseTool.buildDeleteSuccessResult(ibId(), true, null,
+            new DeleteInfobaseTool.DbFileOutcome(true, DB_DIR, false,
+                DeleteInfobaseTool.SharedDatabase.SHARED)));
+        JsonObject unknown = parse(DeleteInfobaseTool.buildDeleteSuccessResult(ibId(), true, null,
+            new DeleteInfobaseTool.DbFileOutcome(true, DB_DIR, false,
+                DeleteInfobaseTool.SharedDatabase.UNKNOWN)));
+        JsonObject deleteFailed = parse(DeleteInfobaseTool.buildDeleteSuccessResult(ibId(), true, null,
+            new DeleteInfobaseTool.DbFileOutcome(true, DB_DIR, false,
+                DeleteInfobaseTool.SharedDatabase.NOT_SHARED)));
+
+        assertEquals("notRequested", keptOf(notRequested)); //$NON-NLS-1$
+        assertEquals("noDirectory", keptOf(noDirectory)); //$NON-NLS-1$
+        assertEquals("shared", keptOf(shared)); //$NON-NLS-1$
+        assertEquals("unknown", keptOf(unknown)); //$NON-NLS-1$
+        assertEquals("deleteFailed", keptOf(deleteFailed)); //$NON-NLS-1$
+
+        // The distinction the whole change exists for: a measured co-owner and an unconcluded
+        // check keep the files for OPPOSITE reasons and must never serialize to the same value.
+        assertFalse("an unconcluded check must not serialize as measured co-ownership", //$NON-NLS-1$
+            "shared".equals(keptOf(unknown))); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testADeletionThatWentThroughCarriesNoKeepReason()
+    {
+        // The over-correction guard for the delete side: a reason always attached would make
+        // "kept" meaningless, and would contradict databaseFilesDeleted=true in the same payload.
+        JsonObject deleted = parse(DeleteInfobaseTool.buildDeleteSuccessResult(ibId(), true, null,
+            new DeleteInfobaseTool.DbFileOutcome(true, DB_DIR, true,
+                DeleteInfobaseTool.SharedDatabase.NOT_SHARED)));
+
+        assertTrue("the files went", deleted.get("databaseFilesDeleted").getAsBoolean()); //$NON-NLS-1$ //$NON-NLS-2$
+        assertNull("a completed deletion has no keep reason", keptOf(deleted)); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testKeptAndDeletedAreTwoHalvesOfOneAnswer()
+    {
+        // The invariant the shared writer exists to guarantee: databaseFilesDeleted=false is never
+        // reported without naming why, and deleted=true never carries a keep reason. Both keys are
+        // written in ONE place so a future builder cannot emit half the answer.
+        for (boolean requested : new boolean[] { true, false })
+        {
+            for (Path dir : new Path[] { DB_DIR, null })
+            {
+                for (DeleteInfobaseTool.SharedDatabase state : DeleteInfobaseTool.SharedDatabase
+                    .values())
+                {
+                    for (boolean deleted : new boolean[] { true, false })
+                    {
+                        JsonObject payload =
+                            parse(DeleteInfobaseTool.buildDeleteSuccessResult(ibId(), true, null,
+                                new DeleteInfobaseTool.DbFileOutcome(requested, dir, deleted,
+                                    state)));
+                        boolean reportedDeleted =
+                            payload.get("databaseFilesDeleted").getAsBoolean(); //$NON-NLS-1$
+                        assertEquals("deleted=" + reportedDeleted + " must decide whether a keep " //$NON-NLS-1$ //$NON-NLS-2$
+                            + "reason is present", reportedDeleted, keptOf(payload) == null); //$NON-NLS-1$
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testAFailedDeregistrationNamesItselfOnlyWhenNothingElseAlreadyExplainedTheKeep()
+    {
+        // The deregistration failure is the LAST reason, not the overriding one: it may name
+        // itself only where the files would otherwise have been deleted.
+        JsonObject wouldHaveDeleted = parse(DeleteInfobaseTool.buildDeregisterFailedResult(ibId(),
+            new DeleteInfobaseTool.DbFileOutcome(true, DB_DIR, false,
+                DeleteInfobaseTool.SharedDatabase.NOT_SHARED),
+            new IllegalStateException("registry locked"))); //$NON-NLS-1$
+        JsonObject notRequested = parse(DeleteInfobaseTool.buildDeregisterFailedResult(ibId(),
+            new DeleteInfobaseTool.DbFileOutcome(false, DB_DIR, false,
+                DeleteInfobaseTool.SharedDatabase.NOT_SHARED),
+            new IllegalStateException("registry locked"))); //$NON-NLS-1$
+
+        assertFalse("the files were not deleted", //$NON-NLS-1$
+            wouldHaveDeleted.get("databaseFilesDeleted").getAsBoolean()); //$NON-NLS-1$
+        assertEquals("deregistrationFailed", keptOf(wouldHaveDeleted)); //$NON-NLS-1$
+        assertEquals("notRequested", keptOf(notRequested)); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testAFailedDeregistrationDoesNotOverwriteAMeasuredCoOwnershipAnswer()
+    {
+        // The shared-database check has ALREADY run when this branch is reached, and its answer is
+        // about the same unchanged fact the preview reported. Answering 'deregistrationFailed'
+        // over it lost the 'shared' signal from the machine-readable field and told the user to
+        // remove a directory that belongs to another project - while the preview of the identical
+        // input said 'shared'.
+        IllegalStateException registryLocked = new IllegalStateException("registry locked"); //$NON-NLS-1$
+        JsonObject shared = parse(DeleteInfobaseTool.buildDeregisterFailedResult(ibId(),
+            new DeleteInfobaseTool.DbFileOutcome(true, DB_DIR, false,
+                DeleteInfobaseTool.SharedDatabase.SHARED), registryLocked));
+        JsonObject unknown = parse(DeleteInfobaseTool.buildDeregisterFailedResult(ibId(),
+            new DeleteInfobaseTool.DbFileOutcome(true, DB_DIR, false,
+                DeleteInfobaseTool.SharedDatabase.UNKNOWN), registryLocked));
+        JsonObject noDirectory = parse(DeleteInfobaseTool.buildDeregisterFailedResult(ibId(),
+            new DeleteInfobaseTool.DbFileOutcome(true, null, false,
+                DeleteInfobaseTool.SharedDatabase.NOT_SHARED), registryLocked));
+
+        assertEquals("a MEASURED co-owner must survive the deregistration failure", //$NON-NLS-1$
+            "shared", keptOf(shared)); //$NON-NLS-1$
+        assertEquals("an unconcluded check must stay 'unknown', not become a different reason", //$NON-NLS-1$
+            "unknown", keptOf(unknown)); //$NON-NLS-1$
+        assertEquals("noDirectory", keptOf(noDirectory)); //$NON-NLS-1$
+
+        // And the prose must not contradict the field it ships beside.
+        String sharedMessage = shared.get("message").getAsString(); //$NON-NLS-1$
+        assertTrue("a shared database must be named as such in the message: " + sharedMessage, //$NON-NLS-1$
+            sharedMessage.contains("still used by other project")); //$NON-NLS-1$
+        assertFalse("it must not tell the user to delete a co-owned directory: " + sharedMessage, //$NON-NLS-1$
+            sharedMessage.contains("remove the directory manually if intended")); //$NON-NLS-1$
+        assertFalse("nor claim a directory exists when none was resolved: " //$NON-NLS-1$
+            + noDirectory.get("message").getAsString(), //$NON-NLS-1$
+            noDirectory.get("message").getAsString() //$NON-NLS-1$
+                .contains("remove the directory manually if intended")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testAFailedDeregistrationAndThePreviewAgreeOnTheSameUnchangedFact()
+    {
+        // preview -> confirm on one input must not flip the answer about co-ownership: only the
+        // deletion changes, and this branch never reaches it.
+        for (DeleteInfobaseTool.SharedDatabase shared : DeleteInfobaseTool.SharedDatabase.values())
+        {
+            for (Path dir : new Path[] {DB_DIR, null})
+            {
+                JsonObject preview =
+                    parse(DeleteInfobaseTool.buildPreviewResult(ibId(), true, true, dir, shared));
+                JsonObject confirmed = parse(DeleteInfobaseTool.buildDeregisterFailedResult(ibId(),
+                    new DeleteInfobaseTool.DbFileOutcome(true, dir, false, shared),
+                    new IllegalStateException("registry locked"))); //$NON-NLS-1$
+                String previewKept = keptOf(preview);
+                if (previewKept != null)
+                {
+                    assertEquals("preview and a deregister-failed confirm must agree for " //$NON-NLS-1$
+                        + shared + "/" + dir, previewKept, keptOf(confirmed)); //$NON-NLS-1$
+                }
+                else
+                {
+                    assertEquals("only where the preview would have DELETED may the " //$NON-NLS-1$
+                        + "deregistration name itself", "deregistrationFailed", //$NON-NLS-1$ //$NON-NLS-2$
+                        keptOf(confirmed));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testAPreviewDeclaresTheReasonItWouldKeepTheFiles()
+    {
+        // The preview is where the agent decides whether to call confirm=true, so the shared /
+        // unknown distinction matters MOST here - and it was prose-only.
+        JsonObject shared = parse(DeleteInfobaseTool.buildPreviewResult(ibId(), true, true, DB_DIR,
+            DeleteInfobaseTool.SharedDatabase.SHARED));
+        JsonObject unknown = parse(DeleteInfobaseTool.buildPreviewResult(ibId(), true, true, DB_DIR,
+            DeleteInfobaseTool.SharedDatabase.UNKNOWN));
+        JsonObject wouldDelete = parse(DeleteInfobaseTool.buildPreviewResult(ibId(), true, true,
+            DB_DIR, DeleteInfobaseTool.SharedDatabase.NOT_SHARED));
+        JsonObject serverUnknown = parse(DeleteInfobaseTool.buildStandaloneServerPreview(false,
+            ibId(), true, true, DB_DIR, DeleteInfobaseTool.SharedDatabase.UNKNOWN));
+
+        assertEquals("shared", keptOf(shared)); //$NON-NLS-1$
+        assertEquals("unknown", keptOf(unknown)); //$NON-NLS-1$
+        assertNull("a preview that would delete names no keep reason", keptOf(wouldDelete)); //$NON-NLS-1$
+        assertEquals("the standalone-server preview answers the same way", //$NON-NLS-1$
+            "unknown", keptOf(serverUnknown)); //$NON-NLS-1$
+        // A preview changes nothing, so it must not claim an outcome.
+        assertFalse("a preview must not report databaseFilesDeleted", //$NON-NLS-1$
+            unknown.has("databaseFilesDeleted")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testTheStandaloneServerDeletionDeclaresTheSameReasons()
+    {
+        // The second deletion path had its own result-builder; both must answer identically or the
+        // field means something different depending on the application kind.
+        JsonObject unknown = parse(DeleteInfobaseTool.buildDeletedResult(ibId(), true,
+            new DeleteInfobaseTool.DbFileOutcome(true, DB_DIR, false,
+                DeleteInfobaseTool.SharedDatabase.UNKNOWN),
+            StandaloneServerSupport.RegistryCleanup.REMOVED, DeleteInfobaseTool.ReadBack.CONFIRMED));
+        JsonObject deleted = parse(DeleteInfobaseTool.buildDeletedResult(ibId(), true,
+            new DeleteInfobaseTool.DbFileOutcome(true, DB_DIR, true,
+                DeleteInfobaseTool.SharedDatabase.NOT_SHARED),
+            StandaloneServerSupport.RegistryCleanup.REMOVED, DeleteInfobaseTool.ReadBack.CONFIRMED));
+
+        assertEquals("unknown", keptOf(unknown)); //$NON-NLS-1$
+        assertNull("a completed deletion has no keep reason", keptOf(deleted)); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testOnlyConclusiveNameAbsenceAllowsLauncherCleanup() throws Exception
+    {
+        IApplicationManager manager = mock(IApplicationManager.class);
+        IProject project = mock(IProject.class);
+        when(manager.getApplications(project)).thenReturn(java.util.Collections.emptyList());
+        assertTrue(DeleteInfobaseTool.resolveTargetApplication(manager, project,
+            "Project", null, "orphan", 1000L).nameAbsent); //$NON-NLS-1$ //$NON-NLS-2$
+        when(manager.getApplications(project)).thenReturn(null);
+        assertFalse(DeleteInfobaseTool.resolveTargetApplication(manager, project,
+            "Project", null, "orphan", 1000L).nameAbsent); //$NON-NLS-1$ //$NON-NLS-2$
+        when(manager.getApplications(project)).thenThrow(new com.e1c.g5.dt.applications.ApplicationException("unreadable")); //$NON-NLS-1$
+        assertFalse(DeleteInfobaseTool.resolveTargetApplication(manager, project,
+            "Project", null, "orphan", 1000L).nameAbsent); //$NON-NLS-1$ //$NON-NLS-2$
+        when(manager.getApplication(project, "  ")).thenReturn(java.util.Optional.empty()); //$NON-NLS-1$
+        assertFalse(DeleteInfobaseTool.resolveTargetApplication(manager, project,
+            "Project", "  ", "orphan", 1000L).nameAbsent); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    @Test
+    public void testRegistrationCleanupRequiresExactUuidNameAndSafeFlags()
+    {
+        String id = java.util.UUID.randomUUID().toString();
+        assertNull(DeleteInfobaseTool.registrationArgumentError(id, null, "probe", true, false)); //$NON-NLS-1$
+        for (Map<String, String> invalid : List.of(
+            Map.of("registrationId", "1-1-1-1-1", "infobaseName", "probe"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            Map.of("registrationId", "not-a-uuid", "infobaseName", "probe"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            Map.of("registrationId", id), //$NON-NLS-1$
+            Map.of("registrationId", id, "infobaseName", "probe", "applicationId", "old"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            Map.of("registrationId", id, "infobaseName", "probe", "deleteRegistration", "false"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            Map.of("registrationId", id, "infobaseName", "probe", "deleteDatabaseFiles", "true"))) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        {
+            var params = new HashMap<>(invalid);
+            params.put("projectName", "MissingProject"); //$NON-NLS-1$ //$NON-NLS-2$
+            JsonObject result = JsonParser.parseString(new DeleteInfobaseTool().execute(params)).getAsJsonObject();
+            assertFalse(result.get("success").getAsBoolean()); //$NON-NLS-1$
+            assertTrue(result.toString(), result.get("error").getAsString().contains("registrationId")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    @Test
+    public void testRegistrationPreviewAndDeletionReturnTheSameRegistrationIdNotAnApplicationId()
+    {
+        var id = java.util.UUID.randomUUID();
+        for (boolean deleted : List.of(false, true))
+        {
+            var result = JsonParser.parseString(DeleteInfobaseTool.registrationResult(
+                "project", "probe", id, deleted).toJson()).getAsJsonObject(); //$NON-NLS-1$ //$NON-NLS-2$
+            assertEquals(id.toString(), result.get("registrationId").getAsString()); //$NON-NLS-1$
+            assertFalse(result.has("applicationId")); //$NON-NLS-1$
+            assertEquals(deleted ? "deleted" : "preview", result.get("action").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            assertFalse(result.get("databaseFilesDeleted").getAsBoolean()); //$NON-NLS-1$
+        }
+    }
+
+    @Test
+    public void testContextSwitchWhileConsentWaitsPreventsEveryMutation()
+    {
+        var expected = com.ditrix.edt.mcp.server.utils.git.BranchContexts.toContext("feat/original"); //$NON-NLS-1$
+        var current = new java.util.concurrent.atomic.AtomicReference<>(expected);
+        var mutation = mock(Runnable.class);
+        String result = DeleteInfobaseTool.afterConsent(expected, current::get, () -> {
+            current.set(com.ditrix.edt.mcp.server.utils.git.BranchContexts.toContext("feat/other")); //$NON-NLS-1$
+            return null;
+        }, () -> { mutation.run(); return "unexpected deletion"; }); //$NON-NLS-1$
+        var json = JsonParser.parseString(result).getAsJsonObject();
+        assertFalse(json.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertTrue(result, result.contains("context changed")); //$NON-NLS-1$
+        org.mockito.Mockito.verify(mutation, org.mockito.Mockito.never()).run();
+    }
+
+    @Test
+    public void testStableContextAllowsMutationAndDeclinedConsentDoesNot()
+    {
+        var context = com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAssociationContext.empty();
+        var writes = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.function.Supplier<String> mutation = () -> { writes.incrementAndGet(); return "done"; }; //$NON-NLS-1$
+        assertEquals("done", DeleteInfobaseTool.afterConsent(context, () -> context, () -> null, mutation)); //$NON-NLS-1$
+        assertEquals("declined", DeleteInfobaseTool.afterConsent(context, () -> context, () -> "declined", mutation)); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(1, writes.get());
+        String result = DeleteInfobaseTool.afterConsent(context,
+            () -> { throw new IllegalStateException("provider unavailable"); }, () -> null, mutation); //$NON-NLS-1$
+        assertFalse(JsonParser.parseString(result).getAsJsonObject().get("success").getAsBoolean()); //$NON-NLS-1$
+        assertEquals(1, writes.get());
+    }
+
+    private static IApplication app(String id)
+    {
+        IApplication application = mock(IApplication.class);
+        when(application.getId()).thenReturn(id);
+        return application;
     }
 }

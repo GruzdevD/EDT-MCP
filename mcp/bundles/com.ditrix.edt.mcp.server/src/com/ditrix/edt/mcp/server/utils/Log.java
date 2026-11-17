@@ -122,6 +122,12 @@ public final class Log
         log(IStatus.WARNING, message, null);
     }
 
+    public static void warning(String message, Throwable error)
+    {
+        log(IStatus.WARNING, message, error);
+    }
+
+
     /**
      * Logs an error with an optional exception.
      *
@@ -131,6 +137,32 @@ public final class Log
     public static void error(String message, Throwable e)
     {
         log(IStatus.ERROR, message, e);
+    }
+
+    /**
+     * The status plugin id this class logs under. Package-visible so a sibling that builds its own
+     * {@link IStatus} ({@link Refusals#statusFor}) logs under the same id without repeating the
+     * bundle lookup.
+     *
+     * @return the bundle symbolic name
+     */
+    static String pluginId()
+    {
+        return PLUGIN_ID;
+    }
+
+    /**
+     * Logs a pre-built status, for a caller that decides the severity and whether a stack is
+     * attached ({@link Refusals#statusFor}). Keeps this class the single owner of the destination.
+     *
+     * @param status the status to emit
+     */
+    static void log(IStatus status)
+    {
+        if (BUNDLE != null)
+        {
+            Platform.getLog(BUNDLE).log(status);
+        }
     }
 
     private static void log(int severity, String message, Throwable e)

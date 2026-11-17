@@ -9,16 +9,29 @@ package com.ditrix.edt.mcp.server.utils;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import java.math.BigDecimal;
 import java.util.List;
 
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.junit.Assume;
 import org.junit.Test;
 import org.mockito.Mockito;
 
 import com._1c.g5.v8.dt.mcore.McoreFactory;
+import com._1c.g5.v8.dt.mcore.McorePackage;
+import com._1c.g5.v8.dt.platform.IEObjectProvider;
+import com._1c.g5.v8.dt.platform.version.Version;
+import com._1c.g5.v8.dt.mcore.BinaryQualifiers;
+import com._1c.g5.v8.dt.mcore.DateFractions;
+import com._1c.g5.v8.dt.mcore.DateQualifiers;
+import com._1c.g5.v8.dt.mcore.NumberQualifiers;
+import com._1c.g5.v8.dt.mcore.StringQualifiers;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.metadata.mdclass.Catalog;
@@ -951,6 +964,19 @@ public class PredefinedWriterTest
         }
     }
 
+    /** An exponent past BigDecimal's int scale is valid JSON, so it is the caller's refusal, not a crash. */
+    @Test
+    public void testNumericCodeExponentOutOfBigDecimalRangeIsARefusal()
+    {
+        Catalog catalog = newNumberCodeCatalog("Codes", 5); //$NON-NLS-1$
+        PredefinedWriter.ItemProps props = new PredefinedWriter.ItemProps();
+        props.code = com.google.gson.JsonParser.parseString("1e2147483648"); //$NON-NLS-1$
+        props.codeSet = true;
+        PredefinedWriter.WriteResult result = PredefinedWriter.create(catalog, "Overflow", props, false); //$NON-NLS-1$
+        assertTrue(result.isError());
+        assertTrue(result.error, result.error.contains("out of range")); //$NON-NLS-1$
+    }
+
     /** A fractional numeric code is rejected - a catalog code is an integer. */
     @Test
     public void testNumericCodeFractionalRejected()
@@ -1291,20 +1317,83 @@ public class PredefinedWriterTest
     }
 
     @Test
-    public void testValueTypeMissingContextRejected()
+    public void testValueTypeMissingVersionIsRaisedUnmarked()
     {
-        // config/version deliberately left unset - exactly what every EXISTING caller of create()/
-        // modify() (none of which touch valueType) leaves them at; PredefinedWriter must still fail
-        // ACTIONABLY (not NPE) when a caller DOES set valueTypeSet without supplying the context.
+        // A missing platform version is a SERVER failure, not caller input: it must be RAISED
+        // unmarked (so it keeps its ERROR and stack), never returned as a refusal string that the
+        // calling tool would mark and demote. Still actionable, and still not an NPE.
         ChartOfCharacteristicTypes types = newCharacteristicTypes("Properties", 5); //$NON-NLS-1$
         PredefinedWriter.ItemProps props = new PredefinedWriter.ItemProps();
         props.valueType = typeSpec("String"); //$NON-NLS-1$
         props.valueTypeSet = true;
 
+        IllegalStateException raised = raisedBy(() -> PredefinedWriter.create(types, "Weight", props, false)); //$NON-NLS-1$
+        assertTrue(raised.getMessage(), raised.getMessage().contains("platform version")); //$NON-NLS-1$
+        assertFalse("a platform failure must not be marked as a refusal", raised instanceof Refusals.Marker); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testValueTypeMissingConfigurationIsRaisedUnmarked()
+    {
+        ChartOfCharacteristicTypes types = newCharacteristicTypes("Properties", 5); //$NON-NLS-1$
+        PredefinedWriter.ItemProps props = new PredefinedWriter.ItemProps();
+        props.valueType = typeSpec("String"); //$NON-NLS-1$
+        props.valueTypeSet = true;
+        props.version = Version.LATEST;
+
+        IllegalStateException raised = raisedBy(() -> PredefinedWriter.create(types, "Weight", props, false)); //$NON-NLS-1$
+        assertTrue(raised.getMessage(), raised.getMessage().contains("configuration context")); //$NON-NLS-1$
+        assertFalse(raised instanceof Refusals.Marker);
+    }
+
+    @Test
+    public void testValueTypeUnavailableTypeProviderIsRaisedUnmarked()
+    {
+        // Headlessly the platform type provider is not registered, which is exactly the platform
+        // failure under test. Skip, never fake-pass, on a runtime that does register one.
+        Assume.assumeTrue("the platform type provider is registered in this runtime", //$NON-NLS-1$
+            IEObjectProvider.Registry.INSTANCE.get(McorePackage.Literals.TYPE_ITEM, Version.LATEST) == null);
+        ChartOfCharacteristicTypes types = newCharacteristicTypes("Properties", 5); //$NON-NLS-1$
+        PredefinedWriter.ItemProps props = new PredefinedWriter.ItemProps();
+        props.valueType = typeSpec("String"); //$NON-NLS-1$
+        props.valueTypeSet = true;
+        props.version = Version.LATEST;
+        props.config = MdClassFactory.eINSTANCE.createConfiguration();
+
+        IllegalStateException raised = raisedBy(() -> PredefinedWriter.create(types, "Weight", props, false)); //$NON-NLS-1$
+        assertTrue(raised.getMessage(), raised.getMessage().contains("type provider")); //$NON-NLS-1$
+        assertFalse(raised instanceof Refusals.Marker);
+    }
+
+    @Test
+    public void testValueTypeBadSpecIsStillAReturnedRefusal()
+    {
+        // The other edge: a malformed spec IS the caller's mistake and must stay a returned refusal.
+        ChartOfCharacteristicTypes types = newCharacteristicTypes("Properties", 5); //$NON-NLS-1$
+        PredefinedWriter.ItemProps props = new PredefinedWriter.ItemProps();
+        JsonObject badSpec = new JsonObject();
+        badSpec.addProperty("types", "not-an-array"); //$NON-NLS-1$ //$NON-NLS-2$
+        props.valueType = badSpec;
+        props.valueTypeSet = true;
+        props.version = Version.LATEST;
+        props.config = MdClassFactory.eINSTANCE.createConfiguration();
+
         PredefinedWriter.WriteResult result = PredefinedWriter.create(types, "Weight", props, false); //$NON-NLS-1$
         assertTrue(result.isError());
-        assertTrue("a missing platform-version context must fail actionably, not NPE", //$NON-NLS-1$
-            result.error.contains("platform version")); //$NON-NLS-1$
+        assertTrue(result.error, result.error.startsWith("Invalid 'valueType': ")); //$NON-NLS-1$
+    }
+
+    private static IllegalStateException raisedBy(Runnable call)
+    {
+        try
+        {
+            call.run();
+        }
+        catch (IllegalStateException e)
+        {
+            return e;
+        }
+        throw new AssertionError("expected an IllegalStateException"); //$NON-NLS-1$
     }
 
     @Test
@@ -1522,5 +1611,203 @@ public class PredefinedWriterTest
         String err = PredefinedWriter.parseProperties(java.util.List.of(prop("valueType", null)), false, out); //$NON-NLS-1$
         assertNotNull("a missing valueType value on create must be rejected", err); //$NON-NLS-1$
         assertTrue(err.contains("needs a 'value'")); //$NON-NLS-1$
+    }
+
+    // ==================== a CCT item's default value type (issue #700) ================================
+    //
+    // A ChartOfCharacteristicTypes item left without a value type crashes EDT's own validator
+    // (ChartOfCharacteristicTypesValidator.checkPredefinedCharacteristic). EDT's "New predefined
+    // characteristic" wizard gives the item a copy of the chart's own type; create does the same when
+    // no valueType is supplied, and an explicit one still wins. EDT's "New predefined folder" wizard
+    // leaves a folder untyped (the validator never checks a folder's type), and so does create.
+
+    /** The four type items of the composite chart type {@link #newTypedCharacteristicTypes} builds. */
+    private static final class ChartTypeItems
+    {
+        final TypeItem string = McoreFactory.eINSTANCE.createType();
+        final TypeItem number = McoreFactory.eINSTANCE.createType();
+        final TypeItem date = McoreFactory.eINSTANCE.createType();
+        final TypeItem binary = McoreFactory.eINSTANCE.createType();
+
+        List<TypeItem> all()
+        {
+            return List.of(string, number, date, binary);
+        }
+    }
+
+    /**
+     * A chart whose own value type is the composite String(25, fixed) + Number(15,2, non-negative) +
+     * Date(Date) + BinaryData(64, fixed) over {@code items}: all four qualifier blocks a type
+     * description can carry, each with non-default values, so a copy that drops or moves any block shows.
+     */
+    private static ChartOfCharacteristicTypes newTypedCharacteristicTypes(String name, ChartTypeItems items)
+    {
+        ChartOfCharacteristicTypes types = newCharacteristicTypes(name, 5);
+        TypeDescription chartType = McoreFactory.eINSTANCE.createTypeDescription();
+        chartType.getTypes().addAll(items.all());
+        StringQualifiers string = McoreFactory.eINSTANCE.createStringQualifiers();
+        string.setLength(25);
+        string.setFixed(true);
+        chartType.setStringQualifiers(string);
+        NumberQualifiers number = McoreFactory.eINSTANCE.createNumberQualifiers();
+        number.setPrecision(15);
+        number.setScale(2);
+        number.setNonNegative(true);
+        chartType.setNumberQualifiers(number);
+        DateQualifiers date = McoreFactory.eINSTANCE.createDateQualifiers();
+        date.setDateFractions(DateFractions.DATE);
+        chartType.setDateQualifiers(date);
+        BinaryQualifiers binary = McoreFactory.eINSTANCE.createBinaryQualifiers();
+        binary.setLength(64);
+        binary.setFixed(true);
+        chartType.setBinaryQualifiers(binary);
+        types.setType(chartType);
+        return types;
+    }
+
+    /**
+     * The item's {@code copy} of one qualifier block equals the chart's {@code original} by value and is
+     * a separate object, and {@code chartNow} - the chart's block read AFTER the create - is still the
+     * original: a block MOVED to the item would leave the chart without it.
+     */
+    private static void assertCopiedBlock(String block, EObject original, EObject copy, EObject chartNow)
+    {
+        assertNotNull("the chart's " + block + " must come along", copy); //$NON-NLS-1$ //$NON-NLS-2$
+        assertNotSame("the " + block + " must be copied, not moved", original, copy); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("the copied " + block + " must equal the chart's", EcoreUtil.equals(original, copy)); //$NON-NLS-1$ //$NON-NLS-2$
+        assertSame("the chart keeps its own " + block, original, chartNow); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testCharacteristicTypesItemWithoutValueTypeGetsACopyOfTheChartType()
+    {
+        ChartTypeItems items = new ChartTypeItems();
+        ChartOfCharacteristicTypes types = newTypedCharacteristicTypes("Properties", items); //$NON-NLS-1$
+        TypeDescription chartType = types.getType();
+        StringQualifiers chartString = chartType.getStringQualifiers();
+        NumberQualifiers chartNumber = chartType.getNumberQualifiers();
+        DateQualifiers chartDate = chartType.getDateQualifiers();
+        BinaryQualifiers chartBinary = chartType.getBinaryQualifiers();
+
+        PredefinedWriter.WriteResult result =
+            PredefinedWriter.create(types, "Weight", new PredefinedWriter.ItemProps(), false); //$NON-NLS-1$
+
+        assertFalse(result.error, result.isError());
+        TypeDescription itemType = ((ChartOfCharacteristicTypesPredefinedItem)result.item).getType();
+        assertNotNull("an item created without valueType must get the chart's type", itemType); //$NON-NLS-1$
+        assertNotSame("the item must not share the chart's type object", chartType, itemType); //$NON-NLS-1$
+        assertEquals("the same type items, in the chart's order", items.all(), itemType.getTypes()); //$NON-NLS-1$
+        assertCopiedBlock("string qualifiers", chartString, itemType.getStringQualifiers(), //$NON-NLS-1$
+            chartType.getStringQualifiers());
+        assertCopiedBlock("number qualifiers", chartNumber, itemType.getNumberQualifiers(), //$NON-NLS-1$
+            chartType.getNumberQualifiers());
+        assertCopiedBlock("date qualifiers", chartDate, itemType.getDateQualifiers(), //$NON-NLS-1$
+            chartType.getDateQualifiers());
+        assertCopiedBlock("binary qualifiers", chartBinary, itemType.getBinaryQualifiers(), //$NON-NLS-1$
+            chartType.getBinaryQualifiers());
+        // The values themselves, so the by-value equality above is not taken on trust.
+        assertEquals(25, itemType.getStringQualifiers().getLength());
+        assertTrue(itemType.getStringQualifiers().isFixed());
+        assertEquals(15, itemType.getNumberQualifiers().getPrecision());
+        assertEquals(2, itemType.getNumberQualifiers().getScale());
+        assertTrue(itemType.getNumberQualifiers().isNonNegative());
+        assertEquals(DateFractions.DATE, itemType.getDateQualifiers().getDateFractions());
+        assertEquals(64, itemType.getBinaryQualifiers().getLength());
+        assertTrue(itemType.getBinaryQualifiers().isFixed());
+        // The chart's own (contained) type is untouched.
+        assertSame("the chart keeps its own type", chartType, types.getType()); //$NON-NLS-1$
+        assertSame(types, chartType.eContainer());
+        assertEquals(items.all(), chartType.getTypes());
+    }
+
+    @Test
+    public void testACharacteristicTypesFolderStaysUntypedButACharacteristicInsideItIsTyped()
+    {
+        // EDT's "New predefined folder" wizard sets only the id and isFolder, and the validator never
+        // checks a folder's type: a folder created without valueType stays untyped. A characteristic
+        // created INSIDE the folder is still a characteristic and takes the chart's type.
+        ChartTypeItems items = new ChartTypeItems();
+        ChartOfCharacteristicTypes types = newTypedCharacteristicTypes("Properties", items); //$NON-NLS-1$
+        PredefinedWriter.ItemProps folderProps = new PredefinedWriter.ItemProps();
+        folderProps.isFolder = Boolean.TRUE;
+        folderProps.isFolderSet = true;
+
+        PredefinedWriter.WriteResult folder = PredefinedWriter.create(types, "Sizes", folderProps, false); //$NON-NLS-1$
+
+        assertFalse(folder.error, folder.isError());
+        assertTrue(PredefinedWriter.isFolder(folder.item));
+        assertNull("a folder takes no value type, as EDT's folder wizard leaves it", //$NON-NLS-1$
+            ((ChartOfCharacteristicTypesPredefinedItem)folder.item).getType());
+
+        PredefinedWriter.ItemProps nestedProps = new PredefinedWriter.ItemProps();
+        nestedProps.parentName = "Sizes"; //$NON-NLS-1$
+        PredefinedWriter.WriteResult nested = PredefinedWriter.create(types, "Weight", nestedProps, false); //$NON-NLS-1$
+
+        assertFalse(nested.error, nested.isError());
+        assertFalse(PredefinedWriter.isFolder(nested.item));
+        TypeDescription nestedType = ((ChartOfCharacteristicTypesPredefinedItem)nested.item).getType();
+        assertNotNull("a characteristic inside a folder still takes the chart's type", nestedType); //$NON-NLS-1$
+        assertEquals(items.all(), nestedType.getTypes());
+        assertNull("creating the nested characteristic leaves its folder untyped", //$NON-NLS-1$
+            ((ChartOfCharacteristicTypesPredefinedItem)folder.item).getType());
+    }
+
+    @Test
+    public void testTheChartTypeIsReadThroughItsExtensionAwareAccessor()
+    {
+        // EDT's wizard reads chart.getTypeDescription(), not getType(). The two differ for a chart
+        // ADOPTED into an extension whose own type is empty: the platform's
+        // TypeDescriptionProviderUtil.getTypeDescription then answers with the extension object's type
+        // (bytecode, EDT 2026.2.1). The mock stands for exactly that: no own type, an extension-aware
+        // type that is there.
+        ChartTypeItems items = new ChartTypeItems();
+        ChartOfCharacteristicTypes extensionOwner = newTypedCharacteristicTypes("Source", items); //$NON-NLS-1$
+        TypeDescription extensionType = extensionOwner.getType();
+        ChartOfCharacteristicTypes adopted = Mockito.mock(ChartOfCharacteristicTypes.class);
+        Mockito.doReturn(extensionType).when(adopted).getTypeDescription();
+        ChartOfCharacteristicTypesPredefinedItem item =
+            MdClassFactory.eINSTANCE.createChartOfCharacteristicTypesPredefinedItem();
+        assertNull("precondition: the adopted chart has no own type", adopted.getType()); //$NON-NLS-1$
+
+        PredefinedWriter.inheritChartValueType(adopted, item);
+
+        assertNotNull("the item takes the type the extension gives the adopted chart", item.getType()); //$NON-NLS-1$
+        assertNotSame(extensionType, item.getType());
+        assertEquals(items.all(), item.getType().getTypes());
+        assertSame("the extension keeps its own type", extensionType, extensionOwner.getType()); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testTheNullValueTypeRefusalNamesTheChartTypeDefault()
+    {
+        // The refusal tells the caller what omitting the property does - which is no longer "unset".
+        ChartOfCharacteristicTypes types = newCharacteristicTypes("Properties", 5); //$NON-NLS-1$
+        PredefinedWriter.ItemProps props = new PredefinedWriter.ItemProps();
+        props.valueType = JsonNull.INSTANCE;
+        props.valueTypeSet = true;
+
+        PredefinedWriter.WriteResult result = PredefinedWriter.create(types, "Weight", props, false); //$NON-NLS-1$
+
+        assertTrue(result.isError());
+        assertTrue(result.error, result.error.contains("omit the property instead: on a " //$NON-NLS-1$
+            + "ChartOfCharacteristicTypes a characteristic then gets a copy of the chart's own value type, " //$NON-NLS-1$
+            + "and a folder stays untyped")); //$NON-NLS-1$
+        assertFalse(result.error, result.error.contains("leave the value type unset")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testInheritingTheChartTypeKeepsAnExplicitValueType()
+    {
+        // create() applies an explicit valueType first; the chart's type only fills a MISSING one.
+        ChartOfCharacteristicTypes types = newTypedCharacteristicTypes("Properties", new ChartTypeItems()); //$NON-NLS-1$
+        ChartOfCharacteristicTypesPredefinedItem item =
+            MdClassFactory.eINSTANCE.createChartOfCharacteristicTypesPredefinedItem();
+        TypeDescription explicit = McoreFactory.eINSTANCE.createTypeDescription();
+        explicit.getTypes().add(McoreFactory.eINSTANCE.createType());
+        item.setType(explicit);
+
+        PredefinedWriter.inheritChartValueType(types, item);
+
+        assertSame("an explicit valueType must win over the chart's type", explicit, item.getType()); //$NON-NLS-1$
     }
 }

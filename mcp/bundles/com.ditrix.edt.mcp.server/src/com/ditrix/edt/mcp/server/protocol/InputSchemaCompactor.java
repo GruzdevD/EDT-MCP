@@ -126,12 +126,25 @@ public final class InputSchemaCompactor
     private static Map<String, Set<String>> buildKeepList()
     {
         Map<String, Set<String>> keep = new HashMap<>();
+        // Mode-specific requirements, selection semantics and defaults are not structural in these schemas.
+        keep.put("get_profiling_results", asSet("mode", "measurementId", "top", "minFrequency", "limit", "offset",
+            "baseId", "comparedId", "responseFormat", "applicationId"));
+        keep.put("manage_profiling_results", asSet("mode", "measurementId", "exportPath", "exportFormat", "importPath"));
+        keep.put("manage_tech_log", asSet("mode", "location", "outputPath"));
+        keep.put("stop_profiling", asSet("name"));
+        // Conditional press arguments and exact-label semantics are absent from scalar schemas.
+        keep.put("edt_dialog", asSet("dialogId", "button"));
+        // XOR input modes and the method's conditional scope must survive schema compaction.
+        keep.put("validate_query", asSet("queryText", "method"));
+        // Level address shape and conditional mode semantics cannot be expressed by these scalar schemas.
+        keep.put("sort_metadata", asSet("fqn", "mode", "recursive", "items", "direction", "positions"));
         // The only statement anywhere that a 'task' marker means TODO/FIXME/XXX/HACK.
         // priority sub-filters the TASK family only - a bookmark has no priority, and the
         // combination is rejected. The enum lists high|normal|low with nothing saying that.
         keep.put("get_markers", asSet("markerKind", "priority")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // Two filters that are mutually exclusive and differ in matching semantics.
-        keep.put("get_project_errors", asSet("objects", "objectFqns")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // Two filters that are mutually exclusive and differ in matching semantics; modulePaths carries
+        // its value shape (a src-relative module path), which the plain string array cannot state.
+        keep.put("get_project_errors", asSet("objects", "objectFqns", "modulePaths")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         // Name-only compatibility filter vs Name-or-localized-Synonym discovery filter.
         keep.put("get_metadata_objects", asSet("nameFilter", "textFilter")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         // 'callers' vs 'callees' - the enum values alone do not say which way they point.
@@ -141,11 +154,14 @@ public final class InputSchemaCompactor
         // module path and no methodName, which the tool rejects before looking anything up.
         keep.put("get_method_call_hierarchy", //$NON-NLS-1$
             asSet("direction", "methodName")); //$NON-NLS-1$ //$NON-NLS-2$
+        // Neither methodName nor methodNames is 'required', yet one of them must be passed -
+        // a conditional the schema states nowhere - and the 50-name cap is refused, not clamped.
+        keep.put("read_method_source", asSet("methodNames")); //$NON-NLS-1$ //$NON-NLS-2$
         // A scope limit that makes the tool inapplicable: FILE infobases only.
         // user carries a CROSS-FIELD rule as well as the credential fact: for a standalone
         // server the credentials are accepted only with mode='register' and rejected for a
         // newly created one, so a schema-valid create+credentials call fails before creating.
-        keep.put("create_infobase", asSet("infobaseFile", "user")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        keep.put("create_infobase", asSet("infobaseFile", "infobaseServer", "infobaseRef", "user")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
         // The lost-update guard: what the hash is and where it comes from.
         // mode defaults to searchReplace, and THAT mode requires oldSource - so a call carrying
         // only the two declared required parameters looks schema-valid and fails at runtime.
@@ -159,7 +175,11 @@ public final class InputSchemaCompactor
         // The enum cannot express either fact: md is the default, and xml is legal only for
         // action=get + type=schema + a bare root. Without this one clause a schema-valid
         // format=xml call can select a fragment, dynamic-list type, or mutation and be refused.
-        keep.put("dcs", asSet("format")); //$NON-NLS-1$ //$NON-NLS-2$
+        // body models insertPosition only; retain its action requirements and 1-based insertion contract.
+        keep.put("dcs", asSet("format", "body")); //$NON-NLS-1$ //$NON-NLS-2$
+        // Cross-field requirements are absent from the shape: replace needs both arrays,
+        // even when empty, and a Condition source requires an explicit branch.
+        keep.put("business_process_route_map", asSet("action", "connections")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         // MUTATING DEFAULTS. Each of these defaults to true and, left out, performs a WRITE
         // the caller never asked for - the build stamps every object's Comment and flushes
         // the .mdo; the launch tools silently run a configuration->DB update; update_database
@@ -177,7 +197,7 @@ public final class InputSchemaCompactor
         // and the only place that says a force-export overwrites on-disk edits. Both were
         // caught by InputSchemaCompactorRiskTest, not by review.
         keep.put("delete_infobase", //$NON-NLS-1$
-            asSet("deleteRegistration", "deleteDatabaseFiles")); //$NON-NLS-1$ //$NON-NLS-2$
+            asSet("deleteRegistration", "deleteDatabaseFiles", "registrationId")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         keep.put("resync_to_disk", asSet("overwriteDiskEdits")); //$NON-NLS-1$ //$NON-NLS-2$
         // The one parameter of the three-way comparison family whose prose warns about an effect
         // of THAT parameter: in write mode the named file is REPLACED at the same path, and only when
@@ -204,13 +224,26 @@ public final class InputSchemaCompactor
         // external work. A launch that looks routine silently overwrites someone's changes.
         // restartIfRunning=true TERMINATES the live session before relaunching, on a tool
         // whose destructiveHint is false - nothing else in the always-loaded contract says so.
+        // screen carries the 1-based monitor index and the default non-primary selection.
         keep.put("launch", //$NON-NLS-1$
             asSet("mode", "updateBeforeLaunch", KEY_EXTERNAL_CHANGES, KEY_PORT_CONFLICT, //$NON-NLS-1$
-                "restartIfRunning")); //$NON-NLS-1$
+                "restartIfRunning", "screen")); //$NON-NLS-1$
         keep.put("debug_yaxunit_tests", //$NON-NLS-1$
             asSet("updateBeforeLaunch", KEY_EXTERNAL_CHANGES, KEY_PORT_CONFLICT)); //$NON-NLS-1$
+        // ignoreBranchBinding=true writes an infobase the current branch does not bind; the default
+        // (false) lives only in the prose.
         keep.put("update_database", //$NON-NLS-1$
-            asSet("terminateRunningClients", KEY_EXTERNAL_CHANGES, KEY_PORT_CONFLICT)); //$NON-NLS-1$
+            asSet("terminateRunningClients", "checkInfobaseSessions", KEY_EXTERNAL_CHANGES, //$NON-NLS-1$ //$NON-NLS-2$
+                KEY_PORT_CONFLICT, "ignoreBranchBinding")); //$NON-NLS-1$
+        // Defaults and conditional selectors cannot be expressed by this schema builder. Keeping
+        // them prevents a compacted terminate call from losing its target and confirmation rules.
+        keep.put("infobase_sessions", //$NON-NLS-1$
+            asSet(McpKeys.APPLICATION_ID, McpKeys.ACTION, "sessionId", "all", "confirm")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // The default action, the default application, the preview-then-confirm rule and the
+        // start-only port answer live only in this prose.
+        keep.put("standalone_server", //$NON-NLS-1$
+            asSet(McpKeys.APPLICATION_ID, McpKeys.ACTION, "confirm", //$NON-NLS-1$
+                "standaloneServerPortConflict")); //$NON-NLS-1$
         // includeBodies=true returns the recorded request/response JSON VERBATIM, and that
         // path is deliberately not redacted (the redactor only sees the outer tool). The
         // warning that those bodies can carry infobase and personal data is the only thing
@@ -255,7 +288,7 @@ public final class InputSchemaCompactor
         keep.put("set_breakpoint", asSet(McpKeys.PROJECT_NAME)); //$NON-NLS-1$
         // scriptVariant is REJECTED outright for an extension - it is always inherited
         // from the base configuration - and the enum alone cannot say "except for this
-        // project kind". Merged with autoSortTopObjects: one put() per tool, or the
+        // project kind". One put() per tool, or the
         // second call silently wins (the trap caught in rounds 16 and 18).
         // version joins scriptVariant: BOTH are rejected outright for an extension, which
         // inherits them from the base configuration. Same shape, same tool, one entry -
@@ -268,8 +301,11 @@ public final class InputSchemaCompactor
         // the Type.Name shape or that omission deliberately creates an empty import target.
         // normalizeYo has the same silent-rewrite default as create_metadata below: without its
         // prose a caller cannot know that a requested root Name may be stored differently.
-        keep.put("create_project", asSet("autoSortTopObjects", "scriptVariant", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        keep.put("create_project", asSet("scriptVariant", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "version", "baseProjectName", "externalObject", "normalizeYo")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        // baseProjectName is REQUIRED for a .cfe, optional for .epf/.erf and refused for a .cf - a
+        // requirement conditional on the file extension, which the schema cannot state.
+        keep.put("import_project_from_file", asSet("baseProjectName")); //$NON-NLS-1$ //$NON-NLS-2$
         // The parameter is ACCEPTED and then discarded (execute() reads it only for schema
         // parity; the class doc reserves it for a future release). Stripped to a bare
         // boolean it reads as a working option, and the response says otherwise only after
@@ -290,8 +326,9 @@ public final class InputSchemaCompactor
         // Two similarly named projects with opposite roles: projectName is the BASE
         // configuration (NOT the extension), extensionProjectName picks the destination and
         // is mandatory once several extensions exist. Stripped, the natural reading is wrong.
+        // The picture option's form-only scope and opt-in default also require its prose.
         keep.put("adopt_metadata_object", //$NON-NLS-1$
-            asSet(McpKeys.PROJECT_NAME, "extensionProjectName")); //$NON-NLS-1$
+            asSet(McpKeys.PROJECT_NAME, "extensionProjectName", "includeReferencedPictures")); //$NON-NLS-1$ //$NON-NLS-2$
         // fillUpType is a bare string whose legal values live only here, and FROM_PROVIDER
         // makes providerId mandatory - a conditional the schema states nowhere.
         keep.put("generate_translation_strings", //$NON-NLS-1$
@@ -310,7 +347,8 @@ public final class InputSchemaCompactor
         // rejected, and returnValuesReuse='DuringRequest' is illegal for some kinds - both
         // combinations the compacted enums advertise as valid. Cross-field constraints are
         // the one thing a flat schema cannot state at all.
-        keep.put("create_metadata", asSet("normalizeYo", "commonModuleKind", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // insertPosition carries its 1-based convention, bounds refusal and external-content scope.
+        keep.put("create_metadata", asSet("insertPosition", "normalizeYo", "commonModuleKind", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "serverCall", "privileged", "returnValuesReuse")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         keep.put("modify_metadata", asSet("normalizeYo")); //$NON-NLS-1$ //$NON-NLS-2$
         // A CONDITIONAL protocol the schema cannot express: expectedHash carries the
@@ -320,7 +358,9 @@ public final class InputSchemaCompactor
         // cannot be preempted and MAY STILL COMPLETE afterwards. Without this a caller reads
         // "failed" and retries - or starts editing - while the first rename is still mutating.
         keep.put("rename_metadata_object", //$NON-NLS-1$
-            asSet("expectedHash", "timeout")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            asSet("expectedHash", "timeout", "waitSeconds", "textOccurrences")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // Omitting this token authorizes the current form-attribute scope, not the earlier preview.
+        keep.put("delete_metadata", asSet("expectedHash")); //$NON-NLS-1$ //$NON-NLS-2$
         // An OPTIONAL parameter whose omission widens the blast radius to the whole
         // workspace: without projectName, clean_project rebuilds EVERY EDT project and
         // discards unsaved in-memory edits in all of them. "Optional" reads as "safe to

@@ -33,10 +33,51 @@ from harness import (
     assert_contains,
     assert_not_contains,
     assert_no_diff,
+    poll_disk_contains_all,
+    poll_disk_count,
+    read_disk,
     wait_for_project_ready,
     e2e_test,
     PROJECT,
 )
+
+
+@e2e_test(tool="get_metadata_details", kind="write-metadata")
+def test_form_type_cell_caps_names_without_changing_assignable_value():
+    names = ["E2ECellType%02d" % i for i in range(1, 12)]
+    for name in names:
+        created = call("create_metadata", {"projectName": PROJECT, "fqn": "Catalog." + name})
+        assert_ok(created, "seed a distinct reference type")
+        assert_contains(read_disk("src/Catalogs/%s/%s.mdo" % (name, name)),
+                        "<name>%s</name>" % name, "catalog declaration persisted")
+    wait_for_project_ready()
+    form_fqn = "Catalog.Catalog.Form.ItemForm"
+    attribute_fqn = form_fqn + ".Attribute.E2ECappedTypes"
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": attribute_fqn}),
+              "seed the form attribute")
+    assert_contains(read_disk("src/Catalogs/Catalog/Forms/ItemForm/Form.form"),
+                    "<name>E2ECappedTypes</name>", "attribute persisted")
+    changed = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": attribute_fqn,
+        "properties": [{"name": "type", "value": {"types": [
+            {"kind": "CatalogRef", "ref": name} for name in names]}}],
+    })
+    assert_ok(changed, "set eleven distinct reference types")
+    stored = read_disk("src/Catalogs/Catalog/Forms/ItemForm/Form.form")
+    for name in names:
+        assert_contains(stored, "<types>CatalogRef.%s</types>" % name,
+                        "all types persist despite the display cap")
+    rendered = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": [form_fqn]})
+    assert_ok(rendered, "render the form type cell")
+    row = next((line for line in rendered.text.splitlines()
+                if line.startswith("| E2ECappedTypes |")), "")
+    assert_contains(row, "CatalogRef.E2ECellType10 \u2026 (+1 more)", "ten visible types and exact tail")
+    assert_not_contains(row, names[10], "eleventh type is omitted only from the cell")
+    assignable = call("get_metadata_details", {
+        "projectName": PROJECT, "objectFqns": [attribute_fqn], "assignable": True})
+    assert_ok(assignable, "read back the full assignable type")
+    for name in names:
+        assert_contains(assignable.text, name, "the complete type value remains available")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -267,11 +308,23 @@ def test_common_form_fqn_renders_structure():
     # A CommonForm FQN (2-part) also renders its structure (no mutation: pure read of an existing form).
     r = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": ["CommonForm.Form"]})
     assert_ok(r, "get_metadata_details on a CommonForm FQN")
-    assert_contains(r.text, "Form Structure", "a CommonForm FQN must render the form structure")
+    assert_contains(r.text, "# Form Structure: CommonForm.Form\n", "a CommonForm header keeps its canonical FQN")
     assert_contains(r.text, "## Items", "must render the Items section")
     # The enriched renderer (FormStructureReader.render) always emits the Event handlers section
     # header, even for a form that declares no handlers (empty-section convention).
     assert_contains(r.text, "Event handlers", "the enriched structure must add an Event handlers section")
+
+
+@e2e_test(tool="get_metadata_details", kind="read")
+def test_owned_form_headers_use_canonical_fqns_in_both_languages():
+    for fqn in ("Catalog.Catalog.Form.ItemForm", "Справочник.Catalog.Форма.ItemForm"):
+        r = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": [fqn]})
+        assert_ok(r, "owned form addressed in either language")
+        assert_contains(r.text, "# Form Structure: Catalog.Catalog.Form.ItemForm\n",
+                        "owned form header must use the canonical Form kind")
+        assert_not_contains(r.text, "# Form Structure: Catalog.Catalog.forms.",
+                            "internal EMF collection names must not leak into the header")
+    assert_no_diff("form header formatting is read-only")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -296,6 +349,36 @@ def test_assignable_on_form_root_lists_root_properties():
         assert_contains(r.text, "| %s |" % property_name,
                         "the form root must expose %s" % property_name)
     assert_no_diff("reading a form root's assignable schema must not touch Form.form")
+
+
+@e2e_test(tool="get_metadata_details", kind="read")
+def test_assignable_on_form_field_lists_color_and_font_kinds():
+    # Issue #660: a form item's Color / Font properties - direct and on its extInfo - are listed
+    # with kinds COLOR / FONT and the value shape in the Allowed column - each shape as inline
+    # code, so a Markdown renderer does not drop its <Name> as an HTML tag (issue #760).
+    fqn = "Catalog.Catalog.Form.ItemForm.Field.Description"
+    r = call("get_metadata_details", {
+        "projectName": PROJECT,
+        "objectFqns": [fqn],
+        "assignable": True,
+    })
+    assert_ok(r, "assignable schema for a form field")
+    rows = {}
+    for line in r.text.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 4:
+            rows[cells[0]] = cells
+    expected = {"titleTextColor": "COLOR", "titleBackColor": "COLOR", "titleFont": "FONT",
+                "textColor": "COLOR", "backColor": "COLOR", "borderColor": "COLOR", "font": "FONT"}
+    for name, kind in expected.items():
+        assert name in rows, "%s must be listed as assignable on the input field: %s" % (
+            name, r.text[:600])
+        assert rows[name][1] == kind, "%s must have kind %s: %r" % (name, kind, rows[name])
+    assert rows["titleTextColor"][3].startswith("`{color:{red,green,blue}}`"), \
+        "a COLOR row must show the color value shape: %r" % (rows["titleTextColor"],)
+    assert rows["titleFont"][3].startswith("`{font:{faceName?"), \
+        "a FONT row must show the font value shape: %r" % (rows["titleFont"],)
+    assert_no_diff("reading a form field's assignable schema must not touch Form.form")
 
 
 @e2e_test(tool="get_metadata_details", kind="read")
@@ -762,3 +845,176 @@ def test_get_metadata_details_renders_xdto_structure():
     assert_contains(row, "string", "the property row must show its XSD string type")
     # (No assert_no_diff: the test intentionally seeds a fresh XDTO package + members, so the tree
     # is dirty by design -- kind="write-metadata" resets it after the test.)
+
+
+# EXCHANGE PLAN content (issue #908) — the `### Content` section lists each member's address and
+# its autoRecord flag, the pair modify_metadata's content[] writes; it used to print only the
+# element class name. The fixture ships no ExchangePlan, so seed one with two members.
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="get_metadata_details", kind="write-metadata")
+def test_get_metadata_details_renders_exchange_plan_content():
+    plan_fqn = "ExchangePlan.E2EDetXPNode"
+    allowed, denied = "Catalog.E2EDetXPCat", "Document.E2EDetXPDoc"
+    for fqn in (allowed, denied, plan_fqn):
+        assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": fqn}), "seed " + fqn)
+        wait_for_project_ready()
+    written = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": plan_fqn,
+        "content": [{"metadata": allowed, "autoRecord": "Allow"},
+                    {"metadata": denied, "autoRecord": "Deny"}],
+    })
+    assert_ok(written, "write the exchange plan content")
+    # On disk first: both members are stored, only the Allow one carries the (non-default) flag.
+    mdo = "src/ExchangePlans/E2EDetXPNode/E2EDetXPNode.mdo"
+    poll_disk_contains_all(mdo, ["<mdObject>%s</mdObject>" % allowed, "<mdObject>%s</mdObject>" % denied],
+                           ctx="both members are stored in the exchange plan .mdo")
+    poll_disk_count(mdo, "<autoRecord>Allow</autoRecord>", 1,
+                    ctx="exactly one member carries the non-default autoRecord=Allow on disk")
+
+    for full in (False, True):
+        r = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": [plan_fqn], "full": full})
+        assert_ok(r, "get_metadata_details on the exchange plan (full=%s)" % full)
+        if "## Errors" in r.text:
+            raise AssertionError("the seeded exchange plan should resolve:\n" + r.text[:400])
+        assert_contains(r.text, "### Content\n\n| Object | AutoRecord |\n|---|---|\n"
+                        "| %s | Allow |\n| %s | Deny |\n" % (allowed, denied),
+                        "the Content table lists both members with their flags in content order "
+                        "(full=%s)" % full)
+        assert_not_contains(r.text, "ExchangePlanContentItem",
+                            "the element class name must not stand in for the content (full=%s)" % full)
+    # (No assert_no_diff: the objects are seeded on purpose - kind="write-metadata" resets them.)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NESTED SUBSYSTEM chain (issue #708) — the nested subsystem, never its parent.
+# The default view resolved an object from the first two FQN segments only, so the
+# chain of a NESTED subsystem rendered its PARENT: a confident answer about
+# something else. The fixture's only subsystem is Subsystem.Subsystem.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# "Подсистема" - the Russian type token, written as escapes.
+_RU_SUBSYSTEM = "\u041f\u043e\u0434\u0441\u0438\u0441\u0442\u0435\u043c\u0430"
+
+
+@e2e_test(tool="get_metadata_details", kind="write-metadata")
+def test_nested_subsystem_chain_renders_the_nested_subsystem_not_its_parent():
+    child = "E2EDetailsNested"
+    fqn = "Subsystem.Subsystem.Subsystem." + child
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": fqn}),
+              "seed the nested subsystem " + fqn)
+    wait_for_project_ready()
+
+    for address in (fqn, "%s.Subsystem.%s.%s" % (_RU_SUBSYSTEM, _RU_SUBSYSTEM, child)):
+        r = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": [address]})
+        assert_ok(r, "get_metadata_details on the nested chain " + address)
+        if "## Errors" in r.text:
+            raise AssertionError(address + " should resolve, but a ## Errors section was emitted:\n"
+                                 + r.text[:400])
+        assert_contains(r.text, "## Subsystem: " + child,
+                        "the NESTED subsystem must be rendered for its chain: " + address)
+        assert_contains(r.text, "| Name | %s |" % child, "its own Name row: " + address)
+        assert_not_contains(r.text, "## Subsystem: Subsystem",
+                            "the parent must not be rendered for the child's address: " + address)
+    # (No assert_no_diff: the nested subsystem is seeded on purpose - kind="write-metadata" resets it.)
+
+
+@e2e_test(tool="get_metadata_details", kind="read")
+def test_missing_nested_subsystem_chain_is_an_errors_row_not_its_parent():
+    # A chain to a child that does not exist, and a chain cut short after the existing parent: both
+    # used to render the parent Subsystem.Subsystem from their first two segments.
+    for bad, reason in (("Subsystem.Subsystem.Subsystem.NoSuchNested_e2e", "Subsystem not found"),
+                        ("Subsystem.Subsystem.Subsystem", "Not a subsystem address")):
+        r = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": [bad]})
+        # A per-object miss stays in-band: the call succeeds and the FQN lands in ## Errors.
+        assert_ok(r, "a miss is reported in-band, not as a whole-call error: " + bad)
+        assert_contains(r.text, "## Errors", "a miss must produce the ## Errors section: " + bad)
+        assert_contains(r.text, bad, "the failures table must name the address")
+        assert_contains(r.text, reason, "the reason must say what is wrong with " + bad)
+        assert_contains(r.text, "list_subsystems",
+                        "the reason must point at the tool that lists nested subsystems: " + bad)
+        # '**Origin:**' is emitted only when an OBJECT's details were rendered - here, the parent's.
+        assert_not_contains(r.text, "**Origin:**",
+                            "the existing parent must not be rendered for " + bad)
+    assert_no_diff("a lookup miss must not change the project")
+
+
+@e2e_test(tool="get_metadata_details", kind="read")
+def test_windowed_formatter_contract():
+    from read_host_contracts import contract_get_metadata_details
+    contract_get_metadata_details(call, "WINDOWED")
+    assert_no_diff("pinned formatter reads must not change fixture files")
+
+@e2e_test(tool="get_metadata_details", kind="read")
+def test_assignable_member_values_show_feedable_current_values888():
+    for fqn in ("Catalog.Catalog.Attribute.Attribute", "Справочник.Catalog.Реквизит.Attribute"):
+        result = call("get_metadata_details", {"projectName": PROJECT,
+                      "objectFqns": [fqn], "assignable": True})
+        assert_ok(result)
+        assert_contains(result.text, '| fillValue | MEMBER_VALUES | {"kind":"string","value":""} |')
+        assert_contains(result.text, '| choiceParameters | MEMBER_VALUES | [] |')
+        assert_contains(result.text, '| choiceParameterLinks | MEMBER_VALUES | [] |')
+    assert_no_diff()
+
+
+@e2e_test(tool="get_metadata_details", kind="read")
+def test_assignable_input_choice_lists_use_the_form_path_grammar888():
+    for fqn in ("Catalog.Catalog.Form.ItemForm.Field.Attribute", "Справочник.Catalog.Форма.ItemForm.Поле.Attribute"):
+        result = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": [fqn], "assignable": True})
+        assert_ok(result)
+        assert_contains(result.text, '| choiceParameters | FORM_CHOICE_VALUES | [] |')
+        assert_contains(result.text, '| choiceParameterLinks | FORM_CHOICE_VALUES | [] |')
+        assert_contains(result.text, 'name,dataPath,changeMode:')
+        assert_no_diff("reading input-field lists must leave the fixture clean")
+
+
+@e2e_test(tool="get_metadata_details", kind="write-metadata")
+def test_type_qualifiers915_in_assignable_and_owner_tables():
+    owner = "InformationRegister.Квалификаторы915"
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": owner}))
+    mdo = "src/InformationRegisters/Квалификаторы915/Квалификаторы915.mdo"
+    assert_contains(read_disk(mdo), "<name>Квалификаторы915</name>")
+    members = (
+        ("Dimension.Строка", [{"kind": "String", "length": 400}],
+         "String(400, Variable)", ("<length>400</length>",)),
+        ("Resource.Сумма", [{"kind": "Number", "precision": 15, "scale": 2, "nonNegative": True}],
+         "Number(15, 2, Nonnegative)", ("<precision>15</precision>", "<scale>2</scale>",
+                                       "<nonNegative>true</nonNegative>")),
+        ("Attribute.Составной", [{"kind": "String", "length": 12, "fixed": True},
+                                 {"kind": "Number", "precision": 9, "scale": 3},
+                                 {"kind": "Date", "fractions": "Time"}],
+         "String(12, Fixed), Number(9, 3, Signed), Date(Time)",
+         ("<length>12</length>", "<fixed>true</fixed>", "<precision>9</precision>",
+          "<scale>3</scale>", "<dateFractions>Time</dateFractions>")),
+        ("Attribute.БезОграничения", [{"kind": "String", "length": 0}],
+         "String(unlimited)", ("<name>БезОграничения</name>",)),
+    )
+    for member, types, expected, disk_values in members:
+        fqn = owner + "." + member
+        assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": fqn}), "seed " + fqn)
+        assert_contains(read_disk(mdo), "<name>" + member.split(".")[1] + "</name>")
+        assert_ok(call("modify_metadata", {"projectName": PROJECT, "fqn": fqn,
+                  "properties": [{"name": "type", "value": {"types": types}}]}), "set qualifiers on " + fqn)
+        disk = read_disk(mdo)
+        for value in disk_values:
+            assert_contains(disk, value, "qualifiers persisted before model read-back: " + fqn)
+        for address in (fqn, fqn.replace("InformationRegister", "РегистрСведений")
+                       .replace(".Dimension.", ".Измерение.").replace(".Resource.", ".Ресурс.")
+                       .replace(".Attribute.", ".Реквизит.")):
+            result = call("get_metadata_details", {"projectName": PROJECT,
+                          "objectFqns": [address], "assignable": True})
+            assert_ok(result)
+            assert_not_contains(result.text, "## Errors", "Russian names and type tokens must resolve")
+            assert_contains(result.text, "| type | TYPE_DESCRIPTION | " + expected + " |",
+                            "assignable current value retains qualifiers: " + address)
+    for address in (owner, owner.replace("InformationRegister", "РегистрСведений")):
+        for full in (False, True):
+            result = call("get_metadata_details", {"projectName": PROJECT,
+                          "objectFqns": [address], "full": full})
+            assert_ok(result)
+            assert_not_contains(result.text, "## Errors")
+            for member, types, expected, disk_values in members:
+                row = next((line for line in result.text.splitlines()
+                            if line.startswith("| " + member.split(".")[1] + " |")), None)
+                assert row is not None, "owner table must list " + member + ": " + result.text
+                assert_contains(row, expected, "owner table retains the member's qualifiers")

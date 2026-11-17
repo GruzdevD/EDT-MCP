@@ -6,9 +6,9 @@ package com.ditrix.edt.mcp.server.tools.impl;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.swt.graphics.ImageData;
-import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.IEditorPart;
+import com.ditrix.edt.mcp.server.utils.ReadToolExecution;
 
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
@@ -17,7 +17,9 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.EditorScreenshotHelper;
 import com.ditrix.edt.mcp.server.utils.EditorScreenshotHelper.CaptureResult;
-import com.ditrix.edt.mcp.server.utils.ReflectionUtils;
+import com.ditrix.edt.mcp.server.utils.FormPageSwitch;
+import com.ditrix.edt.mcp.server.utils.NativeRenderModeProbe;
+import com.ditrix.edt.mcp.server.utils.NativeRenderModeProbe.NativeRenderMode;
 
 /**
  * Tool to capture a screenshot of a form WYSIWYG editor as PNG.
@@ -26,10 +28,15 @@ import com.ditrix.edt.mcp.server.utils.ReflectionUtils;
 public class GetFormScreenshotTool implements IMcpTool
 {
     public static final String NAME = "get_form_screenshot"; //$NON-NLS-1$
-    private static final String WYSIWYG_VIEWER_FIELD = "wysiwygViewer"; //$NON-NLS-1$
+
+    /** What this tool returns, named in the wrong-form errors. */
+    private static final String PRODUCT = "screenshot"; //$NON-NLS-1$
 
     /** Input param: form FQN to open and capture. */
     private static final String KEY_FORM_PATH = "formPath"; //$NON-NLS-1$
+
+    /** Input param: form element whose page must be shown before the capture. */
+    private static final String KEY_SHOW_ELEMENT = "showElement"; //$NON-NLS-1$
 
     @Override
     public String getName()
@@ -40,11 +47,10 @@ public class GetFormScreenshotTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Visually inspect an EDT form as rendered by the designer. Requires EDT launched " //$NON-NLS-1$
-            + "with -DnativeFormBufferedLayoutRender=true: without the flag the image comes back " //$NON-NLS-1$
-            + "BLANK instead of failing, so an empty screenshot means the flag is missing, not " //$NON-NLS-1$
-            + "that the call was wrong. Parameters and examples: " //$NON-NLS-1$
-            + "get_tool_guide('get_form_screenshot')."; //$NON-NLS-1$
+        return "Visually inspect an EDT form. ATTENTION: disabled by default; on Windows it needs EDT started " //$NON-NLS-1$
+            + "with -DnativeFormBufferedLayoutRender=true in 1cedt.ini, which makes EDT's form designer show " //$NON-NLS-1$
+            + "a grey rectangle instead of the form for the whole session (EDT behaviour); changing the " //$NON-NLS-1$
+            + "flag needs an EDT restart. Parameters and examples: get_tool_guide('get_form_screenshot')."; //$NON-NLS-1$
     }
 
     @Override
@@ -56,6 +62,9 @@ public class GetFormScreenshotTool implements IMcpTool
             .stringProperty(KEY_FORM_PATH,
                 "Form FQN (e.g. 'Catalog.Products.Forms.ItemForm' or 'CommonForm.MyForm'); " + //$NON-NLS-1$
                 "if omitted, captures the active form editor.") //$NON-NLS-1$
+            .stringProperty(KEY_SHOW_ELEMENT,
+                "Name of a form element (e.g. a page) to bring into view before capture: every " + //$NON-NLS-1$
+                "enclosing Pages group switches to the page holding it.") //$NON-NLS-1$
             .booleanProperty("refresh", //$NON-NLS-1$
                 "Force a real WYSIWYG re-render before capture; fails with an explicit error instead " + //$NON-NLS-1$
                 "of returning a stale image when the re-render cannot be completed (default: false)") //$NON-NLS-1$
@@ -88,6 +97,7 @@ public class GetFormScreenshotTool implements IMcpTool
     {
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String formPath = JsonUtils.extractStringArgument(params, KEY_FORM_PATH);
+        String showElement = JsonUtils.extractStringArgument(params, KEY_SHOW_ELEMENT);
         boolean refresh = "true".equalsIgnoreCase(JsonUtils.extractStringArgument(params, "refresh")); //$NON-NLS-1$ //$NON-NLS-2$
 
         if (formPath != null && !formPath.isEmpty()
@@ -96,14 +106,11 @@ public class GetFormScreenshotTool implements IMcpTool
             return ToolResult.error("projectName is required when formPath is specified").toJson(); //$NON-NLS-1$
         }
 
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
+        AtomicReference<CaptureResult> resultRef = new AtomicReference<>();
+        if (!ReadToolExecution.dispatchRendering(() -> resultRef.set(captureScreenshot(projectName, formPath, showElement, refresh))))
         {
             return ToolResult.error("Display is not available").toJson(); //$NON-NLS-1$
         }
-
-        AtomicReference<CaptureResult> resultRef = new AtomicReference<>();
-        display.syncExec(() -> resultRef.set(captureScreenshot(projectName, formPath, refresh)));
 
         CaptureResult result = resultRef.get();
         if (!result.isSuccess())
@@ -117,45 +124,35 @@ public class GetFormScreenshotTool implements IMcpTool
     /**
      * Main capture logic. Runs on the UI thread.
      */
-    private CaptureResult captureScreenshot(String projectName, String formPath, boolean refresh)
+    private CaptureResult captureScreenshot(String projectName, String formPath, String showElement,
+        boolean refresh)
     {
         try
         {
             boolean formRequested = formPath != null && !formPath.isEmpty();
 
-            EditorPageResult pageResult = resolveEditorPage(projectName, formPath, formRequested);
-            if (pageResult.error != null)
+            // Opens the requested form (or takes the active editor) and runs both identity guards: the
+            // image is rendered from the representation's own form model into an offscreen buffer every
+            // form shares, so only that model proves whose pixels these are.
+            EditorScreenshotHelper.FormEditorTarget editor =
+                EditorScreenshotHelper.resolveFormEditor(projectName, formPath, PRODUCT);
+            if (editor.getError() != null)
             {
-                return pageResult.error;
+                return CaptureResult.error(ToolResult.error(editor.getError()).toJson());
             }
-            Object editorPage = pageResult.editorPage;
+            Object wysiwygViewer = editor.getViewer();
+            Object representation = editor.getRepresentation();
 
-            Object wysiwygViewer = ReflectionUtils.getFieldValue(editorPage, WYSIWYG_VIEWER_FIELD);
-            if (wysiwygViewer == null)
+            // Resolve showElement before the render gate: an unknown name must fail fast with the
+            // not-found error, not wait for the render or turn into the render-unavailable error.
+            EditorScreenshotHelper.ShowElementTarget showTarget = null;
+            if (showElement != null && !showElement.isEmpty())
             {
-                return CaptureResult.error(ToolResult.error("WYSIWYG viewer is not available").toJson()); //$NON-NLS-1$
-            }
-
-            Object representation = EditorScreenshotHelper.getRepresentation(wysiwygViewer);
-            if (representation == null)
-            {
-                return CaptureResult.error(
-                    ToolResult.error("WYSIWYG representation is not available").toJson()); //$NON-NLS-1$
-            }
-
-            // Identity guard (b): image-level check (the stale-image defect). The form image
-            // is read from the representation's own form model: in the rebuild task the image and the
-            // layout are produced together from a single createHippoSession(tx, this.form, ...) call, so
-            // the pixels belong to whatever form THIS representation renders. Confirm that model is the
-            // requested form before trusting the image. The shared HippoLayoutService singleton paints
-            // every form into ONE memory-mapped offscreen buffer, so an editor-input FQN match alone
-            // does not prove the buffer (and thus the image) was repainted for the requested form.
-            if (formRequested && !EditorScreenshotHelper.representationFormMatches(representation, formPath))
-            {
-                return CaptureResult.error(ToolResult.error(
-                    "The WYSIWYG editor for '" + formPath + "' does not render the requested form model. " //$NON-NLS-1$ //$NON-NLS-2$
-                    + "No screenshot was taken to avoid returning another form's image; " //$NON-NLS-1$
-                    + "try again once the requested form's editor is fully open.").toJson()); //$NON-NLS-1$
+                showTarget = EditorScreenshotHelper.resolveShowElementForScreenshot(representation, showElement);
+                if (showTarget.getError() != null)
+                {
+                    return CaptureResult.error(ToolResult.error(showTarget.getError()).toJson());
+                }
             }
 
             if (refresh)
@@ -190,14 +187,11 @@ public class GetFormScreenshotTool implements IMcpTool
                 return renderGate;
             }
 
-            ImageDataResult imageResult = readValidImageData(representation, wysiwygViewer, rendered, formRequested);
-            if (imageResult.error != null)
+            if (showTarget == null)
             {
-                return imageResult.error;
+                return captureImage(representation, wysiwygViewer, rendered, formRequested);
             }
-
-            String base64 = EditorScreenshotHelper.encodePng(imageResult.imageData);
-            return CaptureResult.success(base64);
+            return captureShowingElement(representation, wysiwygViewer, rendered, formPath, showTarget);
         }
         catch (Exception e)
         {
@@ -211,85 +205,73 @@ public class GetFormScreenshotTool implements IMcpTool
         }
     }
 
-    /**
-     * Resolves the WYSIWYG editor page to capture. When a form is requested it opens that form,
-     * lets the UI settle, resolves the page from the opened editor part and applies identity
-     * guard (a); otherwise it falls back to the globally active form editor page. On any failure
-     * the returned holder carries the same {@link CaptureResult} error as the inline code did.
-     * Runs on the UI thread.
-     *
-     * @throws InterruptedException if the UI-settle sleep is interrupted (propagated unchanged)
-     */
-    private EditorPageResult resolveEditorPage(String projectName, String formPath, boolean formRequested)
+    /** Reads, validates and encodes the representation's current image. */
+    private static CaptureResult captureImage(Object representation, Object wysiwygViewer, boolean rendered,
+        boolean formRequested)
         throws Exception
     {
-        if (formRequested)
+        ImageDataResult imageResult = readValidImageData(representation, wysiwygViewer, rendered, formRequested);
+        if (imageResult.error != null)
         {
-            EditorScreenshotHelper.ensureBufferedNativeRenderMode();
-
-            // Open the requested form and keep a direct handle on the editor that was opened
-            // for it. The image MUST come from this editor's own WYSIWYG representation, not
-            // from the globally active form editor: previously this tool resolved the page via
-            // FormEditor.getActiveFormEditorPage(), which returns whatever form editor currently
-            // has workbench focus, so a previously rendered/active form (e.g. DataProcessor.X)
-            // was captured instead of the requested one.
-            EditorScreenshotHelper.OpenFormResult openResult =
-                EditorScreenshotHelper.openForm(projectName, formPath);
-            if (!openResult.isSuccess())
-            {
-                return EditorPageResult.failed(CaptureResult.error(openResult.getError()));
-            }
-
-            IEditorPart editorPart = openResult.getEditorPart();
-
-            // Let UI settle after activation
-            Display display = Display.getCurrent();
-            for (int i = 0; i < 5; i++)
-            {
-                EditorScreenshotHelper.processEvents(display);
-                Thread.sleep(100);
-            }
-
-            // Resolve the WYSIWYG page from THIS editor part (findPage), not the global active
-            // page, so the page is guaranteed to belong to the requested form.
-            Object editorPage = EditorScreenshotHelper.waitForFormEditorPageOf(editorPart);
-            if (editorPage == null)
-            {
-                return EditorPageResult.failed(CaptureResult.error(ToolResult.error(
-                    "Form editor opened but WYSIWYG page is not available. " + //$NON-NLS-1$
-                    "The form may still be loading.").toJson())); //$NON-NLS-1$
-            }
-
-            // Identity guard (a): confirm the opened editor actually corresponds to the requested
-            // form before reading its image. If it does not match, fail explicitly rather than
-            // return another form's PNG (the silent wrong-form defect).
-            String actualFqn = EditorScreenshotHelper.getFormEditorFqn(editorPart);
-            if (actualFqn != null && !EditorScreenshotHelper.fqnMatchesFormPath(actualFqn, formPath))
-            {
-                return EditorPageResult.failed(CaptureResult.error(ToolResult.error(
-                    "Captured form editor does not match the requested form. Requested '" //$NON-NLS-1$
-                    + formPath + "' but the active editor is '" + actualFqn //$NON-NLS-1$
-                    + "'. No screenshot was taken to avoid returning the wrong form's image; " //$NON-NLS-1$
-                    + "try again once the requested form's editor is fully open.").toJson())); //$NON-NLS-1$
-            }
-
-            return EditorPageResult.page(editorPage);
+            return CaptureResult.error(ToolResult.error(imageResult.error).toJson());
         }
+        return CaptureResult.success(EditorScreenshotHelper.encodePng(imageResult.imageData));
+    }
 
-        Object editorPage = EditorScreenshotHelper.getActiveFormEditorPage();
-        if (editorPage == null)
+    /**
+     * Captures with the page holding {@code target} shown. Runs after the (possibly forced) render,
+     * since a full render brings back the default pages. The switch, the identity guard and the image
+     * read follow each other with no event pumping, inside the {@code try} whose {@code finally}
+     * restores the editor. A failed restore fails the call and is appended to any other failure: the
+     * editor and later captures would keep the switched page.
+     */
+    static CaptureResult captureShowingElement(Object representation, Object wysiwygViewer,
+        boolean rendered, String formPath, EditorScreenshotHelper.ShowElementTarget target)
+    {
+        boolean formRequested = formPath != null && !formPath.isEmpty();
+        FormPageSwitch pageSwitch = FormPageSwitch.prepare(representation, target);
+        String failure = null;
+        String png = null;
+        String restoreError;
+        try
         {
-            return EditorPageResult.failed(CaptureResult.error(ToolResult.error(
-                "No active form editor page found. " + //$NON-NLS-1$
-                "Specify formPath parameter to open a form automatically.").toJson())); //$NON-NLS-1$
+            failure = pageSwitch.show();
+            if (failure == null)
+            {
+                failure = EditorScreenshotHelper.representationGuardError(representation, formPath, PRODUCT);
+            }
+            if (failure == null)
+            {
+                ImageDataResult image = readValidImageData(representation, wysiwygViewer, rendered, formRequested);
+                failure = image.error;
+                png = image.error == null ? EditorScreenshotHelper.encodePng(image.imageData) : null;
+            }
         }
-        return EditorPageResult.page(editorPage);
+        catch (Exception e)
+        {
+            if (e instanceof InterruptedException)
+            {
+                Thread.currentThread().interrupt();
+            }
+            Activator.logError("Failed to capture form screenshot", e); //$NON-NLS-1$
+            failure = "Failed to capture form screenshot: " + e.getMessage(); //$NON-NLS-1$
+        }
+        finally
+        {
+            restoreError = pageSwitch.restore();
+        }
+        if (restoreError != null)
+        {
+            failure = failure == null ? restoreError : failure + " " + restoreError; //$NON-NLS-1$
+        }
+        return failure == null ? CaptureResult.success(png)
+            : CaptureResult.error(ToolResult.error(failure).toJson());
     }
 
     /**
      * Applies the render gate after {@code ensureRenderedFormImage}: when the render could not be
-     * completed it returns the same explicit error the inline code did (refresh first, then the
-     * requested-form case), or {@code null} when capture may proceed. Behaviour is unchanged.
+     * completed it returns an error with advice for EDT's current buffered-render mode (refresh
+     * first, then the requested-form case), or {@code null} when capture may proceed.
      */
     private static CaptureResult checkRenderGate(boolean rendered, boolean refresh, boolean formRequested,
         String formPath)
@@ -299,9 +281,8 @@ public class GetFormScreenshotTool implements IMcpTool
             return CaptureResult.error(ToolResult.error(
                 "refresh=true was requested but the form could not be re-rendered in time, so no " //$NON-NLS-1$
                 + "screenshot was taken: returning the previously rendered image would silently " //$NON-NLS-1$
-                + "show stale (pre-edit) content. Ensure EDT runs with buffered native render " //$NON-NLS-1$
-                + "(VM option -DnativeFormBufferedLayoutRender=true) and try again, or call with " //$NON-NLS-1$
-                + "refresh=false to accept the last rendered image.").toJson()); //$NON-NLS-1$
+                + "show stale (pre-edit) content. " + renderFailureAdvice() //$NON-NLS-1$
+                + " Or call with refresh=false to accept the last rendered image.").toJson()); //$NON-NLS-1$
         }
         if (formRequested && !rendered)
         {
@@ -312,8 +293,7 @@ public class GetFormScreenshotTool implements IMcpTool
                 "Could not render the requested form '" + formPath //$NON-NLS-1$
                 + "' in time, so no screenshot was taken. Form image data is not available: its " //$NON-NLS-1$
                 + "WYSIWYG representation produced no image within the wait budget. " //$NON-NLS-1$
-                + "Ensure EDT runs with buffered native render " //$NON-NLS-1$
-                + "(VM option -DnativeFormBufferedLayoutRender=true) and try again.").toJson()); //$NON-NLS-1$
+                + renderFailureAdvice()).toJson());
         }
         return null;
     }
@@ -321,8 +301,8 @@ public class GetFormScreenshotTool implements IMcpTool
     /**
      * Reads the rendered image from the representation, applies the active-editor print fallback,
      * and validates the image dimensions. Returns a holder carrying either a valid {@link ImageData}
-     * or the same {@link CaptureResult} error the inline code produced (the contiguous
-     * "Form image data is not available" sentinel rules are preserved).
+     * or the error message (the contiguous "Form image data is not available" sentinel rules are
+     * preserved).
      */
     private static ImageDataResult readValidImageData(Object representation, Object wysiwygViewer,
         boolean rendered, boolean formRequested)
@@ -347,43 +327,53 @@ public class GetFormScreenshotTool implements IMcpTool
             {
                 // Same contiguous-sentinel rule as above: lead with the documented
                 // "Form image data is not available" phrase, then the wait-budget context.
-                return ImageDataResult.failed(CaptureResult.error(ToolResult.error(
+                return ImageDataResult.failed(
                     "Form image data is not available: the form did not finish rendering " + //$NON-NLS-1$
                     "in time, so no image could be captured. " + //$NON-NLS-1$
-                    "Ensure EDT runs with buffered native render " + //$NON-NLS-1$
-                    "(VM option -DnativeFormBufferedLayoutRender=true) and try again.").toJson())); //$NON-NLS-1$
+                    renderFailureAdvice());
             }
-            return ImageDataResult.failed(
-                CaptureResult.error(ToolResult.error("Form image data is not available").toJson())); //$NON-NLS-1$
+            return ImageDataResult.failed("Form image data is not available. " + renderFailureAdvice()); //$NON-NLS-1$
         }
 
         return ImageDataResult.image(imageData);
     }
 
-    /**
-     * Holder threading the resolved editor page or an early-return error out of
-     * {@link #resolveEditorPage}. Exactly one of {@code editorPage} / {@code error} is set.
-     */
-    private static final class EditorPageResult
+    /** Gathers the current render modes and platform for the pure advice selector. */
+    private static String renderFailureAdvice()
     {
-        final Object editorPage;
-        final CaptureResult error;
+        return renderFailureAdvice(NativeRenderModeProbe.getBufferedRenderMode(),
+            NativeRenderModeProbe.getStartupBufferedRenderMode(), Platform.OS_WIN32.equals(Platform.getOS()));
+    }
 
-        private EditorPageResult(Object editorPage, CaptureResult error)
+    /**
+     * Diagnoses image failures without treating an unknown mode as a known launch setting. EDT reads
+     * its buffered render mode once, at class initialization, and nothing in this plugin changes it,
+     * so the live mode and the startup snapshot can differ only when one of them could not be read:
+     * the live mode decides, and the startup snapshot stands in only for an unreadable live mode. A
+     * known buffered mode gets the buffer-path advice; an off or unreadable one gets the launch flag
+     * plus the buffer path. The launch flag and the buffer-path advice are specific to Windows. Linux
+     * and macOS buffer native render without the flag, so there every failure, including an
+     * unreadable mode, gets the neutral log and display hint.
+     */
+    static String renderFailureAdvice(NativeRenderMode live, NativeRenderMode startup, boolean windows)
+    {
+        if (!windows)
         {
-            this.editorPage = editorPage;
-            this.error = error;
+            return "EDT could not produce the offscreen form image. Check the EDT log for errors around " //$NON-NLS-1$
+                + "the offscreen buffer (dtgraphics-form.bin) and ensure EDT has a working display."; //$NON-NLS-1$
         }
-
-        static EditorPageResult page(Object editorPage)
+        String bufferPath = "A common cause on Windows is -Djava.io.tmpdir without a trailing " //$NON-NLS-1$
+            + "separator: check the EDT log for AccessDeniedException on dtgraphics-form.bin. End " //$NON-NLS-1$
+            + "-Djava.io.tmpdir with a backslash (for example, -Djava.io.tmpdir=C:\\edt_tmp\\) " //$NON-NLS-1$
+            + "and restart EDT."; //$NON-NLS-1$
+        NativeRenderMode mode = live != NativeRenderMode.UNKNOWN ? live : startup;
+        if (mode == NativeRenderMode.ON)
         {
-            return new EditorPageResult(editorPage, null);
+            return "EDT could not produce the offscreen form image. " + bufferPath; //$NON-NLS-1$
         }
-
-        static EditorPageResult failed(CaptureResult error)
-        {
-            return new EditorPageResult(null, error);
-        }
+        return "On Windows, add -DnativeFormBufferedLayoutRender=true after -vmargs in 1cedt.ini " //$NON-NLS-1$
+            + "and restart EDT. Use this flag only for screenshot sessions: EDT's own form designer " //$NON-NLS-1$
+            + "shows a grey rectangle for the whole session. " + bufferPath; //$NON-NLS-1$
     }
 
     /**
@@ -393,9 +383,10 @@ public class GetFormScreenshotTool implements IMcpTool
     private static final class ImageDataResult
     {
         final ImageData imageData;
-        final CaptureResult error;
+        /** The error message, or {@code null} when {@link #imageData} is set. */
+        final String error;
 
-        private ImageDataResult(ImageData imageData, CaptureResult error)
+        private ImageDataResult(ImageData imageData, String error)
         {
             this.imageData = imageData;
             this.error = error;
@@ -406,7 +397,7 @@ public class GetFormScreenshotTool implements IMcpTool
             return new ImageDataResult(imageData, null);
         }
 
-        static ImageDataResult failed(CaptureResult error)
+        static ImageDataResult failed(String error)
         {
             return new ImageDataResult(null, error);
         }

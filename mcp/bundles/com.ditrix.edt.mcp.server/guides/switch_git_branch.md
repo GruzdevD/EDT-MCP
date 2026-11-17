@@ -10,12 +10,14 @@ Each has its own actionable error, checked in this order:
 3. **The working tree must have no uncommitted changes** (`git status`: staged or unstaged modifications, additions, removals). **Untracked files alone do NOT block** a switch - only tracked-file changes do, matching plain `git checkout` semantics.
 
 ## What happens on success
-The checkout runs in a bounded background Job (up to 120 seconds) - never on the UI thread. On success the result is:
+The checkout runs in a bounded background Job (up to 120 seconds) - never on the UI thread. It runs under the lock `set_branch_infobase`'s binding changes take, so it never lands between a detach's check and EDT's write: while one is running the switch waits for it (up to 60 s; past that it is refused with nothing changed - retry). A checkout that outlives its 120 s is reported as timed out but may still be finishing: until it ends, a `set_branch_infobase` detach of the projects in that repository is refused. On success the result is:
 ```json
 { "success": true, "previousBranch": "main", "branch": "feature/x",
   "bindings": { "infobases": ["MyBase"], "defaultInfobase": "MyBase" } }
 ```
 `bindings` is a **best-effort** read-back of the CURRENT application/infobase association after the switch - proof that the 1C application context followed the checkout automatically (EDT derives it live from the checked-out branch). It is omitted when no binding manager/association is available; a missing `bindings` key does not mean the switch failed.
+
+After the checkout, every open project of the repository's work tree is refreshed - not just `projectName`; projects of a nested repository (a submodule) are not - and the call waits (up to 60 s) until EDT has loaded the checked-out files into each of those projects' models. Until EDT has, a metadata write into such a project is refused as `Project is building` (nothing changed - retry), because the reload would overwrite it; other projects are not affected. When the wait runs out first, the switch still succeeds and `message` names the projects still loading; retry their writes once `list_projects` shows them ready. A refresh that fails or outlives its own 120 s is a note in `message` too, never a failed switch. If another checkout moves the repository during the wait, the call answers with an error naming the branch it is on now.
 
 ## Checkout failure modes
 - **CONFLICTS** - your uncommitted local changes would be overwritten by the target branch; the working tree is left on the **ORIGINAL** branch (JGit's checkout semantics), and the error lists the conflicting paths (bounded to ~20).

@@ -6,6 +6,10 @@
 
 package com.ditrix.edt.mcp.server.protocol;
 
+import com.ditrix.edt.mcp.server.HeadlessLifetime;
+import com.ditrix.edt.mcp.server.HostKind;
+import com.ditrix.edt.mcp.server.tools.HostToolCapabilities;
+
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,6 +30,7 @@ import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
 import com.ditrix.edt.mcp.server.utils.DcsXmlCodec;
 import com.ditrix.edt.mcp.server.utils.GuideRenderer;
 import com.ditrix.edt.mcp.server.utils.InfobaseAuthDialogSuppressor;
+import com.ditrix.edt.mcp.server.utils.EdtDialogs;
 import com.ditrix.edt.mcp.server.utils.Log;
 import com.ditrix.edt.mcp.server.utils.OutputSizeGuard;
 import com.ditrix.edt.mcp.server.utils.privacy.PiiRedactor;
@@ -55,7 +60,6 @@ public class McpProtocolHandler
     private static final String MIME_TEXT_MARKDOWN = "text/markdown"; //$NON-NLS-1$
 
     /** JSON key flagging a structured success/failure outcome. */
-    private static final String KEY_SUCCESS = "success"; //$NON-NLS-1$
 
     /** Maximum user-authored signal text retained in a tool result, including the ellipsis. */
     public static final int MAX_USER_SIGNAL_MESSAGE_CHARS = 512;
@@ -90,6 +94,8 @@ public class McpProtocolHandler
 
     private final McpToolRegistry toolRegistry;
 
+    private final GuidedWorkflows guidedWorkflows;
+
     /**
      * Capabilities the last {@code initialize} declared, kept for callers that have no session
      * of their own — the in-process bridge, and any caller of the session-less
@@ -113,7 +119,14 @@ public class McpProtocolHandler
      */
     public McpProtocolHandler()
     {
+        this("true".equalsIgnoreCase(System.getenv("EDT_MCP_GUIDED_WORKFLOWS")) //$NON-NLS-1$ //$NON-NLS-2$
+            ? new GuidedWorkflows(McpToolRegistry.getInstance()) : null);
+    }
+
+    McpProtocolHandler(GuidedWorkflows guidedWorkflows)
+    {
         this.toolRegistry = McpToolRegistry.getInstance();
+        this.guidedWorkflows = guidedWorkflows;
     }
 
     /**
@@ -135,8 +148,7 @@ public class McpProtocolHandler
      * / ping / resources) flows, so the request/response HISTORY recorder (#254) is
      * hooked here — once per message, in a {@code finally}, and strictly guarded so
      * it can never alter the returned response nor propagate a failure onto the wire
-     * path. The returned value is {@link #dispatch(JsonRpcRequest, ClientCapabilities)}'s EXACT String (no
-     * envelope re-serialization).
+     * path. Dispatch bytes are preserved unless an open-dialog notice is attached.
      * <p>
      * The request is parsed ONCE here and the parsed form is reused for both dispatch
      * and the recorder, so a large tool-call payload is never parsed twice on this hot
@@ -198,11 +210,27 @@ public class McpProtocolHandler
     public String processRequest(String requestBody, JsonRpcRequest request, long startNanos,
         ClientCapabilities sessionCapabilities)
     {
+        return processRequest(requestBody, request, startNanos, sessionCapabilities, null);
+    }
+
+    /** Uses a per-call completion sink when transport owns selection of the client response. */
+    public String processRequest(String requestBody, JsonRpcRequest request, long startNanos,
+        ClientCapabilities sessionCapabilities, java.util.function.Consumer<String> completion)
+    {
         String response = null;
         try
         {
+            boolean reportDialogs = shouldReportDialogNotice(request);
+            if (reportDialogs)
+            {
+                EdtDialogs.getInstance().ensureInstalled();
+            }
             response = dispatch(request,
                 sessionCapabilities != null ? sessionCapabilities : clientCapabilities.get());
+            if (reportDialogs)
+            {
+                response = appendDialogNotice(response, dialogNotice());
+            }
         }
         finally
         {
@@ -210,15 +238,21 @@ public class McpProtocolHandler
             // Best-effort and strictly non-intrusive: a recorder failure, a
             // null/unparseable request, a notification's null response, or a missing
             // plugin context (Activator.getDefault()==null during a shutdown race or
-            // in a headless unit test) are ALL swallowed here so the returned value —
-            // dispatch's exact String — is never altered.
+            // in a headless unit test) are ALL swallowed here so the selected response is unchanged.
             try
             {
                 long durationMs = (System.nanoTime() - startNanos) / 1_000_000L;
                 String method = request != null ? request.getMethod() : null;
                 String toolName = (request != null && McpConstants.METHOD_TOOLS_CALL.equals(method))
                     ? request.getToolName() : null;
-                recordToHistory(method, toolName, requestBody, response, durationMs);
+                if (completion != null)
+                {
+                    completion.accept(response);
+                }
+                else
+                {
+                    recordToHistory(method, toolName, requestBody, response, durationMs);
+                }
             }
             catch (Exception recordingFailure) // NOSONAR: history recording must never break a call
             {
@@ -360,6 +394,25 @@ public class McpProtocolHandler
                 return handleToolCall(request, requestId, capabilities);
             }
 
+            if ("resources/templates/list".equals(method) && guidedWorkflows == null) //$NON-NLS-1$
+            {
+                JsonObject result = new JsonObject();
+                result.add("resourceTemplates", new JsonArray()); //$NON-NLS-1$
+                return GsonProvider.toJson(JsonRpcResponse.success(requestId, result));
+            }
+
+            if (guidedWorkflows != null && guidedWorkflows.handles(request))
+            {
+                try
+                {
+                    return GsonProvider.toJson(JsonRpcResponse.success(requestId, guidedWorkflows.handle(request)));
+                }
+                catch (GuidedWorkflows.RequestError e)
+                {
+                    return buildErrorResponse(e.code(), e.getMessage(), requestId);
+                }
+            }
+
             // Check for resources/list method (serves the per-tool guide:// docs)
             if (McpConstants.METHOD_RESOURCES_LIST.equals(method))
             {
@@ -440,6 +493,11 @@ public class McpProtocolHandler
     private String handleToolCall(JsonRpcRequest request, Object requestId, ClientCapabilities capabilities)
     {
         String toolName = request != null ? request.getToolName() : null;
+        if (toolName == null || toolName.isBlank())
+        {
+            return buildErrorResponse(McpConstants.ERROR_INVALID_PARAMS,
+                "Invalid params.name: provide a non-blank tool name from tools/list.", requestId); //$NON-NLS-1$
+        }
         
         // Find tool by name
         IMcpTool tool = toolRegistry.getTool(toolName);
@@ -448,11 +506,18 @@ public class McpProtocolHandler
             return buildErrorResponse(McpConstants.ERROR_METHOD_NOT_FOUND, "Tool not found: " + toolName, requestId); //$NON-NLS-1$
         }
 
+        if (!HostToolCapabilities.availableOnCurrentHost(tool.getName()))
+        {
+            String payload = ToolResult.error(HostToolCapabilities.refusal(tool.getName())).toJson();
+            return buildToolCallResponse(tool, payload, null, capabilities.plainTextModeOr(isPlainTextMode()),
+                requestId, extractToolParams(request), capabilities);
+        }
+
         // Check if tool is enabled. The refusal is flagged isError: nothing ran, so a success
         // would record an empty answer as the tool's output - and enablement is the one input to
         // the outputSchema promise that can change UNDER a client (a JSON tool listed with its
         // schema, switched off before the next call), which only an error result is exempt from.
-        if (!toolRegistry.isToolEnabled(toolName))
+        if (HostKind.current() != HostKind.HEADLESS && !toolRegistry.isToolEnabled(toolName))
         {
             String msg = "Tool '" + toolName + "' is disabled by the user. " //$NON-NLS-1$ //$NON-NLS-2$
                 + "If this functionality is needed, ask the user to enable it: " //$NON-NLS-1$
@@ -465,15 +530,11 @@ public class McpProtocolHandler
         // Extract parameters from request arguments
         Map<String, String> params = extractToolParams(request);
         
-        // Set current tool name for status bar display
         McpServer server = Activator.getDefault() != null ? Activator.getDefault().getMcpServer() : null;
-        if (server != null)
-        {
-            server.setCurrentToolName(tool.getName());
-        }
-        
+        com.ditrix.edt.mcp.server.ActiveToolCall call = server != null ? server.getExecutingToolCall() : null;
+
         // Execute the tool (timed + logged + status-bar cleared in one place).
-        String result = executeToolTimed(tool, params, server);
+        String result = executeToolTimed(tool, params, server, call);
 
         // PII redaction (#242): the single wire-serialization choke point.
         // A no-op unless redaction is enabled AND the tool is flagged returnsInfobaseData -
@@ -484,11 +545,11 @@ public class McpProtocolHandler
         UserSignal signal = null;
         if (server != null)
         {
-            signal = server.consumeUserSignal();
+            signal = call != null ? call.consumeUserSignal() : null;
         }
         
         // Check if plain text mode is enabled (Cursor compatibility).
-        boolean plainTextMode = isPlainTextMode();
+        boolean plainTextMode = capabilities.plainTextModeOr(isPlainTextMode());
 
         // Return response based on tool's declared response type
         return buildToolCallResponse(tool, result, signal, plainTextMode, requestId, params, capabilities);
@@ -508,7 +569,8 @@ public class McpProtocolHandler
      * @return the raw tool result payload (may be {@code null} only if {@code execute} returned
      *         {@code null})
      */
-    private String executeToolTimed(IMcpTool tool, Map<String, String> params, McpServer server)
+    private String executeToolTimed(IMcpTool tool, Map<String, String> params, McpServer server,
+        com.ditrix.edt.mcp.server.ActiveToolCall call)
     {
         String result = null;
         long startNanos = System.nanoTime();
@@ -520,7 +582,8 @@ public class McpProtocolHandler
         // connect — a per-call arm would miss those. Idempotent + cheap after first install; no-op
         // headless. set_infobase_credentials provides the credentials so the dialog never needs to
         // appear on a correctly configured base.
-        InfobaseAuthDialogSuppressor.ensureInstalled();
+        if (HostKind.current() == HostKind.WINDOWED)
+        { InfobaseAuthDialogSuppressor.ensureInstalled(); }
         // Scope the auth-dialog suppression to tools that can actually reach an infobase
         // connection (issue #270): only a tool flagged connectsToInfobase() marks this
         // dispatch in-flight, so the suppressor auto-cancels an auth dialog raised during
@@ -529,13 +592,17 @@ public class McpProtocolHandler
         // by continuous MCP polling from read-only tools that never touch a connection.
         // markActivityEnd() runs in the finally below, guarded by the SAME flag, so the
         // start/end pair always stays balanced (end called iff start was called).
-        boolean connectsToInfobase = tool.connectsToInfobase();
+        boolean connectsToInfobase = tool.connectsToInfobase()
+            && HostKind.current() == HostKind.WINDOWED;
         if (connectsToInfobase)
         {
             InfobaseAuthDialogSuppressor.markActivityStart();
         }
-        try
+        HeadlessLifetime lifetime = Activator.getDefault() == null
+            ? null : Activator.getDefault().getHeadlessLifetime();
+        try (var lease = lifetime == null ? null : lifetime.tool())
         {
+            if (lifetime != null && lease == null) { return ToolResult.error("Headless EDT is shutting down; reconnect and retry a read.").toJson(); }
             result = tool.execute(params);
             threw = false;
             return result;
@@ -549,7 +616,7 @@ public class McpProtocolHandler
             // Clear current tool name after execution
             if (server != null)
             {
-                server.setCurrentToolName(null);
+                server.clearActiveToolCall(call);
             }
 
             long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
@@ -1095,6 +1162,10 @@ public class McpProtocolHandler
             McpConstants.PLUGIN_VERSION,
             McpConstants.AUTHOR
         );
+        if (guidedWorkflows != null)
+        {
+            result.getCapabilities().enableGuidedWorkflows(version);
+        }
         return GsonProvider.toJson(JsonRpcResponse.success(requestId, result));
     }
 
@@ -1167,13 +1238,20 @@ public class McpProtocolHandler
      */
     private String buildToolsListResponse(Object requestId, ClientCapabilities capabilities)
     {
+        return GsonProvider.toJson(JsonRpcResponse.success(requestId,
+            toolCatalog(toolRegistry.getVisibleTools(), capabilities)));
+    }
+
+    /** Shared schema rendering for the live dispatcher and the build-time offline catalog. */
+    public static ToolsListResult toolCatalog(java.util.Collection<IMcpTool> tools, ClientCapabilities capabilities)
+    {
         ToolsListResult result = new ToolsListResult();
         // Whether this client's tools/call will actually carry structuredContent. It depends only
         // on what the client declared at initialize, which cannot change under it - see
         // jsonDeliveryFor for why nothing mutable is allowed to reach this decision.
         boolean structured = advertisesOutputSchema(capabilities);
 
-        for (IMcpTool tool : toolRegistry.getVisibleTools())
+        for (IMcpTool tool : tools)
         {
             // Parse inputSchema from JSON string to JsonElement. The SHAPE a call is
             // built from goes over the wire; the prose around it stops here, except the
@@ -1200,7 +1278,7 @@ public class McpProtocolHandler
             result.addTool(tool.getName(), tool.getDescription(), schema, annotations, outputSchema);
         }
         
-        return GsonProvider.toJson(JsonRpcResponse.success(requestId, result));
+        return result;
     }
 
     /**
@@ -1428,38 +1506,61 @@ public class McpProtocolHandler
     }
 
     /**
-     * Checks whether tool result is a JSON error payload (ToolResult.error JSON).
+     * Reads the cached dialog notice without dispatching to the UI thread.
      */
-    private boolean isJsonErrorPayload(String result)
+    String dialogNotice()
     {
-        if (result == null)
-        {
-            return false;
-        }
+        return EdtDialogs.getInstance().notice();
+    }
 
+    private static boolean shouldReportDialogNotice(JsonRpcRequest request)
+    {
+        return com.ditrix.edt.mcp.server.HostKind.current() == com.ditrix.edt.mcp.server.HostKind.WINDOWED
+            && request != null && McpConstants.METHOD_TOOLS_CALL.equals(request.getMethod())
+            && !"get_server_status".equals(request.getToolName())
+            && !"edt_dialog".equals(request.getToolName());
+    }
+
+    static String appendDialogNotice(String response, String notice)
+    {
+        if (notice == null || response == null)
+        {
+            return response;
+        }
         try
         {
-            JsonElement element = JsonParser.parseString(result);
-            if (!element.isJsonObject())
+            JsonObject envelope = JsonParser.parseString(response).getAsJsonObject();
+            JsonObject text = new JsonObject();
+            text.addProperty("type", "text");
+            text.addProperty("text", notice);
+            if (envelope.has("result"))
             {
-                return false;
+                envelope.getAsJsonObject("result").getAsJsonArray("content").add(text);
             }
-
-            // An error is detected ONLY by an explicit success==false boolean (the
-            // canonical ToolResult.error payload is {"success":false,"error":...}).
-            // Deliberately NOT flagged on mere "error" key presence: a SUCCESSFUL
-            // JSON result that happens to carry an "error" field (e.g. a diagnostics
-            // list) must stay isError:false, otherwise every future field name would
-            // be latently coupled to the error-detection contract.
-            com.google.gson.JsonObject obj = element.getAsJsonObject();
-            return obj.has(KEY_SUCCESS) && obj.get(KEY_SUCCESS).isJsonPrimitive()
-                && obj.get(KEY_SUCCESS).getAsJsonPrimitive().isBoolean()
-                && !obj.get(KEY_SUCCESS).getAsBoolean();
+            else if (envelope.has("error"))
+            {
+                JsonObject error = envelope.getAsJsonObject("error");
+                String message = error.has("message") && !error.get("message").isJsonNull()
+                    ? error.get("message").getAsString() : "Tool call failed";
+                error.addProperty("message", message + "\n" + notice);
+            }
+            else
+            {
+                throw new IllegalArgumentException("Missing tool response result or error");
+            }
+            return GsonProvider.toJson(envelope);
         }
-        catch (Exception e)
+        catch (RuntimeException e)
         {
-            return false;
+            Activator.logWarning("Could not append EDT dialog notice; preserving the original response: "
+                + e.getClass().getSimpleName());
+            return response;
         }
+    }
+
+    private boolean isJsonErrorPayload(String result)
+    {
+        return ToolResult.isErrorPayload(result);
     }
     
     /**

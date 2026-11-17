@@ -84,6 +84,27 @@ public final class LaunchConfigUtils
     /** Launch configuration attribute: startup option string passed to 1cv8c.exe via /C. */
     public static final String ATTR_STARTUP_OPTION = "com._1c.g5.v8.dt.launching.core.ATTR_STARTUP_OPTION"; //$NON-NLS-1$
 
+    /** Native attribute verified against EDT's ILaunchConfigurationAttributes.AUTOMATED_TESTING_MODE. */
+    public static final String ATTR_AUTOMATED_TESTING_MODE =
+        "com._1c.g5.v8.dt.launching.core.ATTR_AUTOMATED_TESTING_MODE"; //$NON-NLS-1$
+
+    /** Native int attribute verified against ILaunchConfigurationAttributes.AUTOMATED_TESTING_PORT_NUMBER. */
+    public static final String ATTR_AUTOMATED_TESTING_PORT_NUMBER =
+        "com._1c.g5.v8.dt.launching.core.ATTR_AUTOMATED_TESTING_PORT_NUMBER"; //$NON-NLS-1$
+
+    /** Native attribute verified against ILaunchConfigurationAttributes.AUTOMATED_TESTING_WEB_CLIENT_ID. */
+    public static final String ATTR_AUTOMATED_TESTING_WEB_CLIENT_ID =
+        "com._1c.g5.v8.dt.launching.core.ATTR_AUTOMATED_TESTING_WEB_CLIENT_ID"; //$NON-NLS-1$
+
+    /** Exact mode string returned by EDT's AutomatedTestingMode.TEST_CLIENT_MODE.getMode(). */
+    public static final String VALUE_AUTOMATED_TESTING_TEST_CLIENT = "TESTCLIENT"; //$NON-NLS-1$
+
+    /** Exact mode string returned by EDT's AutomatedTestingMode.TEST_MANAGER_MODE.getMode(). */
+    public static final String VALUE_AUTOMATED_TESTING_TEST_MANAGER = "TESTMANAGER"; //$NON-NLS-1$
+
+    /** Default test-client port read by EDT's RuntimeClientLaunchDelegate. */
+    public static final int DEFAULT_AUTOMATED_TESTING_PORT = 1538;
+
     /**
      * Launch attribute: the EXTERNAL OBJECTS project holding the object to run on startup.
      *
@@ -315,6 +336,38 @@ public final class LaunchConfigUtils
         }
 
         return null;
+    }
+
+    /**
+     * Returns the configurations of {@code configType} for {@code projectName} that carry no application
+     * binding: EDT launches such a configuration against the project's default application.
+     *
+     * @param launchManager the launch manager
+     * @param configType the configuration type to search
+     * @param projectName the project the configuration must name
+     * @return the unbound configurations, possibly empty
+     */
+    public static List<ILaunchConfiguration> findUnboundLaunchConfigs(ILaunchManager launchManager,
+            ILaunchConfigurationType configType, String projectName)
+    {
+        List<ILaunchConfiguration> unbound = new ArrayList<>();
+        try
+        {
+            for (ILaunchConfiguration config : launchManager.getLaunchConfigurations(configType))
+            {
+                String bound = readAttribute(config, ATTR_APPLICATION_ID, ""); //$NON-NLS-1$
+                if (projectName.equals(readAttribute(config, ATTR_PROJECT_NAME, "")) //$NON-NLS-1$
+                    && (bound == null || bound.isEmpty()))
+                {
+                    unbound.add(config);
+                }
+            }
+        }
+        catch (CoreException e)
+        {
+            Activator.logError("Error searching launch configurations", e); //$NON-NLS-1$
+        }
+        return unbound;
     }
 
     /**
@@ -819,6 +872,13 @@ public final class LaunchConfigUtils
     public static String applyClientCredentials(ILaunchConfiguration config, String user, String password,
         boolean osAuth)
     {
+        return applyClientCredentials(config, user, password, osAuth, null);
+    }
+
+    /** Admit only the final save; preparing a working copy may outlive a bounded caller. */
+    public static String applyClientCredentials(ILaunchConfiguration config, String user, String password,
+        boolean osAuth, CredentialWriteControl writeAllowed)
+    {
         if (config == null)
         {
             return "launch configuration is not available"; //$NON-NLS-1$
@@ -843,7 +903,15 @@ public final class LaunchConfigUtils
                     copy.setAttribute(attribute.getKey(), (String)value);
                 }
             }
-            copy.doSave();
+            var permit = writeAllowed == null ? null : writeAllowed.tryBeginWrite();
+            if (writeAllowed != null && permit == null)
+            {
+                return "The bounded call already returned; client credentials were not saved."; //$NON-NLS-1$
+            }
+            try (permit)
+            {
+                copy.doSave();
+            }
             return null;
         }
         catch (CoreException e)

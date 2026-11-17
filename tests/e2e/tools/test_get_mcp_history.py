@@ -33,6 +33,10 @@ BEFORE touching the ring. get_mcp_history is read-only and never writes the proj
 tree: assert_no_diff() on every path.
 """
 
+import json
+import re
+import uuid
+
 from harness import (
     call,
     assert_ok,
@@ -145,3 +149,74 @@ def test_invalid_status_is_rejected_actionably():
     assert_error_quality(err, names=[bad], suggests=["all", "error", "ok"],
                          ctx="invalid status echoes the bad value and lists the valid tokens")
     assert_no_diff("a rejected call must not touch the fixture")
+
+
+@e2e_test(tool="get_mcp_history", kind="read")
+def test_normal_error_has_one_record_with_the_delivered_response():
+    """A unique rejected request has one ordinary row, preserving the exact wire error.
+
+    UI interruption and both completion orderings are covered by the transport unit
+    tests; attended acceptance must also interrupt a long call on the live stand.
+    """
+    marker = "history_577_" + uuid.uuid4().hex
+    delivered = call("get_mcp_history", {"status": marker})
+    assert_error(delivered, "unique history probe")
+    result = call("get_mcp_history", {"tool": "get_mcp_history", "status": "error",
+                                     "limit": 1000, "includeBodies": True})
+    assert_ok(result, "read back the delivered error")
+    page = result.structured or {}
+    if not page.get("recording"):
+        raise AssertionError("history recording must be enabled for the round-trip test")
+    rows = []
+    for rec in page.get("records") or []:
+        request_body = rec.get("requestJson") or "{}"
+        if marker not in request_body:
+            continue
+        request = json.loads(request_body)
+        if request.get("params", {}).get("arguments", {}).get("status") == marker:
+            rows.append(rec)
+    if len(rows) != 1:
+        raise AssertionError("one request must have exactly one history row: %r" % rows)
+    row = rows[0]
+    if row.get("interrupted") is not False or "backgroundOutcome" in row:
+        raise AssertionError("ordinary errors must not be marked interrupted: %r" % row)
+    if row.get("status") != "error" or json.loads(row.get("responseJson") or "{}") != delivered.raw:
+        raise AssertionError("history must retain the delivered error response: %r" % row)
+    assert_no_diff("history capture must not change the project")
+
+
+@e2e_test(tool="get_mcp_history", kind="read")
+def test_capped_error_remains_in_error_history_and_stats():
+    """A large echoed invalid status produces a capped error without touching the model."""
+    marker = "history_cap_" + uuid.uuid4().hex
+    bad = marker + "x" * 25000
+    delivered = call("get_mcp_history", {"status": bad})
+    err = assert_error(delivered, "large rejected history status")
+    assert_error_quality(err, names=[bad], suggests=["all", "error", "ok"])
+    result = call("get_mcp_history", {"tool": "get_mcp_history", "status": "error",
+                                     "limit": 10, "includeBodies": True, "includeStats": True})
+    assert_ok(result, "read back the capped error")
+    page = result.structured or {}
+    if not page.get("recording"):
+        raise AssertionError("history recording must be enabled for the capped-error test")
+    rows = [rec for rec in page.get("records") or []
+            if marker in (rec.get("requestJson") or "")]
+    if len(rows) != 1:
+        raise AssertionError("the capped error must appear exactly once in error history")
+    row = rows[0]
+    body = row.get("responseJson") or ""
+    if not re.search(r"\.\.\.\[truncated\] \(\d+ chars omitted\)$", body) \
+            or row.get("responseChars", 0) <= len(body):
+        raise AssertionError("the error probe must exceed the capture cap")
+    if row.get("status") != "error" or row.get("interrupted") is not False or "backgroundOutcome" in row:
+        raise AssertionError("a capped ordinary error must retain its ordinary error status")
+    summary = (page.get("stats") or {}).get("summary") or {}
+    if summary.get("totalErrors") != page.get("matched") or summary.get("totalErrors", 0) < 1:
+        raise AssertionError("error-filtered history and statistics must include the capped error")
+    ok_page = call("get_mcp_history", {"tool": "get_mcp_history", "status": "ok",
+                                      "limit": 10, "includeBodies": True})
+    assert_ok(ok_page, "the capped error must not be returned as ok")
+    if any(marker in (rec.get("requestJson") or "")
+           for rec in (ok_page.structured or {}).get("records") or []):
+        raise AssertionError("the capped error leaked into successful history")
+    assert_no_diff("large error capture must not change the project")

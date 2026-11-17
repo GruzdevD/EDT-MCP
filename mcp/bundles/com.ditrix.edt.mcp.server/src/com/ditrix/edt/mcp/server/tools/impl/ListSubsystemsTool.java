@@ -6,6 +6,7 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -13,10 +14,10 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.emf.common.util.EMap;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.Subsystem;
+import com.ditrix.edt.mcp.server.utils.ReadToolExecution;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.preferences.ToolParameterSettings;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
@@ -80,7 +81,7 @@ public class ListSubsystemsTool implements IMcpTool
         String projectName = JsonUtils.extractStringArgument(params, McpKeys.PROJECT_NAME);
         if (projectName != null && !projectName.isEmpty())
         {
-            return "subsystems-" + projectName.toLowerCase() + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
+            return "subsystems-" + projectName.toLowerCase(Locale.ROOT) + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
         }
         return "subsystems.md"; //$NON-NLS-1$
     }
@@ -111,11 +112,10 @@ public class ListSubsystemsTool implements IMcpTool
         final int maxResults = limit;
         final String lang = language;
 
-        Display display = PlatformUI.getWorkbench().getDisplay();
-        display.syncExec(() -> {
+        ReadToolExecution.dispatch(() -> {
             try
             {
-                resultRef.set(listSubsystemsInternal(projectName, filter, recursiveMode, maxResults, lang));
+                resultRef.set(ReadToolExecution.readOnHost(projectName, NAME, () -> listSubsystemsInternal(projectName, filter, recursiveMode, maxResults, lang)));
             }
             catch (Exception e)
             {
@@ -183,7 +183,7 @@ public class ListSubsystemsTool implements IMcpTool
         {
             return true;
         }
-        return name != null && name.toLowerCase().contains(filter.toLowerCase());
+        return name != null && name.toLowerCase(Locale.ROOT).contains(filter.toLowerCase(Locale.ROOT));
     }
 
     private String formatOutput(String projectName, List<SubsystemRow> rows, int limit,

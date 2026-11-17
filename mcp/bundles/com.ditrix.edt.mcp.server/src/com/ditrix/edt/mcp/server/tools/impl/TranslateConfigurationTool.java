@@ -6,25 +6,36 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import com.ditrix.edt.mcp.server.utils.BmModelResolver;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.function.Function;
 
 import org.eclipse.core.resources.IProject;
 
+import com._1c.g5.v8.bm.integration.IBmModel;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
+import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.Language;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.McpKeys;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.BmTransactions;
 import com.ditrix.edt.mcp.server.utils.BuildUtils;
 import com.ditrix.edt.mcp.server.utils.CliReflectionErrors;
 import com.ditrix.edt.mcp.server.utils.FrontMatter;
+import com.ditrix.edt.mcp.server.utils.MetadataScope;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
+import com.ditrix.edt.mcp.server.utils.VendorSupportGuard;
 
 /**
  * Tool that invokes the EDT "Translate configuration" action on a project.
@@ -90,6 +101,12 @@ public class TranslateConfigurationTool implements IMcpTool
     @Override
     public String execute(Map<String, String> params)
     {
+        return execute(params, ProjectContext::of);
+    }
+
+    /** The same execution path with project lookup supplied for lifecycle snapshot tests. */
+    String execute(Map<String, String> params, Function<String, ProjectContext> projectResolver)
+    {
         String projectName = JsonUtils.extractStringArgument(params, McpKeys.PROJECT_NAME);
         List<String> targetLanguages = JsonUtils.extractArrayArgument(params, TARGET_LANGUAGES);
 
@@ -110,7 +127,7 @@ public class TranslateConfigurationTool implements IMcpTool
             // Resolve the IProject first so AI clients get the most specific
             // diagnostic ("Project not found" / "Project is closed", naming the
             // value) for bad names.
-            ProjectContext ctx = ProjectContext.of(projectName);
+            ProjectContext ctx = projectResolver.apply(projectName);
             if (!ctx.exists())
             {
                 return ToolResult.error(ProjectContext.notFoundMessage(projectName)).toJson();
@@ -123,7 +140,8 @@ public class TranslateConfigurationTool implements IMcpTool
 
             // The project is resolved and open above; refuse only the transient
             // BUILDING state here (a missing/closed name was already named above).
-            String building = ProjectStateChecker.buildingErrorOrNull(projectName);
+            // A project this server just switched still holds the previous branch's model (#922).
+            String building = ProjectStateChecker.strictWriteErrorOrNull(project);
             if (building != null)
             {
                 return ToolResult.error(building).toJson();
@@ -133,7 +151,22 @@ public class TranslateConfigurationTool implements IMcpTool
             IDtProject dtProject = dtProjectManager != null ? dtProjectManager.getDtProject(project) : null;
             if (dtProject == null)
             {
-                return ToolResult.error("Not an EDT project: " + projectName).toJson(); //$NON-NLS-1$
+                return ToolResult.error(ProjectStateChecker.withUnstartedContextReason(project,
+                    "Not an EDT project: " + projectName)).toJson(); //$NON-NLS-1$
+            }
+
+            // Vendor support (#642), before LanguageTool is touched: synchronizing a language the
+            // configuration declares writes its synonyms and strings into the configuration's objects.
+            ProjectContext.ConfigurationResult root = ctx.resolveMetadataRoot();
+            if (!root.ok())
+            {
+                return root.errorJson();
+            }
+            String locked = inPlaceRefusal(root.scope(), projectName,
+                declaredTargets(project, root.scope().configuration(), targetLanguages));
+            if (locked != null)
+            {
+                return ToolResult.error(locked).toJson();
             }
 
             Object api = Activator.getDefault().getSynchronizeProjectApi();
@@ -171,5 +204,98 @@ public class TranslateConfigurationTool implements IMcpTool
             }
             return mutationApiEntered ? ToolResult.markErrorWithUnknownMutationOutcome(error) : error;
         }
+    }
+
+    /**
+     * The target languages the configuration itself declares - the ones a synchronize writes in
+     * place, as synonyms and strings of the configuration's own objects. A language it does not
+     * declare has no place in it, so that target can only be a dependent translation project.
+     * Read inside a read of the project's model when there is one.
+     *
+     * @param project the source project, or {@code null} for a bare configuration
+     * @param configuration the source configuration
+     * @param targetLanguages the requested language codes
+     * @return the declared ones, as requested
+     */
+    static List<String> declaredTargets(IProject project, Configuration configuration, List<String> targetLanguages)
+    {
+        if (configuration == null)
+        {
+            return new ArrayList<>();
+        }
+        Activator activator = project == null ? null : Activator.getDefault();
+        IBmModelManager manager = activator == null ? null : activator.getBmModelManager();
+        IBmModel model = BmModelResolver.resolve(project, manager).getModel();
+        if (model == null)
+        {
+            return declaredIn(configuration, targetLanguages);
+        }
+        return BmTransactions.read(model, "TranslateVendorSupportCheck", //$NON-NLS-1$
+            (tx, monitor) -> declaredIn(configuration, targetLanguages));
+    }
+
+    private static List<String> declaredIn(Configuration configuration, List<String> targetLanguages)
+    {
+        List<String> declared = new ArrayList<>();
+        for (String target : targetLanguages)
+        {
+            for (Language language : configuration.getLanguages())
+            {
+                String code = language.getLanguageCode();
+                if (target != null && code != null
+                    && code.toLowerCase(Locale.ROOT).equals(target.trim().toLowerCase(Locale.ROOT)))
+                {
+                    declared.add(target);
+                    break;
+                }
+            }
+        }
+        return declared;
+    }
+
+    /**
+     * The refusal for synchronizing {@code declaredTargets} in place when vendor support locks the
+     * configuration (#642). LanguageTool exposes no per-object scope for the run, so the root and,
+     * for a configuration on support, every one of its objects is asked; an unanswerable check refuses.
+     *
+     * @param scope the source project's resolution root
+     * @param projectName the project the call named
+     * @param declaredTargets the target languages the configuration declares
+     * @return the refusal message, or {@code null} when the run may proceed
+     */
+    static String inPlaceRefusal(MetadataScope scope, String projectName, List<String> declaredTargets)
+    {
+        if (scope == null || scope.isExternalObjects() || declaredTargets.isEmpty())
+        {
+            return null;
+        }
+        Configuration configuration = scope.configuration();
+        if (configuration == null)
+        {
+            return null;
+        }
+        String rule;
+        if (!VendorSupportGuard.allowsEdit(configuration))
+        {
+            rule = "does not allow changes"; //$NON-NLS-1$
+        }
+        else
+        {
+            // An editable root can still hold locked objects, and the run writes into every one.
+            String locked = VendorSupportGuard.firstLockedObject(scope.project(), configuration);
+            if (locked == null)
+            {
+                return null;
+            }
+            rule = "does not allow changing " + locked; //$NON-NLS-1$
+        }
+        return "'" + projectName + "' cannot be translated into " + String.join(", ", declaredTargets) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " in place: the configuration '" + configuration.getName() //$NON-NLS-1$
+            + "' is under vendor support and its support rule " + rule + " (or that could not " //$NON-NLS-1$ //$NON-NLS-2$
+            + "be checked), and synchronizing a language the configuration declares writes that " //$NON-NLS-1$
+            + "language's synonyms and strings into its objects. Nothing was changed. Translate into a " //$NON-NLS-1$
+            + "dependent translation project instead (a target language this configuration does not " //$NON-NLS-1$
+            + "declare), or ask the user to allow changes in EDT's support settings (Configuration > " //$NON-NLS-1$
+            + "Support > Support settings); this server does not change support settings."; //$NON-NLS-1$
     }
 }

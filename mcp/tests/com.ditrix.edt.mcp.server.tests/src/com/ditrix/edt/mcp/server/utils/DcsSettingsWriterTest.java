@@ -14,19 +14,33 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.UUID;
+import java.util.regex.Pattern;
 
+import org.eclipse.core.resources.IProject;
+import org.eclipse.emf.ecore.EReference;
 import org.junit.Test;
 
+import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.dcs.model.core.DataCompositionAppearance;
 import com._1c.g5.v8.dt.dcs.model.core.DataCompositionField;
+import com._1c.g5.v8.dt.dcs.model.core.DataCompositionGroupType;
 import com._1c.g5.v8.dt.dcs.model.core.DataCompositionParameterValue;
+import com._1c.g5.v8.dt.dcs.model.core.DataCompositionPeriodAdditionType;
 import com._1c.g5.v8.dt.dcs.model.core.DataCompositionTotalPlacement;
 import com._1c.g5.v8.dt.dcs.model.core.LocalString;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchema;
 import com._1c.g5.v8.dt.dcs.model.schema.DcsFactory;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionAppearanceField;
+import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionChart;
+import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionChartGroup;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionConditionalAppearance;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionConditionalAppearanceItem;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionFilterItem;
@@ -46,15 +60,19 @@ import com._1c.g5.v8.dt.dcs.parameters.DcsAvailableParameter;
 import com._1c.g5.v8.dt.dcs.parameters.DcsAvailableParameterCollection;
 import com._1c.g5.v8.dt.dcs.parameters.output.DcsOutputParameters;
 import com._1c.g5.v8.dt.dcs.path.DcsPathException;
+import com._1c.g5.v8.dt.dcs.util.DcsV8Serializer;
 import com._1c.g5.v8.dt.form.model.DynamicListExtInfo;
 import com._1c.g5.v8.dt.form.model.FormFactory;
 import com._1c.g5.v8.dt.mcore.ColorValue;
+import com._1c.g5.v8.dt.mcore.DateValue;
 import com._1c.g5.v8.dt.mcore.EnumValue;
 import com._1c.g5.v8.dt.mcore.McoreFactory;
+import com._1c.g5.v8.dt.mcore.NullValue;
 import com._1c.g5.v8.dt.mcore.NumberValue;
 import com._1c.g5.v8.dt.mcore.StringValue;
 import com._1c.g5.v8.dt.mcore.Structure;
 import com._1c.g5.v8.dt.mcore.StructureProperty;
+import com._1c.g5.v8.dt.mcore.UndefinedValue;
 import com._1c.g5.v8.dt.mcore.Value;
 import com._1c.g5.v8.dt.platform.version.Version;
 import com.google.gson.JsonObject;
@@ -65,6 +83,20 @@ public class DcsSettingsWriterTest
 {
     private static final DcsPresentationParser.LanguageContext LANGUAGES =
         new DcsPresentationParser.LanguageContext(Arrays.asList("en", "uk")); //$NON-NLS-1$ //$NON-NLS-2$
+
+    private static final EReference PERIOD_BEGIN = com._1c.g5.v8.dt.dcs.model.settings.DcsPackage.Literals
+        .DATA_COMPOSITION_GROUP_FIELD__PERIOD_ADDITION_BEGIN;
+
+    private static final EReference PERIOD_END = com._1c.g5.v8.dt.dcs.model.settings.DcsPackage.Literals
+        .DATA_COMPOSITION_GROUP_FIELD__PERIOD_ADDITION_END;
+
+    /** The first group field of the first grouping, as the writer addresses it. */
+    private static final java.util.List<String> GROUP_FIELD_ADDRESS = java.util.Collections.unmodifiableList(
+        Arrays.asList("items", "0", "groupFields", "items", "0")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+
+    /** EDT's serialized form of an UndefinedValue period bound: an empty element marked xsi:nil. */
+    private static final Pattern XSI_NIL_BEGIN = Pattern.compile(
+        "<(?:\\w+:)?periodAdditionBegin\\s+xsi:nil=\"true\"\\s*/>"); //$NON-NLS-1$
 
     @Test
     public void testSmallSettableSettingsMembersAreAuthoredAndRetained()
@@ -86,7 +118,7 @@ public class DcsSettingsWriterTest
         assertEquals("AgentMarker", property.getName()); //$NON-NLS-1$
         assertEquals("kept", ((StringValue)property.getValue()).getValue()); //$NON-NLS-1$
         assertTrue("all authored members must be reproducible by authoritative replace", //$NON-NLS-1$
-            DcsReadProjection.unmodellableNodes(result.settings(), "Report.Small").isEmpty()); //$NON-NLS-1$
+            DcsReadProjection.unmodellableNodes(result.settings(), "Report.Small", DcsReplaceTestCatalogues.schema()).isEmpty()); //$NON-NLS-1$
     }
 
     @Test
@@ -544,11 +576,11 @@ public class DcsSettingsWriterTest
             .createSettingsParameterValue();
         String error = DcsSettingsWriter.applyOutputParameterItemForTest(item,
             json("{\"parameter\":{\"kind\":\"parameter\",\"value\":\"Title\"}," //$NON-NLS-1$
-                + "\"value\":{\"kind\":\"string\",\"value\":\"wrong type\"}}"), //$NON-NLS-1$
+                + "\"value\":{\"kind\":\"boolean\",\"value\":true}}"), //$NON-NLS-1$
             LANGUAGES, outputParameters());
         assertNotNull(error);
         assertTrue(error, error.contains("LocalString")); //$NON-NLS-1$
-        assertTrue(error, error.contains("StringValue")); //$NON-NLS-1$
+        assertTrue(error, error.contains("BooleanValue")); //$NON-NLS-1$
     }
 
     @Test
@@ -907,36 +939,263 @@ public class DcsSettingsWriterTest
 
         DcsSettingsWriter.SettingsResult unknown = DcsSettingsWriter.planSettings(settings,
             java.util.Arrays.asList("items", "0"), "replace", "grouping", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            json("{\"kind\":\"chart\"}"), LANGUAGES); //$NON-NLS-1$
+            json("{\"kind\":\"pivot\"}"), LANGUAGES); //$NON-NLS-1$
         assertFalse(unknown.isSuccess());
-        assertUnsupportedChart(unknown.error());
+        assertTrue(unknown.error(), unknown.error().contains("kind='chart'")); //$NON-NLS-1$
     }
 
     @Test
-    public void testChartRefusalIsArticulateAtNodeParentBodyAndRemove()
+    public void testExactStructureReplaceCanChangeToAndFromAChart()
+    {
+        DataCompositionSettings settings = plan(json("{\"items\":[{\"kind\":\"table\"," //$NON-NLS-1$
+            + "\"name\":\"OldTable\"}]}")); //$NON-NLS-1$
+
+        DcsSettingsWriter.SettingsResult chart = DcsSettingsWriter.planSettings(settings,
+            java.util.Arrays.asList("items", "0"), "replace", "chart", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            json("{\"kind\":\"chart\",\"name\":\"NewChart\"}"), LANGUAGES); //$NON-NLS-1$
+        assertTrue(chart.error(), chart.isSuccess());
+        assertTrue(chart.settings().getItems().get(0) instanceof DataCompositionChart);
+        assertEquals("NewChart", ((DataCompositionChart)chart.settings().getItems().get(0)).getName()); //$NON-NLS-1$
+
+        DcsSettingsWriter.SettingsResult group = DcsSettingsWriter.planSettings(chart.settings(),
+            java.util.Arrays.asList("items", "0"), "replace", "grouping", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            json("{\"kind\":\"grouping\",\"name\":\"NewGroup\"}"), LANGUAGES); //$NON-NLS-1$
+        assertTrue(group.error(), group.isSuccess());
+        assertTrue(group.settings().getItems().get(0) instanceof DataCompositionGroup);
+    }
+
+    @Test
+    public void testChartIsATypedStructureItemAtNodeParentBodyAndRemove()
     {
         DataCompositionSettings settings = com._1c.g5.v8.dt.dcs.model.settings.DcsFactory
             .eINSTANCE.createDataCompositionSettings();
         settings.getItems().add(com._1c.g5.v8.dt.dcs.model.settings.DcsFactory.eINSTANCE
             .createDataCompositionChart());
 
-        DcsSettingsWriter.SettingsResult atNode = DcsSettingsWriter.planSettings(settings,
+        DcsSettingsWriter.SettingsResult wrongType = DcsSettingsWriter.planSettings(settings,
             java.util.Arrays.asList("items", "0"), "update", "grouping", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             json("{\"name\":\"NeverApplied\"}"), LANGUAGES); //$NON-NLS-1$
-        assertFalse(atNode.isSuccess());
-        assertUnsupportedChart(atNode.error());
+        assertFalse(wrongType.isSuccess());
+        assertTrue(wrongType.error(), wrongType.error().contains("type='chart'")); //$NON-NLS-1$
+
+        DcsSettingsWriter.SettingsResult renamed = DcsSettingsWriter.planSettings(settings,
+            java.util.Arrays.asList("items", "0"), "update", "chart", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            json("{\"name\":\"Renamed\",\"use\":false}"), LANGUAGES); //$NON-NLS-1$
+        assertTrue(renamed.error(), renamed.isSuccess());
+        DataCompositionChart chart = (DataCompositionChart)renamed.settings().getItems().get(0);
+        assertEquals("Renamed", chart.getName()); //$NON-NLS-1$
+        assertFalse(chart.isUse());
 
         DcsSettingsWriter.SettingsResult remove = DcsSettingsWriter.planSettings(settings,
-            java.util.Arrays.asList("items", "0"), "remove", "grouping", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            java.util.Arrays.asList("items", "0"), "remove", "chart", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             new JsonObject(), LANGUAGES);
-        assertFalse(remove.isSuccess());
-        assertUnsupportedChart(remove.error());
+        assertTrue(remove.error(), remove.isSuccess());
+        assertTrue(remove.settings().getItems().isEmpty());
 
         DcsSettingsWriter.SettingsResult parentBody = DcsSettingsWriter.planSettings(null,
             java.util.Collections.emptyList(), "upsert", "grouping", //$NON-NLS-1$ //$NON-NLS-2$
-            json("{\"items\":[{\"kind\":\"chart\"}]}"), LANGUAGES); //$NON-NLS-1$
-        assertFalse(parentBody.isSuccess());
-        assertUnsupportedChart(parentBody.error());
+            json("{\"items\":[{\"kind\":\"chart\",\"name\":\"C\"}]}"), LANGUAGES); //$NON-NLS-1$
+        assertTrue(parentBody.error(), parentBody.isSuccess());
+        assertTrue(parentBody.settings().getItems().get(0) instanceof DataCompositionChart);
+    }
+
+    @Test
+    public void testChartAuthorsPointsSeriesMeasuresAndAxisScaffolding()
+    {
+        DataCompositionSettings settings = plan(json("{\"items\":[{\"kind\":\"chart\"," //$NON-NLS-1$
+            + "\"name\":\"Sales\",\"id\":\"chart-id\",\"viewMode\":\"Normal\"," //$NON-NLS-1$
+            + "\"pointsViewMode\":\"Normal\",\"pointsUserSettingID\":\"points\"," //$NON-NLS-1$
+            + "\"seriesViewMode\":\"Inaccessible\",\"seriesUserSettingPresentation\":{\"EN\":\"Series\"}," //$NON-NLS-1$
+            + "\"points\":[{\"name\":\"ByCustomer\",\"itemsViewMode\":\"Normal\",\"groupFields\":{\"items\":[" //$NON-NLS-1$
+            + "{\"field\":{\"kind\":\"field\",\"value\":\"Customer\"},\"groupType\":\"Items\"}]}," //$NON-NLS-1$
+            + "\"order\":{\"items\":[{\"kind\":\"auto\"}]},\"selection\":{\"items\":[{\"kind\":\"auto\"}]}}]," //$NON-NLS-1$
+            + "\"series\":[{\"groupFields\":{\"items\":[" //$NON-NLS-1$
+            + "{\"field\":{\"kind\":\"field\",\"value\":\"Period\"}}]}}]," //$NON-NLS-1$
+            + "\"selection\":{\"items\":[{\"kind\":\"field\",\"field\":{\"kind\":\"field\",\"value\":\"Amount\"}}]}}]}")); //$NON-NLS-1$
+
+        DataCompositionChart chart = (DataCompositionChart)settings.getItems().get(0);
+        assertEquals("Sales", chart.getName()); //$NON-NLS-1$
+        assertEquals("chart-id", chart.getId()); //$NON-NLS-1$
+        assertEquals("Normal", chart.getPointsViewMode().getName()); //$NON-NLS-1$
+        assertEquals("points", chart.getPointsUserSettingID()); //$NON-NLS-1$
+        assertEquals("Inaccessible", chart.getSeriesViewMode().getName()); //$NON-NLS-1$
+        assertEquals("Series", presentationText(chart.getSeriesUserSettingPresentation())); //$NON-NLS-1$
+        assertEquals(1, chart.getPoints().size());
+        DataCompositionChartGroup point = chart.getPoints().get(0);
+        assertEquals("ByCustomer", point.getName()); //$NON-NLS-1$
+        assertEquals("Normal", point.getItemsViewMode().getName()); //$NON-NLS-1$
+        assertEquals("Customer", ((DataCompositionGroupField)point.getGroupFields().getItems().get(0)) //$NON-NLS-1$
+            .getField().getValue());
+        assertEquals(1, point.getOrder().getItems().size());
+        assertEquals("Period", ((DataCompositionGroupField)chart.getSeries().get(0).getGroupFields() //$NON-NLS-1$
+            .getItems().get(0)).getField().getValue());
+        assertEquals("Amount", ((DataCompositionSelectedField)chart.getSelection().getItems().get(0)) //$NON-NLS-1$
+            .getField().getValue());
+    }
+
+    @Test
+    public void testChartAxisGroupTakesTheGroupState()
+    {
+        DataCompositionSettings settings = plan(json("{\"items\":[{\"kind\":\"chart\"," //$NON-NLS-1$
+            + "\"points\":[{\"groupState\":\"Disabled\",\"groupFields\":{\"items\":[" //$NON-NLS-1$
+            + "{\"field\":{\"kind\":\"field\",\"value\":\"Customer\"}}]}}]}]}")); //$NON-NLS-1$
+        DataCompositionChart chart = (DataCompositionChart)settings.getItems().get(0);
+        assertEquals("Disabled", chart.getPoints().get(0).getGroupState().getName()); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testEveryIndexedHolderDescendantUnderChartCanBeUpdatedAndRemoved()
+    {
+        DataCompositionSettings settings = plan(json("{\"items\":[{\"kind\":\"chart\",\"name\":\"C\"," //$NON-NLS-1$
+            + "\"selection\":{\"items\":[{\"field\":{\"kind\":\"field\",\"value\":\"Amount\"}}]}," //$NON-NLS-1$
+            + "\"conditionalAppearance\":{\"items\":[{\"use\":true}]}," //$NON-NLS-1$
+            + "\"points\":[" + tableAxisJson("Point") + "]," //$NON-NLS-1$ //$NON-NLS-2$
+            + "\"series\":[" + tableAxisJson("Series") + "]}]}")); //$NON-NLS-1$ //$NON-NLS-2$
+        seedChartOutputParameters((DataCompositionChart)settings.getItems().get(0));
+
+        assertIndexedUpdateAndRemove(settings,
+            Arrays.asList("items", "0", "selection", "items", "0"), "selection"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+        assertIndexedUpdateAndRemove(settings,
+            Arrays.asList("items", "0", "conditionalAppearance", "items", "0"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            "conditionalAppearance"); //$NON-NLS-1$
+        assertIndexedUpdateAndRemove(settings,
+            Arrays.asList("items", "0", "outputParameters", "items", "0"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            "outputParameter"); //$NON-NLS-1$
+        for (String axis : Arrays.asList("points", "series")) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            assertIndexedUpdateAndRemove(settings,
+                Arrays.asList("items", "0", axis, "0", "groupFields", "items", "0"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+                "grouping"); //$NON-NLS-1$
+            assertIndexedUpdateAndRemove(settings,
+                Arrays.asList("items", "0", axis, "0", "selection", "items", "0"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+                "selection"); //$NON-NLS-1$
+            assertIndexedUpdateAndRemove(settings,
+                Arrays.asList("items", "0", axis, "0", "filter", "items", "0"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+                "filter"); //$NON-NLS-1$
+            assertIndexedUpdateAndRemove(settings,
+                Arrays.asList("items", "0", axis, "0", "order", "items", "0"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+                "order"); //$NON-NLS-1$
+            assertIndexedUpdateAndRemove(settings,
+                Arrays.asList("items", "0", axis, "0", "conditionalAppearance", "items", "0"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+                "conditionalAppearance"); //$NON-NLS-1$
+            assertIndexedUpdateAndRemove(settings,
+                Arrays.asList("items", "0", axis, "0", "outputParameters", "items", "0"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+                "outputParameter"); //$NON-NLS-1$
+            assertIndexedUpdateAndRemove(settings,
+                Arrays.asList("items", "0", axis, "0"), "chart"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
+        DcsSettingsWriter.SettingsResult axisHolder = DcsSettingsWriter.planSettings(settings,
+            Arrays.asList("items", "0", "points"), "upsert", "chart", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            json("{\"items\":[{\"name\":\"Second\"}]}"), LANGUAGES); //$NON-NLS-1$
+        assertTrue(axisHolder.error(), axisHolder.isSuccess());
+        assertEquals("Second", ((DataCompositionChart)axisHolder.settings().getItems().get(0)) //$NON-NLS-1$
+            .getPoints().get(1).getName());
+    }
+
+    @Test
+    public void testChartUpdateKeepsNestedOutputParameterValuesItCannotModel()
+    {
+        com._1c.g5.v8.dt.dcs.model.settings.DcsFactory factory =
+            com._1c.g5.v8.dt.dcs.model.settings.DcsFactory.eINSTANCE;
+        DataCompositionSettings settings = plan(json("{\"items\":[{\"kind\":\"chart\",\"name\":\"C\"}]}")); //$NON-NLS-1$
+        DataCompositionChart seeded = (DataCompositionChart)settings.getItems().get(0);
+        com._1c.g5.v8.dt.dcs.model.settings.DataCompositionChartOutputParameterValues output =
+            factory.createDataCompositionChartOutputParameterValues();
+        SettingsParameterValue chartType = settingsParameter("ChartType"); //$NON-NLS-1$
+        chartType.getNestedParameterValues().add(settingsParameter("ChartType.LabelType")); //$NON-NLS-1$
+        output.getItems().add(chartType);
+        seeded.setOutputParameters(output);
+
+        DcsSettingsWriter.SettingsResult renamed = DcsSettingsWriter.planSettings(settings,
+            Arrays.asList("items", "0"), "update", "chart", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            json("{\"name\":\"Renamed\",\"points\":[{\"name\":\"P\"}]}"), LANGUAGES); //$NON-NLS-1$
+        assertFalse("update cannot append an axis group without an index", renamed.isSuccess()); //$NON-NLS-1$
+
+        renamed = DcsSettingsWriter.planSettings(settings, Arrays.asList("items", "0"), "update", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "chart", json("{\"name\":\"Renamed\"}"), LANGUAGES); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(renamed.error(), renamed.isSuccess());
+        DataCompositionChart chart = (DataCompositionChart)renamed.settings().getItems().get(0);
+        assertEquals("Renamed", chart.getName()); //$NON-NLS-1$
+        assertEquals("a targeted update must keep what V1 cannot author", 1, //$NON-NLS-1$
+            chart.getOutputParameters().getItems().get(0).getNestedParameterValues().size());
+
+        DcsSettingsWriter.SettingsResult typeValue = DcsSettingsWriter.planSettings(settings,
+            Arrays.asList("items", "0", "outputParameters", "items", "0"), "update", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+            "outputParameter", json("{\"use\":false}"), LANGUAGES); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(typeValue.error(), typeValue.isSuccess());
+        DataCompositionParameterValue updated = ((DataCompositionChart)typeValue.settings().getItems()
+            .get(0)).getOutputParameters().getItems().get(0);
+        assertFalse(updated.isUse());
+        assertEquals(1, updated.getNestedParameterValues().size());
+    }
+
+    @Test
+    public void testChartOutputParametersUseThePlatformChartCatalogue()
+    {
+        DcsSettingsWriter.SettingsResult pie;
+        DcsSettingsWriter.SettingsResult unknown;
+        try (DcsCatalogueTestRuntime.Scope ignored =
+            DcsCatalogueTestRuntime.prepareCatalogues(Version.V8_3_27))
+        {
+            pie = DcsSettingsWriter.planSettings(null, java.util.Collections.emptyList(), "upsert", //$NON-NLS-1$
+                "userSettings", json("{\"items\":[{\"kind\":\"chart\",\"outputParameters\":{\"items\":[" //$NON-NLS-1$ //$NON-NLS-2$
+                    + "{\"parameter\":{\"kind\":\"parameter\",\"value\":\"ChartType\"},\"value\":\"Pie\"}]}}]}"), //$NON-NLS-1$
+                LANGUAGES, Version.V8_3_27);
+            unknown = DcsSettingsWriter.planSettings(null, java.util.Collections.emptyList(), "upsert", //$NON-NLS-1$
+                "userSettings", json("{\"items\":[{\"kind\":\"chart\",\"outputParameters\":{\"items\":[" //$NON-NLS-1$ //$NON-NLS-2$
+                    + "{\"parameter\":{\"kind\":\"parameter\",\"value\":\"VerticalOverallPlacement\"}," //$NON-NLS-1$
+                    + "\"value\":\"None\"}]}}]}"), //$NON-NLS-1$
+                LANGUAGES, Version.V8_3_27);
+        }
+        assertTrue(pie.error(), pie.isSuccess());
+        DataCompositionParameterValue chartType = ((DataCompositionChart)pie.settings().getItems().get(0))
+            .getOutputParameters().getItems().get(0);
+        assertTrue(chartType.getValues().get(0) instanceof EnumValue);
+        assertEquals("Pie", ((EnumValue)chartType.getValues().get(0)).getValue().getLiteral()); //$NON-NLS-1$
+
+        assertFalse("a report-level parameter is not a chart parameter", unknown.isSuccess()); //$NON-NLS-1$
+        assertTrue(unknown.error(), unknown.error().contains("ChartType")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testChartBodyWithoutKindAndChartNameCollisionAreNamed()
+    {
+        DcsSettingsWriter.SettingsResult noKind = DcsSettingsWriter.planSettings(null,
+            java.util.Collections.emptyList(), "upsert", "chart", //$NON-NLS-1$ //$NON-NLS-2$
+            json("{\"points\":[{\"name\":\"P\"}]}"), LANGUAGES); //$NON-NLS-1$
+        assertFalse(noKind.isSuccess());
+        assertTrue(noKind.error(), noKind.error().contains("kind='chart'")); //$NON-NLS-1$
+
+        DataCompositionSettings settings = plan(json("{\"items\":[{\"kind\":\"chart\",\"name\":\"C\"}," //$NON-NLS-1$
+            + "{\"kind\":\"table\",\"name\":\"C\"}]}")); //$NON-NLS-1$
+        DcsSettingsWriter.SettingsResult duplicate = DcsSettingsWriter.planSettings(settings,
+            java.util.Collections.emptyList(), "upsert", "chart", //$NON-NLS-1$ //$NON-NLS-2$
+            json("{\"kind\":\"chart\",\"name\":\"C\"}"), LANGUAGES); //$NON-NLS-1$
+        assertFalse("a chart name must be unique among sibling charts", duplicate.isSuccess()); //$NON-NLS-1$
+        assertTrue(duplicate.error(), duplicate.error().contains("Chart name 'C'")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testDynamicListSettingsRefuseANewChartButKeepAnUnchangedOne()
+    {
+        String root = "Catalog.Products.Form.ListForm.Attribute.List"; //$NON-NLS-1$
+        DcsSettingsWriter.SettingsResult added = DcsSettingsWriter.planDynamicList(null, "upsert", //$NON-NLS-1$
+            "chart", address(root + "#/listSettings/items"), //$NON-NLS-1$ //$NON-NLS-2$
+            json("{\"kind\":\"chart\",\"selection\":{\"items\":[{\"kind\":\"auto\"}]}}"), LANGUAGES); //$NON-NLS-1$
+        assertFalse(added.isSuccess());
+        assertTrue(added.error(), added.error().contains("cannot gain or change a chart")); //$NON-NLS-1$
+        assertTrue(added.error(), added.error().contains(root + "#/listSettings")); //$NON-NLS-1$
+
+        DataCompositionSettings withChart = plan(json("{\"items\":[{\"kind\":\"chart\"}]}")); //$NON-NLS-1$
+        DcsSettingsWriter.SettingsResult unrelated = DcsSettingsWriter.planDynamicList(withChart,
+            "upsert", "selection", address(root + "#/listSettings/selection"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            json("{\"items\":[{\"kind\":\"auto\"}]}"), LANGUAGES); //$NON-NLS-1$
+        assertTrue("an edit that leaves an existing chart alone must pass", unrelated.isSuccess()); //$NON-NLS-1$
+
+        DcsSettingsWriter.SettingsResult removed = DcsSettingsWriter.planDynamicList(withChart,
+            "remove", "chart", address(root + "#/listSettings/items/0"), null, LANGUAGES); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue("removing a chart adds nothing to check", removed.isSuccess()); //$NON-NLS-1$
     }
 
     @Test
@@ -1341,6 +1600,228 @@ public class DcsSettingsWriterTest
         assertNull(after.getPeriodAdditionEnd());
     }
 
+    // ---- #672: a null period bound of a grouping field means the bound is not set ----------------
+    // EDT's DCS serializer has no form for a NullValue: a bound stored as one made the Template.dcs
+    // export fail. EDT reads a grouping field whose file has no such element as a field whose bound was
+    // never set, and writes no element for it, so that is the state a null bound has to produce.
+
+    @Test
+    public void testNullKindPeriodAdditionBeginLeavesTheBoundUnset()
+    {
+        DataCompositionGroupField field = firstGroupField(plan(groupFieldSettings(
+            "\"periodAdditionBegin\":{\"kind\":\"null\"}," //$NON-NLS-1$
+                + "\"periodAdditionEnd\":{\"kind\":\"number\",\"value\":31338}"))); //$NON-NLS-1$
+
+        assertNull("a null bound must not be stored as a value", field.getPeriodAdditionBegin()); //$NON-NLS-1$
+        assertFalse("a null bound must leave the feature unset", field.eIsSet(PERIOD_BEGIN)); //$NON-NLS-1$
+        assertEquals("31338", ((NumberValue)field.getPeriodAdditionEnd()).getValue().toPlainString()); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testNullKindWithNullValuePeriodAdditionEndLeavesTheBoundUnset()
+    {
+        DataCompositionGroupField field = firstGroupField(plan(groupFieldSettings(
+            "\"periodAdditionBegin\":{\"kind\":\"number\",\"value\":31337}," //$NON-NLS-1$
+                + "\"periodAdditionEnd\":{\"kind\":\"null\",\"value\":null}"))); //$NON-NLS-1$
+
+        assertNull("a null bound must not be stored as a value", field.getPeriodAdditionEnd()); //$NON-NLS-1$
+        assertFalse("a null bound must leave the feature unset", field.eIsSet(PERIOD_END)); //$NON-NLS-1$
+        assertEquals("31337", ((NumberValue)field.getPeriodAdditionBegin()).getValue().toPlainString()); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testJsonNullPeriodBoundsLeaveBothBoundsUnset()
+    {
+        // The old writer refused a bare JSON null ("must be an object").
+        DataCompositionGroupField field = firstGroupField(plan(groupFieldSettings(
+            "\"periodAdditionBegin\":null,\"periodAdditionEnd\":null"))); //$NON-NLS-1$
+
+        assertNull(field.getPeriodAdditionBegin());
+        assertFalse(field.eIsSet(PERIOD_BEGIN));
+        assertNull(field.getPeriodAdditionEnd());
+        assertFalse(field.eIsSet(PERIOD_END));
+        assertEquals("Period", field.getField().getValue()); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testJsonNullClearsAnExistingPeriodAdditionBeginAndKeepsTheField()
+    {
+        DataCompositionSettings settings = plan(boundedGroupFieldSettings());
+
+        DcsSettingsWriter.SettingsResult cleared = DcsSettingsWriter.planSettings(settings,
+            GROUP_FIELD_ADDRESS, "update", "grouping", //$NON-NLS-1$ //$NON-NLS-2$
+            json("{\"periodAdditionBegin\":null}"), LANGUAGES); //$NON-NLS-1$
+        assertTrue(cleared.error(), cleared.isSuccess());
+
+        DataCompositionGroupField field = firstGroupField(cleared.settings());
+        assertNull("the cleared bound must be gone", field.getPeriodAdditionBegin()); //$NON-NLS-1$
+        assertFalse(field.eIsSet(PERIOD_BEGIN));
+        assertEquals("the other bound must stay", "31338", //$NON-NLS-1$ //$NON-NLS-2$
+            ((NumberValue)field.getPeriodAdditionEnd()).getValue().toPlainString());
+        assertBoundedGroupFieldMembersKept(field);
+    }
+
+    @Test
+    public void testNullKindClearsAnExistingPeriodAdditionEndAndKeepsTheField()
+    {
+        DataCompositionSettings settings = plan(boundedGroupFieldSettings());
+
+        DcsSettingsWriter.SettingsResult cleared = DcsSettingsWriter.planSettings(settings,
+            GROUP_FIELD_ADDRESS, "update", "grouping", //$NON-NLS-1$ //$NON-NLS-2$
+            json("{\"periodAdditionEnd\":{\"kind\":\"null\"}}"), LANGUAGES); //$NON-NLS-1$
+        assertTrue(cleared.error(), cleared.isSuccess());
+
+        DataCompositionGroupField field = firstGroupField(cleared.settings());
+        assertNull("the cleared bound must be gone", field.getPeriodAdditionEnd()); //$NON-NLS-1$
+        assertFalse(field.eIsSet(PERIOD_END));
+        assertEquals("the other bound must stay", "31337", //$NON-NLS-1$ //$NON-NLS-2$
+            ((NumberValue)field.getPeriodAdditionBegin()).getValue().toPlainString());
+        assertBoundedGroupFieldMembersKept(field);
+    }
+
+    @Test
+    public void testNonNullPeriodBoundsAreStillStored()
+    {
+        DataCompositionGroupField field = firstGroupField(plan(groupFieldSettings(
+            "\"periodAdditionBegin\":{\"kind\":\"date\",\"value\":\"2026-08-24T00:00:00\"}," //$NON-NLS-1$
+                + "\"periodAdditionEnd\":{\"kind\":\"field\",\"value\":\"EndOfPeriod\"}"))); //$NON-NLS-1$
+
+        assertTrue(field.eIsSet(PERIOD_BEGIN));
+        assertTrue(String.valueOf(field.getPeriodAdditionBegin()),
+            field.getPeriodAdditionBegin() instanceof DateValue);
+        assertTrue(field.eIsSet(PERIOD_END));
+        assertEquals("EndOfPeriod", ((DataCompositionField)field.getPeriodAdditionEnd()).getValue()); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testNullKindWithAValueOrAnUnknownMemberIsStillRefusedForAPeriodBound()
+    {
+        DcsSettingsWriter.SettingsResult withValue = DcsSettingsWriter.planSettings(null,
+            java.util.Collections.<String>emptyList(), "upsert", "userSettings", //$NON-NLS-1$ //$NON-NLS-2$
+            groupFieldSettings("\"periodAdditionBegin\":{\"kind\":\"null\",\"value\":1}"), LANGUAGES); //$NON-NLS-1$
+        assertFalse(withValue.isSuccess());
+        assertTrue(withValue.error(), withValue.error().contains("must omit 'value' or set it to null")); //$NON-NLS-1$
+        assertTrue(withValue.error(), withValue.error().contains("periodAdditionBegin")); //$NON-NLS-1$
+
+        DcsSettingsWriter.SettingsResult misspelt = DcsSettingsWriter.planSettings(null,
+            java.util.Collections.<String>emptyList(), "upsert", "userSettings", //$NON-NLS-1$ //$NON-NLS-2$
+            groupFieldSettings("\"periodAdditionEnd\":{\"kind\":\"null\",\"valeu\":null}"), LANGUAGES); //$NON-NLS-1$
+        assertFalse("a null bound must still pass the ValueSpec member check", misspelt.isSuccess()); //$NON-NLS-1$
+        assertTrue(misspelt.error(), misspelt.error().contains("valeu")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testNullKindOutsideAPeriodBoundStillBuildsANullValue()
+    {
+        // Scope guard: only a grouping field's period bounds read null as "not set". A null in a filter,
+        // a parameter value or additionalProperties is the question left to the maintainer in #672, so
+        // the shared ValueSpec parser keeps building a NullValue until that is decided.
+        DataCompositionSettings settings = plan(json("{\"filter\":{\"items\":[{\"left\":{" //$NON-NLS-1$
+            + "\"kind\":\"field\",\"value\":\"Quantity\"},\"comparisonType\":\"Equal\"," //$NON-NLS-1$
+            + "\"right\":[{\"kind\":\"null\"}]}]}}")); //$NON-NLS-1$
+
+        DataCompositionFilterItem item = (DataCompositionFilterItem)settings.getFilter().getItems().get(0);
+        assertEquals(1, item.getRight().size());
+        assertTrue(String.valueOf(item.getRight().get(0)), item.getRight().get(0) instanceof NullValue);
+    }
+
+    @Test
+    public void testAnUnsetPeriodBoundIsAbsentFromTheSettingsOutline()
+    {
+        DataCompositionSettings settings = plan(groupFieldSettings(
+            "\"periodAdditionType\":\"Month\",\"periodAdditionBegin\":{\"kind\":\"null\"}," //$NON-NLS-1$
+                + "\"periodAdditionEnd\":{\"kind\":\"null\"}")); //$NON-NLS-1$
+
+        String outline = DcsReadProjection.renderSettingsOutline("Report.Sales#/defaultSettings", //$NON-NLS-1$
+            settings, "en"); //$NON-NLS-1$
+
+        assertTrue(outline, outline.contains("groupFields/items/0`")); //$NON-NLS-1$
+        assertTrue(outline, outline.contains("value: Period")); //$NON-NLS-1$
+        assertTrue(outline, outline.contains("periodAdditionType: Month")); //$NON-NLS-1$
+        assertFalse(outline, outline.contains("periodAdditionBegin")); //$NON-NLS-1$
+        assertFalse(outline, outline.contains("periodAdditionEnd")); //$NON-NLS-1$
+        assertFalse(outline, outline.contains("NullValue")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testNullPeriodBoundsLeaveASchemaEdtCanSerialize() throws Exception
+    {
+        // The defect itself: EDT's serializer threw "Value '...NullValueImpl' serialization is not
+        // implemented" for a NullValue bound, so the report's Template.dcs could not be exported.
+        DataCompositionSchema schema = DcsFactory.eINSTANCE.createDataCompositionSchema();
+        JsonObject body = new JsonObject();
+        body.add("defaultSettings", groupFieldSettings( //$NON-NLS-1$
+            "\"periodAdditionType\":\"Month\",\"periodAdditionBegin\":{\"kind\":\"null\"}," //$NON-NLS-1$
+                + "\"periodAdditionEnd\":{\"kind\":\"null\"}")); //$NON-NLS-1$
+        DcsSettingsWriter.SchemaResult planned = DcsSettingsWriter.planSchema(schema, "upsert", "schema", //$NON-NLS-1$ //$NON-NLS-2$
+            address("Report.Sales"), body, LANGUAGES); //$NON-NLS-1$
+        assertTrue(planned.error(), planned.isSuccess());
+        planned.plan().commit(schema);
+
+        String xml = edtXml(schema);
+
+        assertTrue(xml, xml.contains(">Period<")); //$NON-NLS-1$
+        assertTrue(xml, xml.contains("periodAdditionType>Month<")); //$NON-NLS-1$
+        assertFalse(xml, xml.contains("periodAdditionBegin")); //$NON-NLS-1$
+        assertFalse(xml, xml.contains("periodAdditionEnd")); //$NON-NLS-1$
+        DataCompositionGroupField committed = firstGroupField(schema.getDefaultSettings());
+        assertFalse(committed.eIsSet(PERIOD_BEGIN));
+        assertFalse(committed.eIsSet(PERIOD_END));
+    }
+
+    // #672 also asked how an xsi:nil bound behaves. EDT reads <periodAdditionBegin xsi:nil="true"/> as an
+    // UndefinedValue and writes that value back as the same element, so it is a SET bound, not an absent
+    // one. These two tests start from what EDT's own reader builds out of such a file.
+
+    @Test
+    public void testAnXsiNilPeriodBoundSurvivesAnUpdateThatDoesNotNameItAndBlocksReplace() throws Exception
+    {
+        DataCompositionSchema read = xsiNilBoundSchema();
+
+        DcsSettingsWriter.SettingsResult updated = DcsSettingsWriter.planSettings(read.getDefaultSettings(),
+            GROUP_FIELD_ADDRESS, "update", "grouping", //$NON-NLS-1$ //$NON-NLS-2$
+            json("{\"periodAdditionType\":\"Quarter\"}"), LANGUAGES); //$NON-NLS-1$
+        assertTrue(updated.error(), updated.isSuccess());
+
+        DataCompositionGroupField field = firstGroupField(updated.settings());
+        assertEquals(DataCompositionPeriodAdditionType.QUARTER, field.getPeriodAdditionType());
+        assertTrue("an update that does not name the bound must keep it", //$NON-NLS-1$
+            field.getPeriodAdditionBegin() instanceof UndefinedValue);
+        String xml = edtXml(schemaWith(updated.settings()));
+        assertTrue(xml, XSI_NIL_BEGIN.matcher(xml).find());
+        assertTrue(xml, xml.contains("periodAdditionType>Quarter<")); //$NON-NLS-1$
+
+        // The writer has no ValueSpec for an UndefinedValue, so an authoritative replace would drop the
+        // bound; the shared replace guard lists it as unmodellable and refuses (unchanged by #672).
+        String refusal = DcsMutationGuard.replaceError(read,
+            address("Report.Sales#/defaultSettings/items/0/groupFields/items/0"), DcsReplaceTestCatalogues.schema()); //$NON-NLS-1$
+        assertNotNull("replace must not silently drop an xsi:nil bound", refusal); //$NON-NLS-1$
+        assertTrue(refusal, refusal.contains("UndefinedValue at Report.Sales#/defaultSettings/items/0" //$NON-NLS-1$
+            + "/groupFields/items/0/periodAdditionBegin")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testNullKindClearsAnXsiNilPeriodBoundAndEdtThenWritesNoElement() throws Exception
+    {
+        DataCompositionSchema read = xsiNilBoundSchema();
+
+        DcsSettingsWriter.SettingsResult cleared = DcsSettingsWriter.planSettings(read.getDefaultSettings(),
+            GROUP_FIELD_ADDRESS, "update", "grouping", //$NON-NLS-1$ //$NON-NLS-2$
+            json("{\"periodAdditionBegin\":{\"kind\":\"null\"}}"), LANGUAGES); //$NON-NLS-1$
+        assertTrue(cleared.error(), cleared.isSuccess());
+
+        DataCompositionGroupField field = firstGroupField(cleared.settings());
+        assertNull("{kind:'null'} must clear the xsi:nil bound", field.getPeriodAdditionBegin()); //$NON-NLS-1$
+        assertFalse(field.eIsSet(PERIOD_BEGIN));
+        assertEquals(DataCompositionPeriodAdditionType.MONTH, field.getPeriodAdditionType());
+        DataCompositionSchema clearedSchema = schemaWith(cleared.settings());
+        String xml = edtXml(clearedSchema);
+        assertFalse(xml, xml.contains("periodAdditionBegin")); //$NON-NLS-1$
+        assertTrue(xml, xml.contains("periodAdditionType>Month<")); //$NON-NLS-1$
+        assertNull("a cleared field is fully modelled again", DcsMutationGuard.replaceError(clearedSchema, //$NON-NLS-1$
+            address("Report.Sales#/defaultSettings/items/0/groupFields/items/0"), DcsReplaceTestCatalogues.schema())); //$NON-NLS-1$
+    }
+
     @Test
     public void testRemoveChecksResolvedNodeTypeAndKeepsNestedLegitimateTargets()
     {
@@ -1436,20 +1917,20 @@ public class DcsSettingsWriterTest
         schema.setDefaultSettings(settings);
         DcsAddress target = address("Report.Sales#/defaultSettings"); //$NON-NLS-1$
         assertNull("an empty/supported Structure is fully modelled", //$NON-NLS-1$
-            DcsMutationGuard.replaceError(schema, target));
+            DcsMutationGuard.replaceError(schema, target, DcsReplaceTestCatalogues.schema()));
 
         StructureProperty unsupported = McoreFactory.eINSTANCE.createStructureProperty();
         unsupported.setName("DesignerColor"); //$NON-NLS-1$
         unsupported.setValue(McoreFactory.eINSTANCE.createColorValue());
         additionalProperties.getProperty().add(unsupported);
-        String refusal = DcsMutationGuard.replaceError(schema, target);
+        String refusal = DcsMutationGuard.replaceError(schema, target, DcsReplaceTestCatalogues.schema());
         assertNotNull(refusal);
         assertTrue(refusal, refusal.contains("ColorValue")); //$NON-NLS-1$
         assertTrue(refusal, refusal.contains("additionalProperties")); //$NON-NLS-1$
 
         DataCompositionSchema supported = DcsFactory.eINSTANCE.createDataCompositionSchema();
         supported.setDefaultSettings(plan(settingsBody()));
-        assertNull(DcsMutationGuard.replaceError(supported, target));
+        assertNull(DcsMutationGuard.replaceError(supported, target, DcsReplaceTestCatalogues.schema()));
         DcsSettingsWriter.SchemaResult replaced = DcsSettingsWriter.planSchema(supported,
             "replace", "userSettings", target, //$NON-NLS-1$ //$NON-NLS-2$
             json("{\"selection\":{\"items\":[]}}"), LANGUAGES); //$NON-NLS-1$
@@ -2047,6 +2528,74 @@ public class DcsSettingsWriterTest
         return result.settings();
     }
 
+    /** Settings with one grouping holding one group field on 'Period' plus the given members. */
+    private static JsonObject groupFieldSettings(String members)
+    {
+        return json("{\"items\":[{\"name\":\"G\",\"groupFields\":{\"items\":[{" //$NON-NLS-1$
+            + "\"field\":{\"kind\":\"field\",\"value\":\"Period\"}," + members + "}]}}]}"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** A group field carrying both period bounds next to non-default members. */
+    private static JsonObject boundedGroupFieldSettings()
+    {
+        return groupFieldSettings("\"use\":false,\"groupType\":\"Hierarchy\",\"periodAdditionType\":\"Month\"," //$NON-NLS-1$
+            + "\"periodAdditionBegin\":{\"kind\":\"number\",\"value\":31337}," //$NON-NLS-1$
+            + "\"periodAdditionEnd\":{\"kind\":\"number\",\"value\":31338}"); //$NON-NLS-1$
+    }
+
+    private static void assertBoundedGroupFieldMembersKept(DataCompositionGroupField field)
+    {
+        assertEquals("Period", field.getField().getValue()); //$NON-NLS-1$
+        assertFalse(field.isUse());
+        assertEquals(DataCompositionGroupType.HIERARCHY, field.getGroupType());
+        assertEquals(DataCompositionPeriodAdditionType.MONTH, field.getPeriodAdditionType());
+    }
+
+    private static DataCompositionGroupField firstGroupField(DataCompositionSettings settings)
+    {
+        DataCompositionGroup group = (DataCompositionGroup)settings.getItems().get(0);
+        return (DataCompositionGroupField)group.getGroupFields().getItems().get(0);
+    }
+
+    private static DataCompositionSchema schemaWith(DataCompositionSettings settings)
+    {
+        DataCompositionSchema schema = DcsFactory.eINSTANCE.createDataCompositionSchema();
+        schema.setDefaultSettings(settings);
+        return schema;
+    }
+
+    /** The schema's Template.dcs text as EDT's own serializer writes it on export. */
+    private static String edtXml(DataCompositionSchema schema) throws Exception
+    {
+        DcsV8Serializer serializer = new DcsV8Serializer((IResourceLookup)null);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        serializer.serializeXML(schema, output, serializer.createExportContext((IProject)null, Version.LATEST),
+            new HashMap<String, UUID>(), "\n"); //$NON-NLS-1$
+        return output.toString(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * A schema as EDT's own reader builds it from a Template.dcs whose first group field carries
+     * {@code <periodAdditionBegin xsi:nil="true"/>}. The file comes from EDT's serializer writing an
+     * UndefinedValue bound, so both directions of the xsi:nil mapping are EDT's, not assumed here.
+     */
+    private static DataCompositionSchema xsiNilBoundSchema() throws Exception
+    {
+        DataCompositionSettings settings = plan(groupFieldSettings("\"periodAdditionType\":\"Month\"")); //$NON-NLS-1$
+        firstGroupField(settings).setPeriodAdditionBegin(McoreFactory.eINSTANCE.createUndefinedValue());
+        String xml = edtXml(schemaWith(settings));
+        assertTrue(xml, XSI_NIL_BEGIN.matcher(xml).find());
+
+        DcsV8Serializer reader = new DcsV8Serializer((IDtProject)null, Version.LATEST, (IResourceLookup)null);
+        DataCompositionSchema read = reader.deserializeXML(
+            new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+        assertNotNull(xml, read);
+        Value bound = firstGroupField(read.getDefaultSettings()).getPeriodAdditionBegin();
+        assertTrue("EDT reads an xsi:nil bound as an UndefinedValue: " + bound, //$NON-NLS-1$
+            bound instanceof UndefinedValue);
+        return read;
+    }
+
     private static DataCompositionSettings settingsWithUserFields()
     {
         return plan(json("{\"selection\":{\"items\":[{\"kind\":\"field\",\"field\":{" //$NON-NLS-1$
@@ -2108,6 +2657,24 @@ public class DcsSettingsWriterTest
         }
     }
 
+    private static void seedChartOutputParameters(DataCompositionChart chart)
+    {
+        com._1c.g5.v8.dt.dcs.model.settings.DcsFactory factory =
+            com._1c.g5.v8.dt.dcs.model.settings.DcsFactory.eINSTANCE;
+        com._1c.g5.v8.dt.dcs.model.settings.DataCompositionChartOutputParameterValues chartValues =
+            factory.createDataCompositionChartOutputParameterValues();
+        chartValues.getItems().add(settingsParameter("Title")); //$NON-NLS-1$
+        chart.setOutputParameters(chartValues);
+        for (DataCompositionChartGroup group : Arrays.asList(chart.getPoints().get(0),
+            chart.getSeries().get(0)))
+        {
+            com._1c.g5.v8.dt.dcs.model.settings.DataCompositionChartGroupOutputParameterValues values =
+                factory.createDataCompositionChartGroupOutputParameterValues();
+            values.getItems().add(settingsParameter("Title")); //$NON-NLS-1$
+            group.setOutputParameters(values);
+        }
+    }
+
     private static SettingsParameterValue settingsParameter(String name)
     {
         SettingsParameterValue result = com._1c.g5.v8.dt.dcs.model.settings.DcsFactory.eINSTANCE
@@ -2159,16 +2726,6 @@ public class DcsSettingsWriterTest
     private static JsonObject json(String source)
     {
         return JsonParser.parseString(source).getAsJsonObject();
-    }
-
-    private static void assertUnsupportedChart(String error)
-    {
-        assertTrue(error, error.contains("DataCompositionChart")); //$NON-NLS-1$
-        assertTrue(error, error.contains("authoring it is not supported by this tool")); //$NON-NLS-1$
-        assertTrue(error, error.contains("action='replace', type='schema'")); //$NON-NLS-1$
-        assertTrue(error, error.contains("body={xml:...}")); //$NON-NLS-1$
-        assertTrue(error, error.contains("bare schema root")); //$NON-NLS-1$
-        assertFalse(error, error.contains("no public DCS type")); //$NON-NLS-1$
     }
 
     private static DcsAvailableParameterCollection outputParameters()

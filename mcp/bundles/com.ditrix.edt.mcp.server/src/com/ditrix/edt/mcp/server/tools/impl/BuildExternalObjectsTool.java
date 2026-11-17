@@ -20,6 +20,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -37,6 +39,7 @@ import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.platform.services.core.dump.IExternalObjectDumper;
+import com.ditrix.edt.mcp.server.utils.BmModelResolver;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
@@ -126,6 +129,12 @@ public class BuildExternalObjectsTool implements IMcpTool
 
     /** Timeout (ms) for the background build Job (compile + dump of all objects). */
     private static final long BUILD_TIMEOUT_MS = 300_000L;
+
+    /**
+     * Bound on waiting for the default application's infobase lock inside the build Job - the
+     * same bound {@code infobase_sessions} waits, well inside {@link #BUILD_TIMEOUT_MS}.
+     */
+    private static final long APPLICATION_LOCK_TIMEOUT_MS = 30_000L;
 
     /**
      * Prefix written into each built object's Comment so the deliverable .epf/.erf records when it was
@@ -238,7 +247,8 @@ public class BuildExternalObjectsTool implements IMcpTool
 
         // 3. Refuse only the transient BUILDING state; a missing/closed project falls through
         //    to the value-naming "Project not found" below (same idiom as update_database).
-        String building = ProjectStateChecker.buildingErrorOrNull(projectName);
+        //    A project this server just switched still holds the previous branch's model (#922).
+        String building = ProjectStateChecker.strictWriteErrorOrNull(projectName);
         if (building != null)
         {
             return ToolResult.error(building).toJson();
@@ -376,7 +386,7 @@ public class BuildExternalObjectsTool implements IMcpTool
         if (outsideWorkspace)
         {
             Activator.logWarning(NAME + ": outputDir is OUTSIDE the EDT workspace: " + outputDir //$NON-NLS-1$
-                + " (trusted-caller-only — see README Security & trust model)."); //$NON-NLS-1$
+                + " (trusted-caller-only — see docs/security.md)."); //$NON-NLS-1$
         }
         return OutputDirResolution.ok(outputDir, outsideWorkspace);
     }
@@ -400,7 +410,7 @@ public class BuildExternalObjectsTool implements IMcpTool
         {
             return EnumerationResult.failure(ToolResult.error("IBmModelManager not available").toJson()); //$NON-NLS-1$
         }
-        IBmModel bmModel = bmModelManager.getModel(resolved.project);
+        IBmModel bmModel = BmModelResolver.resolve(resolved.project, bmModelManager).getModel();
         if (bmModel == null)
         {
             return EnumerationResult.failure(ToolResult.error(
@@ -533,19 +543,25 @@ public class BuildExternalObjectsTool implements IMcpTool
                     // has just launched is still STARTING, and EDT starts only a STOPPED one — the
                     // start then fails the whole dump with its "can only start server that is
                     // stopped" refusal. Settling the state first turns that race into a short wait.
-                    StandaloneServerStateRecovery.ensureDefaultApplicationStartable(bc.project);
-                    for (Target target : bc.targets)
-                    {
-                        // The caller stops waiting at BUILD_TIMEOUT_MS and cancels this job, but
-                        // cancellation is cooperative: without this check the job would keep
-                        // deleting outputs and stamping Comments long after the tool reported the
-                        // timeout. Each object is a mutation, so the check belongs per object.
-                        if (monitor.isCanceled())
-                        {
-                            break;
-                        }
-                        results.add(dumpOne(bc, target, buildStamp, monitor));
-                    }
+                    // The pre-flight and every dump run under the default application's infobase
+                    // lock, so an explicit standalone_server stop cannot land between them.
+                    StandaloneServerStateRecovery.ensureDefaultApplicationStartableThen(
+                        ExternalObjectDumpSupport.infobaseProject(bc.project),
+                        APPLICATION_LOCK_TIMEOUT_MS, monitor, "Nothing was built.", () -> { //$NON-NLS-1$
+                            for (Target target : bc.targets)
+                            {
+                                // The caller stops waiting at BUILD_TIMEOUT_MS and cancels this
+                                // job, but cancellation is cooperative: without this check the job
+                                // would keep deleting outputs and stamping Comments long after the
+                                // tool reported the timeout. Each object is a mutation, so the
+                                // check belongs per object.
+                                if (monitor.isCanceled())
+                                {
+                                    break;
+                                }
+                                results.add(dumpOne(bc, target, buildStamp, monitor));
+                            }
+                        });
                 }
                 catch (Throwable t) // NOSONAR a dump failure must be captured, never crash the Job
                 {
@@ -556,22 +572,16 @@ public class BuildExternalObjectsTool implements IMcpTool
         };
 
         // Arm the launch update + restructure auto-confirmers around the whole build (the dump may
-        // route through EDT's "Application update" / "Restructure data" modals). Disarm in finally.
-        LaunchUpdateDialogAutoConfirmer.arm(true, true, true);
-        buildJob.setUser(false);
-        McpJobs.schedule(buildJob);
-        try
+        // route through EDT's "Application update" / "Restructure data" modals).
+        String interrupted = scheduleAndJoinBuild(() -> {
+                buildJob.setUser(false);
+                McpJobs.schedule(buildJob);
+            },
+            () -> buildJob.join(BUILD_TIMEOUT_MS, new NullProgressMonitor()),
+            () -> inFlightBuildError(bc, "External object build was interrupted.")); //$NON-NLS-1$
+        if (interrupted != null)
         {
-            buildJob.join(BUILD_TIMEOUT_MS, new NullProgressMonitor());
-        }
-        catch (InterruptedException e)
-        {
-            Thread.currentThread().interrupt();
-            return inFlightBuildError(bc, "External object build was interrupted."); //$NON-NLS-1$
-        }
-        finally
-        {
-            LaunchUpdateDialogAutoConfirmer.disarm(true, true, true);
+            return interrupted;
         }
 
         if (buildJob.getState() != Job.NONE)
@@ -596,6 +606,92 @@ public class BuildExternalObjectsTool implements IMcpTool
         }
 
         return buildResponse(bc, results, System.currentTimeMillis() - buildStartMs);
+    }
+
+    /** A wait that can be interrupted: {@link Job#join(long, IProgressMonitor)} as a seam. */
+    @FunctionalInterface
+    interface InterruptibleJoin
+    {
+        /**
+         * Waits.
+         *
+         * @throws InterruptedException when the waiting thread is interrupted
+         */
+        void join() throws InterruptedException;
+    }
+
+    /**
+     * Schedules the build and waits for it inside the launch-dialog auto-confirmer window.
+     *
+     * <p>The arm is taken immediately before the {@code try} whose {@code finally} releases it, and
+     * the release runs only when the arm reported that it armed something. An arm without a
+     * workbench display is a no-op; releasing after it anyway would take one count from a
+     * concurrent launch that did arm, and that launch's modals would stop being auto-answered.
+     * Scheduling stands inside the {@code try}, so a scheduling failure still releases the arm.
+     *
+     * @param arm takes the arm and reports whether it armed anything
+     * @param disarm releases the arm
+     * @param schedule schedules the build job
+     * @param join waits for the build job
+     * @param onInterrupted builds the response for an interrupted wait
+     * @return the interrupted-wait response, or {@code null} when the wait ended without an
+     *         interruption (finished or timed out)
+     */
+    static String scheduleAndJoinArmed(BooleanSupplier arm, Runnable disarm, Runnable schedule,
+        InterruptibleJoin join, Supplier<String> onInterrupted)
+    {
+        boolean autoConfirmerArmed = arm.getAsBoolean();
+        try
+        {
+            schedule.run();
+            join.join();
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            return onInterrupted.get();
+        }
+        finally
+        {
+            if (autoConfirmerArmed)
+            {
+                disarm.run();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * {@link #scheduleAndJoinArmed} with the build's own arm and release — the one call
+     * {@code runBuild} makes, so the pair it passes is the pair the tests exercise.
+     *
+     * @param schedule schedules the build job
+     * @param join waits for the build job
+     * @param onInterrupted builds the response for an interrupted wait
+     * @return the interrupted-wait response, or {@code null} when the wait ended without an
+     *         interruption
+     */
+    static String scheduleAndJoinBuild(Runnable schedule, InterruptibleJoin join,
+        Supplier<String> onInterrupted)
+    {
+        return scheduleAndJoinArmed(BuildExternalObjectsTool::armLaunchDialogs,
+            BuildExternalObjectsTool::disarmLaunchDialogs, schedule, join, onInterrupted);
+    }
+
+    /**
+     * Arms the update, session and restructure matchers for the build.
+     *
+     * @return what the auto-confirmer reported: {@code true} only when it armed anything
+     */
+    static boolean armLaunchDialogs()
+    {
+        return LaunchUpdateDialogAutoConfirmer.arm(true, true, true);
+    }
+
+    /** Releases the arm {@link #armLaunchDialogs()} took: the same three matchers. */
+    static void disarmLaunchDialogs()
+    {
+        LaunchUpdateDialogAutoConfirmer.disarm(true, true, true);
     }
 
     /**
@@ -697,6 +793,15 @@ public class BuildExternalObjectsTool implements IMcpTool
      * @param results the per-object result maps
      * @return the JSON response
      */
+    /** Text-channel clients see only this message, not {@code results}, so it carries the first failure's reason. */
+    static String failureMessage(List<Map<String, Object>> results, int built, int failed, long elapsedMs)
+    {
+        String first = results.stream().filter(r -> !Boolean.TRUE.equals(r.get(RES_SUCCESS))).findFirst()
+            .map(r -> ". First failure - " + r.get(RES_NAME) + ": " + r.get(RES_ERROR)).orElse("."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return "Built " + built + " of " + (built + failed) + " external object(s) in " + elapsedMs //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " ms; " + failed + " failed" + first; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     private static String buildResponse(BuildContext bc, List<Map<String, Object>> results, long elapsedMs)
     {
         int built = 0;
@@ -713,14 +818,11 @@ public class BuildExternalObjectsTool implements IMcpTool
             }
         }
 
+        String failure = failureMessage(results, built, failed, elapsedMs);
         boolean allOk = failed == 0;
         ToolResult tr = allOk ? ToolResult.success()
-            : bc.mutationCommitted.get() ? ToolResult.errorAfterMutation("Built " + built //$NON-NLS-1$
-                + " of " + (built + failed) + " external object(s) in " + elapsedMs + " ms; " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + failed + " failed.") //$NON-NLS-1$
-            : ToolResult.error("Built " + built //$NON-NLS-1$
-            + " of " + (built + failed) + " external object(s) in " + elapsedMs + " ms; " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + failed + " failed."); //$NON-NLS-1$
+            : bc.mutationCommitted.get() ? ToolResult.errorAfterMutation(failure)
+            : ToolResult.error(failure);
         tr.put(McpKeys.PROJECT, bc.project.getName())
             .put(KEY_OUTPUT_DIR, bc.outputDir.toString())
             .put(KEY_BUILT, built)

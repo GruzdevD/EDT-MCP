@@ -8,13 +8,17 @@ package com.ditrix.edt.mcp.server.utils;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.function.Consumer;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.NullProgressMonitor;
 
 import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.core.event.BmEvent;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
+import com._1c.g5.v8.bm.integration.event.IBmSyncEventListener;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
@@ -31,9 +35,8 @@ import com.ditrix.edt.mcp.server.tools.base.WriteScope;
  * {@link IBmModel#execute} (writes). This helper collapses that to a lambda and,
  * crucially, makes the read/write choice explicit at the call site:
  * <ul>
- * <li>{@link #read} -&gt; {@link IBmModel#executeReadonlyTask} (a read MUST NOT run
- * in a write-capable transaction - that is exactly the class of bug fixed in
- * {@code 25d7851});</li>
+ * <li>{@link #read} -&gt; {@link IBmModel#executeReadonlyTask}, borrowing the calling
+ * thread's transaction on the same engine when one is already active;</li>
  * <li>{@link #write} -&gt; {@link IBmModel#execute} (the only place a mutation is
  * allowed).</li>
  * </ul>
@@ -73,8 +76,8 @@ public final class BmTransactions
     }
 
     /**
-     * Runs {@code operation} inside a <b>read-only</b> BM transaction
-     * ({@link IBmModel#executeReadonlyTask}). The model must not be mutated here.
+     * Runs {@code operation} in the current transaction on this model engine, or opens a read-only
+     * transaction with {@link IBmModel#executeReadonlyTask}. The operation must not mutate the model.
      *
      * @param model the BM model (must be non-null; resolved by the caller)
      * @param taskName a short task name for diagnostics
@@ -84,6 +87,12 @@ public final class BmTransactions
      */
     public static <T> T read(IBmModel model, String taskName, BmOperation<T> operation)
     {
+        var engine = model.getEngine();
+        IBmTransaction current = engine == null ? null : engine.getCurrentTransaction();
+        if (current != null)
+        {
+            return operation.execute(current, new NullProgressMonitor());
+        }
         return model.executeReadonlyTask(new AbstractBmTask<T>(taskName)
         {
             @Override
@@ -107,19 +116,75 @@ public final class BmTransactions
      */
     public static <T> T write(IBmModel model, String taskName, BmOperation<T> operation)
     {
-        T result = model.execute(new AbstractBmTask<T>(taskName)
+        T result = model.execute(task(taskName, operation));
+        // execute() returned, so the writable BM boundary committed. Record that fact BEFORE any
+        // caller-side identity/render/export work can throw. Project identity is intentionally a
+        // separate signal, supplied by recordWrite/forceExport for the export barrier.
+        WriteScope.recordMutationCommitted();
+        return result;
+    }
+
+    /**
+     * Runs {@code operation} like {@link #write}, but committed through the model's GLOBAL editing
+     * context ({@link IBmModel#getGlobalContext}) - the path EDT's designer and refactorings commit
+     * through. Unlike {@link IBmModel#execute}, that commit schedules EDT's own save of every resource
+     * it touched, including the DELETION of the file of a top object the task detached.
+     * <p>
+     * Side effect, by the platform's design: an editing context (an open editor) that last modified
+     * one of those resources has its unsaved changes saved and its undo history cleared.
+     *
+     * @param model the BM model (must be non-null; resolved by the caller)
+     * @param taskName a short task name for diagnostics
+     * @param operation the write work
+     * @param <T> the result type
+     * @return the operation result
+     */
+    public static <T> T writeInGlobalContext(IBmModel model, String taskName, BmOperation<T> operation)
+    {
+        T result = model.getGlobalContext().execute(task(taskName, operation));
+        // Same contract as write: the boundary committed once execute() returned.
+        WriteScope.recordMutationCommitted();
+        return result;
+    }
+
+    /**
+     * Global-context write with its own synchronous commit event. The task's unique operation ID
+     * excludes other writers' events; the observer must only capture identities, without model reads.
+     */
+    public static <T> T writeInGlobalContext(IBmModel model, String taskName, BmOperation<T> operation,
+        Consumer<BmEvent> onCommit)
+    {
+        AbstractBmTask<T> task = task(taskName, operation);
+        IBmSyncEventListener listener = event -> {
+            if (event.getOperationId() == task.getId())
+            {
+                onCommit.accept(event);
+            }
+        };
+        model.addSyncEventListener(listener);
+        try
+        {
+            T result = model.getGlobalContext().execute(task);
+            WriteScope.recordMutationCommitted();
+            return result;
+        }
+        finally
+        {
+            model.removeSyncEventListener(listener);
+        }
+    }
+
+    /** The BM task wrapping {@code operation}, shared by both write paths. */
+    private static <T> AbstractBmTask<T> task(String taskName, BmOperation<T> operation)
+    {
+        return new AbstractBmTask<T>(taskName)
         {
             @Override
             public T execute(IBmTransaction tx, IProgressMonitor monitor)
             {
                 return operation.execute(tx, monitor);
             }
-        });
-        // execute() returned, so the writable BM boundary committed. Record that fact BEFORE any
-        // caller-side identity/render/export work can throw. Project identity is intentionally a
-        // separate signal, supplied by recordWrite/forceExport for the export barrier.
-        WriteScope.recordMutationCommitted();
-        return result;
+        };
     }
 
     /**
@@ -217,8 +282,9 @@ public final class BmTransactions
         // remember to give one (issue #408). Recorded before the attempt, not after a successful
         // one: a refused submission is not evidence that this call did not write - the model change
         // stands - and for a list submission that threw part way through it is not even evidence
-        // that nothing was queued. No-op outside a write tool's call.
-        WriteScope.recordExportSubmission(project);
+        // that nothing was queued. The FQNs become the call's written-object slice (#643). No-op
+        // outside a write tool's call.
+        WriteScope.recordExportSubmission(project, topObjectFqns);
         try
         {
             IDtProjectManager dtProjectManager = Activator.getDefault().getDtProjectManager();

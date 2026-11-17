@@ -22,13 +22,17 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 
+import com._1c.g5.v8.dt.dcs.model.core.DataCompositionAppearance;
 import com._1c.g5.v8.dt.dcs.model.core.DataCompositionField;
 import com._1c.g5.v8.dt.dcs.model.core.DataCompositionParameter;
 import com._1c.g5.v8.dt.dcs.model.core.DataCompositionParameterValue;
-import com._1c.g5.v8.dt.dcs.model.core.DesignTimeValueValue;
+import com._1c.g5.v8.dt.dcs.model.core.InputParameters;
 import com._1c.g5.v8.dt.dcs.model.core.LocalString;
+import com._1c.g5.v8.dt.dcs.model.core.ParameterValues;
 import com._1c.g5.v8.dt.dcs.model.core.Presentation;
+import com._1c.g5.v8.dt.dcs.model.schema.AvailableValue;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchema;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaParameter;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaCalculatedField;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetLink;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetField;
@@ -36,17 +40,22 @@ import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetFieldFolder
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetObject;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetQuery;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetUnion;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaGroupTemplate;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaTemplateDescription;
 import com._1c.g5.v8.dt.dcs.model.schema.DataSet;
 import com._1c.g5.v8.dt.dcs.model.schema.DataSetField;
+import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionDataParameterValues;
+import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionChart;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionSettings;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionGroup;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionTable;
 import com._1c.g5.v8.dt.dcs.model.settings.StructureItem;
-import com._1c.g5.v8.dt.mcore.BooleanValue;
-import com._1c.g5.v8.dt.mcore.DateValue;
-import com._1c.g5.v8.dt.mcore.NullValue;
-import com._1c.g5.v8.dt.mcore.NumberValue;
-import com._1c.g5.v8.dt.mcore.StringValue;
+import com._1c.g5.v8.dt.dcs.model.settings.DcsPackage;
+import com._1c.g5.v8.dt.dcs.parameters.DcsAvailableParameter;
+import com._1c.g5.v8.dt.dcs.parameters.DcsAvailableParameterCollection;
+import com._1c.g5.v8.dt.mcore.McorePackage;
+import com._1c.g5.v8.dt.mcore.Structure;
+import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.Value;
 import com.ditrix.edt.mcp.server.protocol.McpProtocolHandler;
 import com.ditrix.edt.mcp.server.utils.DcsTargetResolver.TargetKind;
@@ -108,6 +117,34 @@ public final class DcsReadProjection
     private DcsReadProjection()
     {
         // utility class
+    }
+
+    /** Counts the model's root collections and concrete fields, including union/folder descendants. */
+    public static SchemaCounts schemaCounts(DataCompositionSchema schema)
+    {
+        if (schema == null) return new SchemaCounts(0, 0, 0, 0, 0);
+        int fields = 0;
+        for (DataSet dataSet : schema.getDataSets())
+        {
+            var contents = dataSet.eAllContents();
+            while (contents.hasNext())
+            {
+                if (contents.next() instanceof DataCompositionSchemaDataSetField) fields++;
+            }
+        }
+        return new SchemaCounts(schema.getDataSources().size(), schema.getDataSets().size(), fields,
+            schema.getParameters().size(), schema.getSettingsVariants().size());
+    }
+
+    /** Immutable transaction-local model census for XML import verification and confirmation. */
+    public record SchemaCounts(int dataSources, int dataSets, int fields, int parameters, int variants)
+    {
+        @Override
+        public String toString()
+        {
+            return "dataSources=" + dataSources + ", dataSets=" + dataSets //$NON-NLS-1$ //$NON-NLS-2$
+                + ", fields=" + fields + ", parameters=" + parameters + ", variants=" + variants; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
     }
 
     /**
@@ -191,11 +228,6 @@ public final class DcsReadProjection
             return Result.failure(resolution.error);
         }
         NodeRef node = resolution.node;
-        if (isChart(node.value))
-        {
-            return Result.success(renderTextPage(node.address, type, renderFullNode(node, language),
-                characterPageLimit(limit, maxPageChars), offset, false, maxPageChars));
-        }
         String actualType = typeOf(node);
         if (actualType == null)
         {
@@ -272,6 +304,22 @@ public final class DcsReadProjection
             DcsAddress.render(rootFqn, Collections.<String>emptyList()), kind, identity);
     }
 
+    /** Canonical diagnostics plus positional exclusions for indexed entries with duplicate keys. */
+    record ReplacementScope(String address, Set<EObject> outsideScope) { }
+
+    /** Resolves writer-supported index aliases without merging duplicate siblings into the scope. */
+    static ReplacementScope replacementScope(EObject root, DcsAddress target)
+    {
+        if (!target.hasPointer())
+            return new ReplacementScope(target.toString(), Collections.emptySet());
+        Set<EObject> outsideScope = new LinkedHashSet<>();
+        NodeResolution resolved = resolvePointer(target.rootFqn(), root, target.segments(), true,
+            outsideScope);
+        return resolved.isSuccess()
+            ? new ReplacementScope(resolved.node.address, outsideScope)
+            : new ReplacementScope(target.toString(), Collections.emptySet());
+    }
+
     /** Resolves the same canonical pointer used by reads for the read-only options catalogue. */
     static OptionsNode resolveOptionsNode(String rootFqn, EObject root, DcsAddress address)
     {
@@ -322,21 +370,37 @@ public final class DcsReadProjection
         return new ArrayList<>(result);
     }
 
-    /** Lists schema/settings subtypes that the writer cannot reproduce, with canonical addresses. */
-    public static List<String> unmodellableNodes(EObject root, String rootFqn)
+    /** An unsupported node and its loss reason; toString preserves the historical class/address form. */
+    public record Unmodellable(String className, String address, String reason)
     {
+        @Override
+        public String toString()
+        {
+            return className + " at " + address; //$NON-NLS-1$
+        }
+    }
+
+    /** Lists schema/settings subtypes the container writers cannot reproduce, with canonical addresses. */
+    public static List<Unmodellable> unmodellableNodes(EObject root, String rootFqn,
+        DcsWriterCatalogues catalogues)
+    {
+        return unmodellableNodes(root, rootFqn, catalogues, Collections.emptySet());
+    }
+
+    static List<Unmodellable> unmodellableNodes(EObject root, String rootFqn,
+        DcsWriterCatalogues catalogues, Set<EObject> outsideScope)
+    {
+        java.util.Objects.requireNonNull(catalogues);
         if (root == null) return Collections.emptyList();
-        List<String> result = new ArrayList<>();
+        List<Unmodellable> result = new ArrayList<>();
         collectUnmodellable(root, DcsAddress.render(rootFqn, Collections.<String>emptyList()),
-            "", false, result); //$NON-NLS-1$
+            "", catalogues, outsideScope, result); //$NON-NLS-1$
         return result;
     }
 
     private static void collectUnmodellable(EObject object, String address, String collection,
-        boolean inAdditionalProperties, List<String> result)
+        DcsWriterCatalogues catalogues, Set<EObject> outsideScope, List<Unmodellable> result)
     {
-        boolean additionalProperties = inAdditionalProperties
-            || "additionalProperties".equals(collection); //$NON-NLS-1$
         boolean unsupported = object instanceof DataSet
             && !(object instanceof DataCompositionSchemaDataSetQuery)
             && !(object instanceof DataCompositionSchemaDataSetObject)
@@ -345,24 +409,23 @@ public final class DcsReadProjection
                 && !(object instanceof DataCompositionSchemaDataSetField)
                 && !(object instanceof DataCompositionSchemaDataSetFieldFolder)
             || object instanceof StructureItem && !(object instanceof DataCompositionGroup)
-                && !(object instanceof DataCompositionTable)
+                && !(object instanceof DataCompositionTable) && !(object instanceof DataCompositionChart)
             || "nestedSchemas".equals(collection) || "templates".equals(collection) //$NON-NLS-1$ //$NON-NLS-2$
             || "fieldTemplates".equals(collection) || "groupTemplates".equals(collection) //$NON-NLS-1$ //$NON-NLS-2$
             || "groupHeaderTemplates".equals(collection) //$NON-NLS-1$
             || "totalFieldsTemplates".equals(collection); //$NON-NLS-1$
-        if (additionalProperties && object instanceof Value
-            && !isAuthorableAdditionalPropertyValue((Value)object))
+        String reason = unsupported ? "this node is outside the writer's model" : null; //$NON-NLS-1$
+        if (reason == null && object instanceof Value)
         {
-            unsupported = true;
+            reason = valueSlotRefusal((Value)object, catalogues);
         }
-        if (object instanceof DataCompositionParameterValue
-            && !((DataCompositionParameterValue)object).getNestedParameterValues().isEmpty())
+        if (object instanceof DataCompositionParameterValue)
         {
-            unsupported = true;
+            reason = parameterValueRefusal((DataCompositionParameterValue)object, catalogues);
         }
-        if (unsupported)
+        if (reason != null)
         {
-            result.add(object.eClass().getName() + " at " + address); //$NON-NLS-1$
+            result.add(new Unmodellable(object.eClass().getName(), address, reason));
             return;
         }
         for (EReference reference : object.eClass().getEAllContainments())
@@ -370,40 +433,277 @@ public final class DcsReadProjection
             Object value = object.eGet(reference);
             String feature = canonicalFeature(object, reference.getName());
             String featureAddress = child(address, feature);
+            if (value == null && valueSlot(reference).requiresValue())
+            {
+                result.add(new Unmodellable(object.eClass().getName(), address,
+                    DcsSettingsWriter.untypedValueRefusal(null)));
+                continue;
+            }
             if (reference.isMany() && value instanceof List<?>)
             {
                 List<?> children = (List<?>)value;
+                Set<Object> keys = new LinkedHashSet<>();
                 for (int i = 0; i < children.size(); i++)
                 {
                     Object contained = children.get(i);
                     if (contained instanceof EObject)
                     {
                         EObject childObject = (EObject)contained;
+                        // An indexed target excludes duplicate siblings from both key accounting
+                        // and descendant scans, regardless of their position in the collection.
+                        if (outsideScope.contains(childObject)) continue;
                         String childAddress = object instanceof DataSet
                             && "fields".equals(feature) && childObject instanceof DataSetField //$NON-NLS-1$
                                 ? fieldAddress((DataSet)object, (DataSetField)childObject,
                                     featureAddress)
                                 : child(featureAddress,
                                     selector(feature, object, childObject, i));
+                        String keyRefusal = collectionKeyRefusal(object, feature, childObject,
+                            keys, catalogues);
+                        if (keyRefusal != null)
+                        {
+                            // A key failure must not hide descendants from a narrower replace.
+                            result.add(new Unmodellable(childObject.eClass().getName(),
+                                object instanceof DataCompositionAppearance ? address : childAddress,
+                                keyRefusal));
+                        }
                         collectUnmodellable(childObject, childAddress, feature,
-                            additionalProperties, result);
+                            catalogues, outsideScope, result);
                     }
                 }
             }
             else if (value instanceof EObject)
             {
                 collectUnmodellable((EObject)value, featureAddress, feature,
-                    additionalProperties, result);
+                    catalogues, outsideScope, result);
             }
         }
     }
 
-    private static boolean isAuthorableAdditionalPropertyValue(Value value)
+    /** Keys must survive the same object-map or natural-key lookup used by the writer. */
+    private static String collectionKeyRefusal(EObject owner, String collection, EObject item,
+        Set<Object> seen, DcsWriterCatalogues catalogues)
     {
-        return value instanceof DataCompositionField || value instanceof DataCompositionParameter
-            || value instanceof DesignTimeValueValue || value instanceof StringValue
-            || value instanceof NumberValue || value instanceof BooleanValue
-            || value instanceof DateValue || value instanceof NullValue;
+        if (owner instanceof DataCompositionAppearance && FEATURE_ITEMS.equals(collection)
+            && item instanceof DataCompositionParameterValue)
+        {
+            DataCompositionParameter parameter = ((DataCompositionParameterValue)item).getParameter();
+            DcsWriterCatalogues.Lookup lookup = catalogues.appearanceCatalogue();
+            // The item guard reports missing/unresolvable identities and catalogue failures.
+            if (parameter == null || parameter.getValue() == null || lookup.failure() != null)
+                return null;
+            DcsAvailableParameter declared = DcsSettingsWriter.findAppearanceParameter(lookup.parameters(), parameter.getValue());
+            return declared != null && !seen.add(declared)
+                ? "duplicate resolved appearance parameter '" + declared.key(0) //$NON-NLS-1$
+                    + "'; an appearance body can write it only once" : null; //$NON-NLS-1$
+        }
+        String member = null;
+        if (owner instanceof Structure && "property".equals(collection) //$NON-NLS-1$
+            || owner instanceof DataCompositionSchema && NATURAL_NAME_COLLECTIONS.contains(collection)
+            || owner instanceof DataCompositionSchemaDataSetUnion && FEATURE_ITEMS.equals(collection))
+        {
+            member = "name"; //$NON-NLS-1$
+        }
+        else if (owner instanceof DataCompositionSchema && DATA_PATH_COLLECTIONS.contains(collection)
+            || owner instanceof DataSet && "fields".equals(collection)) //$NON-NLS-1$
+        {
+            member = "dataPath"; //$NON-NLS-1$
+        }
+        if (member == null) return null; // Indexed arrays preserve repeated or absent identities.
+        String key = stringFeature(item, member);
+        if (key.isEmpty())
+            return "empty '" + member + "' key; the writer needs a non-empty string"; //$NON-NLS-1$ //$NON-NLS-2$
+        return !seen.add(key) ? "duplicate '" + member + "' key '" + key //$NON-NLS-1$ //$NON-NLS-2$
+            + "'; the writer can write it only once in this collection" : null; //$NON-NLS-1$
+    }
+
+    /**
+     * Writer sinks keyed by their actual EMF feature. DcsWriterValueSlotCoverageTest discovers
+     * Value-bearing accessors/literals in the compiled writers and requires a classification here.
+     */
+    private static final Map<EReference, ValueSlot> VALUE_SLOTS = Map.ofEntries(
+        Map.entry(com._1c.g5.v8.dt.dcs.model.core.DcsPackage.Literals
+            .DATA_COMPOSITION_PARAMETER_VALUE__PARAMETER, ValueSlot.PARAMETER),
+        Map.entry(com._1c.g5.v8.dt.dcs.model.core.DcsPackage.Literals
+            .DATA_COMPOSITION_PARAMETER_VALUE__VALUES, ValueSlot.PARAMETER),
+        Map.entry(com._1c.g5.v8.dt.dcs.model.core.DcsPackage.Literals
+            .PRESENTATION__LOCAL_VALUE, ValueSlot.PRESENTATION),
+        Map.entry(DcsPackage.Literals.DATA_COMPOSITION_GROUP_FIELD__FIELD, ValueSlot.FIELD),
+        Map.entry(DcsPackage.Literals.DATA_COMPOSITION_SELECTED_FIELD__FIELD, ValueSlot.FIELD),
+        Map.entry(DcsPackage.Literals.DATA_COMPOSITION_SELECTED_FIELD_GROUP__FIELD, ValueSlot.FIELD),
+        Map.entry(DcsPackage.Literals.DATA_COMPOSITION_ORDER_ITEM__FIELD, ValueSlot.FIELD),
+        Map.entry(DcsPackage.Literals.DATA_COMPOSITION_APPEARANCE_FIELD__FIELD, ValueSlot.FIELD),
+        Map.entry(DcsPackage.Literals.DATA_COMPOSITION_FILTER_ITEM__LEFT, ValueSlot.UNTYPED),
+        Map.entry(DcsPackage.Literals.DATA_COMPOSITION_FILTER_ITEM__RIGHT, ValueSlot.UNTYPED),
+        Map.entry(DcsPackage.Literals.DATA_COMPOSITION_GROUP_FIELD__PERIOD_ADDITION_BEGIN,
+            ValueSlot.PERIOD_BOUND),
+        Map.entry(DcsPackage.Literals.DATA_COMPOSITION_GROUP_FIELD__PERIOD_ADDITION_END,
+            ValueSlot.PERIOD_BOUND),
+        Map.entry(DcsPackage.Literals.DATA_COMPOSITION_USER_FIELDS_VARIANT__VALUE, ValueSlot.UNTYPED),
+        Map.entry(com._1c.g5.v8.dt.dcs.model.schema.DcsPackage.Literals
+            .DATA_COMPOSITION_SCHEMA_PARAMETER__VALUES, ValueSlot.DECLARED),
+        Map.entry(com._1c.g5.v8.dt.dcs.model.schema.DcsPackage.Literals
+            .AVAILABLE_VALUE__VALUE, ValueSlot.REQUIRED_DECLARED),
+        Map.entry(McorePackage.Literals.STRUCTURE_PROPERTY__VALUE, ValueSlot.REQUIRED_UNTYPED),
+        Map.entry(McorePackage.Literals.LINE__STYLE, ValueSlot.LINE_STYLE),
+        Map.entry(McorePackage.Literals.TYPED_VALUE_LIST_ITEM__VALUE, ValueSlot.UNTYPED));
+
+    enum ValueSlot
+    {
+        UNTYPED, FIELD, PERIOD_BOUND, DECLARED, PARAMETER, PRESENTATION, UNREGISTERED,
+        REQUIRED_UNTYPED, REQUIRED_DECLARED, LINE_STYLE;
+
+        boolean requiresValue()
+        {
+            return this == REQUIRED_UNTYPED || this == REQUIRED_DECLARED;
+        }
+    }
+
+    static ValueSlot valueSlot(EReference feature)
+    {
+        return feature == null ? ValueSlot.UNREGISTERED
+            : VALUE_SLOTS.getOrDefault(feature, ValueSlot.UNREGISTERED);
+    }
+
+    private static String valueSlotRefusal(Value stored, DcsWriterCatalogues catalogues)
+    {
+        return switch (valueSlot(stored.eContainmentFeature()))
+        {
+            // The containing LineValue is checked as one value, including the enum's type and literal.
+            case LINE_STYLE -> null;
+            case UNTYPED, REQUIRED_UNTYPED -> DcsSettingsWriter.untypedValueRefusal(stored);
+            case FIELD -> DcsSettingsWriter.fieldValueRefusal(stored);
+            case PERIOD_BOUND -> DcsSettingsWriter.periodBoundRefusal(stored);
+            case DECLARED, REQUIRED_DECLARED -> DcsWriter.declaredValueRefusal(schemaValueType(stored.eContainer()),
+                stored, catalogues.languages());
+            // The parent checks identity, catalogue, count, and each value with its actual writer.
+            case PARAMETER -> null;
+            case PRESENTATION -> DcsSettingsWriter.presentationValueRefusal((LocalString)stored,
+                catalogues.languages());
+            case UNREGISTERED -> "this value slot has no registered writer"; //$NON-NLS-1$
+        };
+    }
+
+    private static TypeDescription schemaValueType(EObject owner)
+    {
+        if (owner instanceof AvailableValue) owner = owner.eContainer();
+        if (owner instanceof DataCompositionSchemaParameter)
+            return ((DataCompositionSchemaParameter)owner).getValueType();
+        if (owner instanceof DataCompositionSchemaDataSetField)
+            return ((DataCompositionSchemaDataSetField)owner).getValueType();
+        if (owner instanceof DataCompositionSchemaCalculatedField)
+            return ((DataCompositionSchemaCalculatedField)owner).getValueType();
+        return null;
+    }
+
+    /** Tests each item against the constructor of its containing parameter collection. */
+    private static String parameterValueRefusal(DataCompositionParameterValue item,
+        DcsWriterCatalogues catalogues)
+    {
+        EObject appearanceRoot = item.eContainer();
+        while (appearanceRoot instanceof DataCompositionParameterValue) appearanceRoot = appearanceRoot.eContainer();
+        boolean appearance = appearanceRoot instanceof DataCompositionAppearance;
+        if (!item.getNestedParameterValues().isEmpty() && !appearance)
+        {
+            return "nested parameter values cannot be written"; //$NON-NLS-1$
+        }
+        EObject holder = item.eContainer();
+        List<Value> values = item.getValues();
+        // The parameter name is written through the same untyped 'parameter' ValueSpec everywhere.
+        String identity = item.getParameter() == null ? null
+            : DcsSettingsWriter.untypedValueRefusal(item.getParameter());
+        if (holder instanceof InputParameters)
+        {
+            if (item.getParameter() == null)
+            {
+                return "the item has no parameter; an input-parameter body needs a parameter ValueSpec"; //$NON-NLS-1$
+            }
+            if (identity != null) return "its parameter: " + identity; //$NON-NLS-1$
+            for (int i = 0; i < values.size(); i++)
+            {
+                String refusal = DcsSettingsWriter.untypedValueRefusal(values.get(i));
+                if (refusal != null)
+                {
+                    return "value #" + i + ": " + refusal //$NON-NLS-1$ //$NON-NLS-2$
+                        + "; input-parameter values are untyped ValueSpecs"; //$NON-NLS-1$
+                }
+            }
+            return null;
+        }
+        if (holder instanceof DataCompositionDataParameterValues)
+        {
+            if (identity != null) return "its parameter: " + identity; //$NON-NLS-1$
+            // One value is restated by 'value', several by 'values'; each through value().
+            return eachValueRefusal(values, DcsSettingsWriter::untypedValueRefusal);
+        }
+        // Like applyParameterValuesPath, a blank output item needs no typed definition.
+        if (holder instanceof ParameterValues && !(holder instanceof DataCompositionAppearance)
+            && item.getParameter() == null && values.isEmpty()) return null;
+        DcsWriterCatalogues.Lookup catalogue = appearance
+            ? catalogues.appearanceCatalogue() : holder instanceof ParameterValues
+                ? catalogues.outputCatalogue((ParameterValues)holder) : null;
+        if (catalogue == null || catalogue.failure() != null)
+        {
+            return "typed catalogue for platform " + catalogues.version() + " unavailable: " //$NON-NLS-1$ //$NON-NLS-2$
+                + (catalogue == null ? "missing parameter-value holder" : catalogue.failure()); //$NON-NLS-1$
+        }
+        String name = item.getParameter() == null ? null : item.getParameter().getValue();
+        if (name == null)
+        {
+            return "the item has no parameter name; the typed writer needs one"; //$NON-NLS-1$
+        }
+        DcsAvailableParameterCollection parameters = catalogue.parameters();
+        if (appearance && holder instanceof DataCompositionParameterValue)
+        {
+            DataCompositionParameter parent = ((DataCompositionParameterValue)holder).getParameter();
+            DcsAvailableParameter parentDefinition = parent == null ? null
+                : DcsSettingsWriter.findAppearanceParameter(parameters, parent.getValue());
+            if (parentDefinition == null) return "nested appearance parameter needs a declared parent; copy its name from options";
+            parameters = parentDefinition.getSubParameters();
+        }
+        DcsAvailableParameter declared = appearance
+            ? DcsSettingsWriter.findAppearanceParameter(parameters, name) : parameters.findItem(name);
+        if (declared == null)
+        {
+            return "'" + name + "' is not in the platform catalogue for " + catalogues.version(); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (values.size() > 1)
+        {
+            if (appearance)
+            {
+                return values.size() + " values; an appearance key writes one typed value"; //$NON-NLS-1$
+            }
+            return values.size() + " values; '" + name //$NON-NLS-1$
+                + "' takes one typed value; only data parameters accept 'values'"; //$NON-NLS-1$
+        }
+        if (values.isEmpty())
+        {
+            // An appearance parent may carry only nested values; a leaf needs its own value.
+            return appearance && item.getNestedParameterValues().isEmpty()
+                ? "no value; an appearance body has no valueless form - pass a value or nestedParameterValues" : null;
+        }
+        return eachValueRefusal(values, value -> appearance
+            ? DcsSettingsWriter.typedValueRefusal(declared.defValue(),
+                value, catalogues.languages(), catalogues.namedColors())
+            : DcsSettingsWriter.outputValueRefusal(declared,
+                value, catalogues.languages(), catalogues.namedColors()));
+    }
+
+    /**
+     * A data parameter's values are judged individually against its ValueSpec writer. Typed output
+     * and appearance callers have already refused several values; a data-parameter refusal names
+     * the position of the value it cannot restate.
+     */
+    private static String eachValueRefusal(List<Value> values,
+        java.util.function.Function<Value, String> writerRefusal)
+    {
+        if (values.size() == 1) return writerRefusal.apply(values.get(0));
+        for (int i = 0; i < values.size(); i++)
+        {
+            String refusal = writerRefusal.apply(values.get(i));
+            if (refusal != null) return "value #" + i + ": " + refusal; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return null;
     }
 
     private static void collectReferences(EObject object, String address, String kind,
@@ -525,6 +825,13 @@ public final class DcsReadProjection
             child(rootFqn, "calculatedFields")); //$NON-NLS-1$
         appendCount(result, "Total fields", size(schema, "totalFields"), child(rootFqn, "totalFields")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         appendCount(result, "Parameters", size(schema, "parameters"), child(rootFqn, "parameters")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        appendCount(result, "Templates", size(schema, DcsTemplateProjection.TEMPLATES), //$NON-NLS-1$
+            child(rootFqn, DcsTemplateProjection.TEMPLATES));
+        appendCount(result, "Group templates", size(schema, DcsTemplateProjection.GROUP_TEMPLATES), //$NON-NLS-1$
+            child(rootFqn, DcsTemplateProjection.GROUP_TEMPLATES));
+        appendCount(result, "Group header templates", //$NON-NLS-1$
+            size(schema, DcsTemplateProjection.GROUP_HEADER_TEMPLATES),
+            child(rootFqn, DcsTemplateProjection.GROUP_HEADER_TEMPLATES));
         DataCompositionSettings settings = schema == null ? null : schema.getDefaultSettings();
         appendCount(result, "Default settings", settings == null ? 0 : 1, child(rootFqn, "defaultSettings")); //$NON-NLS-1$ //$NON-NLS-2$
         appendSettingsCounts(result, settings, child(rootFqn, "defaultSettings")); //$NON-NLS-1$
@@ -541,6 +848,13 @@ public final class DcsReadProjection
                 directItems(rootFqn, schema, "calculatedFields"), language); //$NON-NLS-1$
             addNameSection(sections, "Total fields", directItems(rootFqn, schema, "totalFields"), language); //$NON-NLS-1$ //$NON-NLS-2$
             addNameSection(sections, "Parameters", directItems(rootFqn, schema, "parameters"), language); //$NON-NLS-1$ //$NON-NLS-2$
+            addRowsSection(sections, "Templates", MarkdownUtils.tableHeader("Name", "Summary", "Address"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                DcsTemplateProjection.templateRows(schema, rootFqn));
+            addRowsSection(sections, "Group templates", MarkdownUtils.tableHeader("Address", "Binding"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                DcsTemplateProjection.bindingRows(schema, rootFqn, DcsTemplateProjection.GROUP_TEMPLATES));
+            addRowsSection(sections, "Group header templates", MarkdownUtils.tableHeader("Address", "Binding"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                DcsTemplateProjection.bindingRows(schema, rootFqn,
+                    DcsTemplateProjection.GROUP_HEADER_TEMPLATES));
             addNameSection(sections, "Variants", directItems(rootFqn, schema, MODEL_FEATURE_VARIANTS), language); //$NON-NLS-1$
         }
         return renderSummaryPage(result.toString(), sections,
@@ -656,6 +970,15 @@ public final class DcsReadProjection
         }
         sections.add(new SummarySection(title,
             MarkdownUtils.tableHeader("Name", "Kind", "Address"), rows)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    private static void addRowsSection(List<SummarySection> sections, String title, String header,
+        List<String> rows)
+    {
+        if (!rows.isEmpty())
+        {
+            sections.add(new SummarySection(title, header, rows));
+        }
     }
 
     private static void addDataSetLinksSection(List<SummarySection> sections, String rootFqn,
@@ -956,7 +1279,8 @@ public final class DcsReadProjection
         return false;
     }
 
-    private static int afterStringLiteral(String expression, int openingQuote)
+    /** Index just past the 1C string literal opening at {@code openingQuote} ({@code ""} escapes a quote). */
+    static int afterStringLiteral(String expression, int openingQuote)
     {
         int current = openingQuote + 1;
         while (current < expression.length())
@@ -988,9 +1312,10 @@ public final class DcsReadProjection
         String settingsFeature = kind == TargetKind.DYNAMIC_LIST ? "listSettings" : "defaultSettings"; //$NON-NLS-1$ //$NON-NLS-2$
         EObject settings = asEObject(featureValue(root, settingsFeature));
         String settingsAddress = child(rootFqn, settingsFeature);
-        if ("grouping".equals(type) || "table".equals(type)) //$NON-NLS-1$ //$NON-NLS-2$
+        if (isStructureKind(type))
         {
-            String className = "grouping".equals(type) ? "DataCompositionGroup" : "DataCompositionTable"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            String className = "grouping".equals(type) ? "DataCompositionGroup" //$NON-NLS-1$ //$NON-NLS-2$
+                : "table".equals(type) ? "DataCompositionTable" : "DataCompositionChart"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             List<NodeRef> matches = new ArrayList<>();
             collectByClass(settings, settingsAddress, className, matches);
             return CollectionRef.success(child(settingsAddress, FEATURE_ITEMS), matches);
@@ -1134,11 +1459,17 @@ public final class DcsReadProjection
         result.append(MarkdownUtils.tableHeader("Name", "Kind", "Address", "Note")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         for (NodeRef item : page)
         {
-            String note = isChart(item.value)
-                ? "Read-only existing chart; chart authoring is unsupported." //$NON-NLS-1$
-                : isNestedDataSet(item.value)
-                    ? "Read-only existing nested data set; nested-data-set authoring is unsupported." //$NON-NLS-1$
-                    : ""; //$NON-NLS-1$
+            String note = isNestedDataSet(item.value)
+                ? "Read-only existing nested data set; nested-data-set authoring is unsupported." //$NON-NLS-1$
+                : ""; //$NON-NLS-1$
+            if (item.value instanceof DataCompositionSchemaTemplateDescription)
+            {
+                note = DcsTemplateProjection.summary((EObject)item.value);
+            }
+            else if (item.value instanceof DataCompositionSchemaGroupTemplate)
+            {
+                note = DcsTemplateProjection.binding((DataCompositionSchemaGroupTemplate)item.value);
+            }
             if (item.value instanceof EObject
                 && "SettingsVariant".equals(((EObject)item.value).eClass().getName())) //$NON-NLS-1$
             {
@@ -1289,6 +1620,18 @@ public final class DcsReadProjection
 
     private static NodeResolution resolvePointer(String rootFqn, EObject root, List<String> segments)
     {
+        return resolvePointer(rootFqn, root, segments, false);
+    }
+
+    private static NodeResolution resolvePointer(String rootFqn, EObject root, List<String> segments,
+        boolean indexFallback)
+    {
+        return resolvePointer(rootFqn, root, segments, indexFallback, null);
+    }
+
+    private static NodeResolution resolvePointer(String rootFqn, EObject root, List<String> segments,
+        boolean indexFallback, Set<EObject> outsideScope)
+    {
         Object current = root;
         EObject owner = null;
         String currentAddress = rootFqn;
@@ -1314,13 +1657,15 @@ public final class DcsReadProjection
                             virtualFields)));
                 }
                 String fieldSelector = segments.get(++i);
-                int selected = find(virtualFields, collectionName, object, fieldSelector);
+                int selected = find(virtualFields, collectionName, object, fieldSelector, indexFallback);
                 if (selected < 0)
                 {
                     return failedSegment(fieldSelector, currentAddress,
                         selectors(virtualFields, collectionName, object));
                 }
                 current = virtualFields.get(selected);
+                excludeDuplicateSiblings(virtualFields, collectionName, object, fieldSelector,
+                    selected, outsideScope);
                 currentAddress = child(currentAddress, selector(collectionName, object,
                     (EObject)current, selected));
                 continue;
@@ -1364,17 +1709,35 @@ public final class DcsReadProjection
                     object, nodeRefs(currentAddress, object, collectionName, list)));
             }
             String selector = segments.get(++i);
-            int selected = find(list, collectionName, object, selector);
+            int selected = find(list, collectionName, object, selector, indexFallback);
             if (selected < 0)
             {
                 return failedSegment(selector, currentAddress, selectors(list, collectionName, object));
             }
             current = list.get(selected);
+            excludeDuplicateSiblings(list, collectionName, object, selector, selected, outsideScope);
             currentAddress = child(currentAddress, selector(collectionName, object,
                 (EObject)current, selected));
         }
         return NodeResolution.success(new NodeRef(current, currentAddress, collectionName,
             owner, Collections.<NodeRef> emptyList()));
+    }
+
+    /** An index selects one entry even when its natural-key address also names other entries. */
+    private static void excludeDuplicateSiblings(List<?> list, String collection, EObject owner,
+        String requested, int selected, Set<EObject> outsideScope)
+    {
+        if (outsideScope == null || !DcsAddress.isZeroBasedIndex(requested)) return;
+        String key = selector(collection, owner, (EObject)list.get(selected), selected);
+        for (int i = 0; i < list.size(); i++)
+        {
+            Object sibling = list.get(i);
+            if (i != selected && sibling instanceof EObject
+                && key.equals(selector(collection, owner, (EObject)sibling, i)))
+            {
+                outsideScope.add((EObject)sibling);
+            }
+        }
     }
 
     private static NodeResolution failedSegment(String segment, String address, List<String> existing)
@@ -1405,7 +1768,8 @@ public final class DcsReadProjection
         return remaining == 0 ? available : available + ", ... (" + remaining + " more)"; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    private static int find(List<?> list, String collection, EObject owner, String requested)
+    private static int find(List<?> list, String collection, EObject owner, String requested,
+        boolean indexFallback)
     {
         for (int i = 0; i < list.size(); i++)
         {
@@ -1415,6 +1779,11 @@ public final class DcsReadProjection
             {
                 return i;
             }
+        }
+        if (indexFallback && DcsAddress.isZeroBasedIndex(requested))
+        {
+            int index = Integer.parseInt(requested);
+            if (index < list.size()) return index;
         }
         return -1;
     }
@@ -1491,11 +1860,6 @@ public final class DcsReadProjection
                 + MarkdownUtils.escapeMarkdown(displayValue(node.value, language)) + '\n';
         }
         EObject object = (EObject)node.value;
-        if (isChart(object))
-        {
-            return "# Existing DCS chart\n\n" //$NON-NLS-1$
-                + "This chart is visible read-only; chart authoring is unsupported.\n"; //$NON-NLS-1$
-        }
         if (isNestedDataSet(object))
         {
             return "# Existing DCS nested data set\n\n" //$NON-NLS-1$
@@ -1546,11 +1910,56 @@ public final class DcsReadProjection
                     .append(renderSettingsOutline(child(node.address, "settings"), settings, language)); //$NON-NLS-1$
             }
         }
+        else if (DcsTemplateProjection.isNode(object))
+        {
+            // The body has no addressable read type, so it is summarised rather than outlined.
+            DcsTemplateProjection.appendNode(result, object, node.address,
+                parentAddress(parentAddress(node.address)));
+        }
         else
         {
             appendContainedOutline(result, object, node.address, language);
         }
+        if (object instanceof DataCompositionChart)
+        {
+            appendChartReferences(result, (DataCompositionChart)object, node.address);
+        }
+        appendWritableValue(result, object, node.address);
         return result.toString();
+    }
+
+    /** The references a chart draws from, so a read confirms what a write validated. */
+    private static void appendChartReferences(StringBuilder result, DataCompositionChart chart,
+        String address)
+    {
+        List<DcsChartReferences.Reference> references = DcsChartReferences.references(chart, address);
+        result.append("\n## Chart references\n\n") //$NON-NLS-1$
+            .append("Points are the categories, series split them, and selection holds the ") //$NON-NLS-1$
+            .append("measures, which must be resources. Drawn is 'no' when the item, a group or ") //$NON-NLS-1$
+            .append("folder holding it, the chart, or a structure group above the chart is ") //$NON-NLS-1$
+            .append("switched off; such a reference is not drawn and not checked.\n\n"); //$NON-NLS-1$
+        boolean chartDrawn = DcsChartReferences.isDrawn(chart);
+        boolean measured = false;
+        if (references.isEmpty())
+        {
+            result.append("_(no references)_\n"); //$NON-NLS-1$
+        }
+        else
+        {
+            result.append(MarkdownUtils.tableHeader("Role", "Field", "Address", "Drawn")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            for (DcsChartReferences.Reference reference : references)
+            {
+                measured |= reference.use && DcsChartReferences.ROLE_MEASURE.equals(reference.role);
+                result.append(MarkdownUtils.tableRow(reference.role,
+                    reference.field == null ? "(auto)" : reference.field, reference.address, //$NON-NLS-1$
+                    chartDrawn && reference.use ? "yes" : "no")); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        if (chartDrawn && !measured)
+        {
+            // The same condition the chart guard counts as a broken chart.
+            result.append("\nThe chart has no enabled measure, so it draws nothing.\n"); //$NON-NLS-1$
+        }
     }
 
     private static void appendScalarTable(StringBuilder result, EObject object, String language,
@@ -1753,12 +2162,6 @@ public final class DcsReadProjection
         int depth, String language)
     {
         indent(result, depth);
-        if (isChart(object))
-        {
-            result.append("- DataCompositionChart — `").append(address) //$NON-NLS-1$
-                .append("` — read-only; chart authoring is unsupported.\n"); //$NON-NLS-1$
-            return;
-        }
         if (isNestedDataSet(object))
         {
             result.append("- DataCompositionSchemaNestedDataSet — `").append(address) //$NON-NLS-1$
@@ -1779,6 +2182,18 @@ public final class DcsReadProjection
                 .append('\n');
         }
         appendChildren(result, object, address, depth + 1, language);
+        appendWritableValue(result, object, address);
+    }
+
+    private static void appendWritableValue(StringBuilder result, EObject object, String address)
+    {
+        com.google.gson.JsonElement body = object instanceof DataCompositionAppearance
+            ? DcsSettingsWriter.appearanceBody((DataCompositionAppearance)object)
+            : object instanceof com._1c.g5.v8.dt.mcore.LineValue
+                || object instanceof com._1c.g5.v8.dt.mcore.StandardPeriodValue
+                    ? DcsSettingsWriter.valueSpec((Value)object) : null;
+        if (body != null) result.append("\nWritable value at `").append(address)
+            .append("`:\n\n```json\n").append(body).append("\n```\n");
     }
 
     private static void appendChildren(StringBuilder result, EObject object, String address,
@@ -1984,6 +2399,10 @@ public final class DcsReadProjection
         {
             return "table"; //$NON-NLS-1$
         }
+        if (name.contains("DataCompositionChart")) //$NON-NLS-1$
+        {
+            return "chart"; //$NON-NLS-1$
+        }
         return null;
     }
 
@@ -2000,6 +2419,9 @@ public final class DcsReadProjection
             case "dataSets": //$NON-NLS-1$
                 return "dataSet"; //$NON-NLS-1$
             case "dataSetLinks": //$NON-NLS-1$
+            case DcsTemplateProjection.TEMPLATES:
+            case DcsTemplateProjection.GROUP_TEMPLATES:
+            case DcsTemplateProjection.GROUP_HEADER_TEMPLATES:
                 return TYPE_SCHEMA;
             case "fields": //$NON-NLS-1$
                 return "field"; //$NON-NLS-1$
@@ -2027,6 +2449,11 @@ public final class DcsReadProjection
 
     private static String selector(String collection, EObject owner, EObject item, int index)
     {
+        if (DcsTemplateProjection.TEMPLATES.equals(collection) && owner instanceof DataCompositionSchema)
+        {
+            // Not a NATURAL_NAME_COLLECTIONS member: that set also drives the writer's key checks.
+            return DcsTemplateProjection.templateSelector((DataCompositionSchema)owner, item, index);
+        }
         boolean unionItems = FEATURE_ITEMS.equals(collection)
             && owner instanceof DataCompositionSchemaDataSetUnion;
         if (NATURAL_NAME_COLLECTIONS.contains(collection) || unionItems)
@@ -2077,13 +2504,13 @@ public final class DcsReadProjection
 
     private static boolean isStructureKind(String type)
     {
-        return "grouping".equals(type) || "table".equals(type); //$NON-NLS-1$ //$NON-NLS-2$
+        return "grouping".equals(type) || "table".equals(type) || "chart".equals(type); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static Result structureCollectionTypeMismatch(String requested, String address)
     {
         return Result.failure("Type '" + requested + "' does not match structure collection '" //$NON-NLS-1$ //$NON-NLS-2$
-            + address + "' for a read. It is polymorphic (groupings and tables), so read this " //$NON-NLS-1$
+            + address + "' for a read. It is polymorphic (groupings, tables and charts), so read this " //$NON-NLS-1$
             + "same address with type='userSettings'; read one structure item by its own type at '" //$NON-NLS-1$
             + address + "/<index>'. For a write, type='" + requested //$NON-NLS-1$
             + "' is accepted at this same address because the write type describes the body, " //$NON-NLS-1$
@@ -2101,7 +2528,7 @@ public final class DcsReadProjection
             + "body, not the settings target."); //$NON-NLS-1$
     }
 
-    private static String boundedTableCell(String value, String address)
+    static String boundedTableCell(String value, String address)
     {
         if (value == null || value.length() <= MAX_TABLE_CELL_CHARS)
         {
@@ -2231,12 +2658,6 @@ public final class DcsReadProjection
         return value instanceof DataCompositionSettings ? (DataCompositionSettings)value : null;
     }
 
-    private static boolean isChart(Object value)
-    {
-        return value instanceof EObject && DcsUnsupportedAuthoring.CHART_CLASS
-            .equals(((EObject)value).eClass().getName());
-    }
-
     private static boolean isNestedDataSet(Object value)
     {
         return value instanceof EObject && DcsUnsupportedAuthoring.NESTED_DATA_SET_CLASS
@@ -2273,7 +2694,7 @@ public final class DcsReadProjection
         return canonicalName;
     }
 
-    private static String child(String address, String decodedSegment)
+    static String child(String address, String decodedSegment)
     {
         DcsAddress.ParseResult parsed = DcsAddress.parse(address);
         if (!parsed.isSuccess())

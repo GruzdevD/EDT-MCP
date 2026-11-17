@@ -22,7 +22,9 @@ import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.McpKeys;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.ApplicationSupport;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
+import com.ditrix.edt.mcp.server.utils.LaunchOverrides;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.e1c.g5.dt.applications.ApplicationException;
 import com.e1c.g5.dt.applications.IApplication;
@@ -52,6 +54,12 @@ public class CreateLaunchConfigTool implements IMcpTool
 
     /** Param/output key: client kind selector (thin/thick/web). */
     private static final String KEY_CLIENT_TYPE = "clientType"; //$NON-NLS-1$
+
+    /** Input/output key: native EDT automated-testing mode. */
+    private static final String KEY_AUTOMATED_TESTING_MODE = "automatedTestingMode"; //$NON-NLS-1$
+
+    /** Input/output key: native EDT test-client port. */
+    private static final String KEY_AUTOMATED_TESTING_PORT = "automatedTestingPort"; //$NON-NLS-1$
 
     /** clientType enum value: thick client. */
     private static final String KEY_THICK = "thick"; //$NON-NLS-1$
@@ -140,6 +148,12 @@ public class CreateLaunchConfigTool implements IMcpTool
                 "Application (infobase) ID from get_applications. " //$NON-NLS-1$
                 + "If omitted the project's default application is used. " //$NON-NLS-1$
                 + "If the project has no applications, the call is rejected with a hint.") //$NON-NLS-1$
+            .enumProperty(KEY_AUTOMATED_TESTING_MODE,
+                "Native EDT testing mode; runtime-client configurations only.", //$NON-NLS-1$
+                LaunchConfigUtils.VALUE_AUTOMATED_TESTING_TEST_CLIENT,
+                LaunchConfigUtils.VALUE_AUTOMATED_TESTING_TEST_MANAGER)
+            .integerProperty(KEY_AUTOMATED_TESTING_PORT,
+                "TESTCLIENT only: port 1..65535; omitted uses EDT default 1538.") //$NON-NLS-1$
             .build();
     }
 
@@ -155,6 +169,13 @@ public class CreateLaunchConfigTool implements IMcpTool
             .stringProperty(McpKeys.APPLICATION_ID,
                 "Application ID stored in the config (real IApplicationManager id).") //$NON-NLS-1$
             .stringProperty("type", "Launch configuration type id.") //$NON-NLS-1$ //$NON-NLS-2$
+            .enumProperty(KEY_AUTOMATED_TESTING_MODE,
+                "Persisted native EDT testing mode; absent when not requested.", //$NON-NLS-1$
+                LaunchConfigUtils.VALUE_AUTOMATED_TESTING_TEST_CLIENT,
+                LaunchConfigUtils.VALUE_AUTOMATED_TESTING_TEST_MANAGER)
+            .integerProperty(KEY_AUTOMATED_TESTING_PORT,
+                "Configured TESTCLIENT port from the saved configuration or EDT default 1538; absent without " //$NON-NLS-1$
+                    + "TESTCLIENT or when unreadable. This launch setting does not confirm a listening socket.") //$NON-NLS-1$
             .stringProperty("message", "Human-readable status message.") //$NON-NLS-1$ //$NON-NLS-2$
             .build();
     }
@@ -179,6 +200,16 @@ public class CreateLaunchConfigTool implements IMcpTool
         String clientTypeParam = JsonUtils.extractStringArgument(params, KEY_CLIENT_TYPE);
         String nameParam = JsonUtils.extractStringArgument(params, "name"); //$NON-NLS-1$
         String applicationIdParam = JsonUtils.extractStringArgument(params, McpKeys.APPLICATION_ID);
+        String automatedTestingPortInput = JsonUtils.extractStringArgument(params, KEY_AUTOMATED_TESTING_PORT);
+        LaunchOverrides testingOverrides = LaunchOverrides.of(null, null, null,
+            JsonUtils.extractStringArgument(params, KEY_AUTOMATED_TESTING_MODE),
+            params != null && params.containsKey(KEY_AUTOMATED_TESTING_PORT)
+                ? JsonUtils.extractIntArgument(params, KEY_AUTOMATED_TESTING_PORT, 0) : null);
+        LaunchOverrides.Prepared testing = testingOverrides.prepare(automatedTestingPortInput);
+        if (testing.errorJson != null)
+        {
+            return testing.errorJson;
+        }
 
         // ── 2. Resolve client type ─────────────────────────────────────────────
         ClientTypeResolution clientTypeResolution = resolveClientType(clientTypeParam);
@@ -241,11 +272,11 @@ public class CreateLaunchConfigTool implements IMcpTool
             // null container -> workspace-local config persisted in workspace .metadata.
             ILaunchConfigurationWorkingCopy wc = type.newInstance(null, effectiveName);
 
-            populateWorkingCopy(wc, project, projectName, effectiveApplicationId, componentTypeId);
+            populateWorkingCopy(wc, project, projectName, effectiveApplicationId, componentTypeId, testing);
 
             ILaunchConfiguration saved = wc.doSave();
 
-            return ToolResult.success()
+            ToolResult result = ToolResult.success()
                 .put("action", "created") //$NON-NLS-1$ //$NON-NLS-2$
                 .put("name", saved.getName()) //$NON-NLS-1$
                 .put("project", projectName) //$NON-NLS-1$
@@ -255,8 +286,23 @@ public class CreateLaunchConfigTool implements IMcpTool
                 .put("message", "Created '" + saved.getName() + "' (" + clientLabel //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     + ") for project '" + projectName + "'. Use launch or " //$NON-NLS-1$ //$NON-NLS-2$
                     + "run_yaxunit_tests with launchConfigurationName='" + saved.getName() //$NON-NLS-1$
-                    + "' to launch it.") //$NON-NLS-1$
-                .toJson();
+                    + "' to launch it."); //$NON-NLS-1$
+            if (testingOverrides.automatedTestingMode() != null)
+            {
+                result.put(KEY_AUTOMATED_TESTING_MODE, testingOverrides.automatedTestingMode());
+                if (LaunchConfigUtils.VALUE_AUTOMATED_TESTING_TEST_CLIENT.equals(testingOverrides.automatedTestingMode()))
+                {
+                    try
+                    {
+                        result.put(KEY_AUTOMATED_TESTING_PORT, testingOverrides.effectiveAutomatedTestingPort(saved));
+                    }
+                    catch (CoreException e) // Response enrichment must not fail an already-saved configuration.
+                    {
+                        // Leave an unreadable port absent.
+                    }
+                }
+            }
+            return result.toJson();
         }
         catch (CoreException e)
         {
@@ -428,9 +474,11 @@ public class CreateLaunchConfigTool implements IMcpTool
      * @param projectName            the project name attribute value
      * @param effectiveApplicationId the resolved application (infobase) id attribute value
      * @param componentTypeId        the pinned client component-type id attribute value
+     * @param testing                validated automated-testing attributes
      */
     private static void populateWorkingCopy(ILaunchConfigurationWorkingCopy wc, IProject project,
-        String projectName, String effectiveApplicationId, String componentTypeId)
+        String projectName, String effectiveApplicationId, String componentTypeId,
+        LaunchOverrides.Prepared testing)
     {
         // Identity / binding (required by RuntimeClientLaunchDelegate.getProject + ATTR_APPLICATION_ID
         // must be real so getApplicationIdFor takes branch A, not the synthetic 'launch:' fallback).
@@ -443,6 +491,7 @@ public class CreateLaunchConfigTool implements IMcpTool
         // Client kind (pin the specific kind exactly as the shortcut does).
         wc.setAttribute(ATTR_CLIENT_AUTO_SELECT, false);
         wc.setAttribute(ATTR_CLIENT_TYPE, componentTypeId);
+        testing.applyToWorkingCopy(wc);
 
         // Runtime + debug-server defaults (from AbstractLaunchShortcut.setDefaults bytecode).
         wc.setAttribute(ATTR_RUNTIME_INSTALL_AUTO, true);
@@ -604,6 +653,10 @@ public class CreateLaunchConfigTool implements IMcpTool
      * "not found" (an empty {@link Optional}) from a transient {@link ApplicationException} (EDT
      * mid-index) with the same messages as the original inline block. Returns an
      * {@link AppIdResolution} carrying either an error JSON string or the resolved id.
+     *
+     * <p>Both reads are BOUNDED (#622), and a third outcome joins the two: a deadline that expired
+     * says NOTHING about the application, so it is neither a not-found nor "the project has no
+     * applications" — it gets its own wording.
      */
     private static AppIdResolution resolveApplicationId(IProject project, String projectName,
         String applicationIdParam)
@@ -611,7 +664,7 @@ public class CreateLaunchConfigTool implements IMcpTool
         IApplicationManager appManager = Activator.getDefault().getApplicationManager();
         if (appManager == null)
         {
-            return AppIdResolution.error(ToolResult.error("IApplicationManager service is not available. " //$NON-NLS-1$
+            return AppIdResolution.error(ToolResult.error(ApplicationSupport.MANAGER_UNAVAILABLE + ". " //$NON-NLS-1$
                 + "EDT may still be starting up — retry in a moment.").toJson()); //$NON-NLS-1$
         }
 
@@ -620,9 +673,19 @@ public class CreateLaunchConfigTool implements IMcpTool
             // Caller supplied an explicit id — validate it exists for this project.
             // Distinguish "not found" (empty Optional) from a transient service failure
             // (exception while EDT is mid-index) so the diagnosis is not misleading.
+            ApplicationSupport.BoundedRead<Optional<IApplication>> read =
+                ApplicationSupport.getApplicationBounded(appManager, project, applicationIdParam,
+                    ApplicationSupport.LOOKUP_TIMEOUT_MS);
+            if (!read.concluded())
+            {
+                return AppIdResolution.error(ToolResult.error("Could not resolve application '" //$NON-NLS-1$
+                    + applicationIdParam + "' for project '" + projectName + "': " //$NON-NLS-1$ //$NON-NLS-2$
+                    + read.deadlineFailure()
+                    + ". No launch configuration was created.").toJson()); //$NON-NLS-1$
+            }
             try
             {
-                Optional<IApplication> appOpt = appManager.getApplication(project, applicationIdParam);
+                Optional<IApplication> appOpt = read.valueOrRethrow();
                 if (!appOpt.isPresent())
                 {
                     return AppIdResolution.error(buildAppNotFoundError(projectName, applicationIdParam));
@@ -639,9 +702,19 @@ public class CreateLaunchConfigTool implements IMcpTool
             }
         }
         // Resolve the project's default application.
+        ApplicationSupport.BoundedRead<Optional<IApplication>> defaultRead =
+            ApplicationSupport.getDefaultApplicationBounded(appManager, project,
+                ApplicationSupport.LOOKUP_TIMEOUT_MS);
+        if (!defaultRead.concluded())
+        {
+            return AppIdResolution.error(ToolResult.error("Cannot resolve default application for '" //$NON-NLS-1$
+                + projectName + "': " + defaultRead.deadlineFailure() //$NON-NLS-1$
+                + ". This does not mean the project has no applications — use get_applications " //$NON-NLS-1$
+                + "to list them, or pass applicationId explicitly.").toJson()); //$NON-NLS-1$
+        }
         try
         {
-            Optional<IApplication> defaultApp = appManager.getDefaultApplication(project);
+            Optional<IApplication> defaultApp = defaultRead.valueOrRethrow();
             if (!defaultApp.isPresent())
             {
                 return AppIdResolution.error(ToolResult.error("Project '" + projectName //$NON-NLS-1$

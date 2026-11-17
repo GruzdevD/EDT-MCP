@@ -8,16 +8,17 @@ Remove a project's infobase or its standalone-server registration, optionally de
 | projectName | yes | string | EDT configuration project the infobase is bound to (required). |
 | applicationId | — | string | Application ID from get_applications. Either applicationId or infobaseName is required. |
 | infobaseName | — | string | Display name of the infobase to remove. Either applicationId or infobaseName is required. |
+| registrationId | — | string | Explicit GLOBAL launcher-entry UUID returned by create_infobase. Requires exact infobaseName, deleteRegistration=true, deleteDatabaseFiles=false and no applicationId. Clears credentials before removal; never selects a registration by name alone. Repeat this same UUID on confirm. |
 | deleteRegistration | — | boolean | true = also deregister the infobase from the global EDT infobases list (equivalent to 'Delete' in the Infobases view); default true. |
 | deleteDatabaseFiles | — | boolean | true = ALSO delete the infobase database files/directory from disk (the 1Cv8.1CD directory) — IRREVERSIBLE. Default false = keep the database files on disk (the registration is removed but the data stays). Works for both a file infobase and a standalone server (deletes the served database directory). |
 | confirm | — | boolean | true = perform the removal; default false = preview only (no change). |
 
 ## Guide
-Removes a FILE infobase association from a configuration project, OR deletes a standalone (autonomous) server application. The inverse of `create_infobase` (both `applicationKind=infobase` and `applicationKind=standaloneServer`) and the cleanup step for a create-infobase round-trip. The tool auto-detects the application kind from the resolved application — no extra parameter is needed.
+Removes a file or cluster infobase association from a configuration project, OR deletes a standalone (autonomous) server application. The inverse of `create_infobase` (both `applicationKind=infobase` and `applicationKind=standaloneServer`) and the cleanup step for a create-infobase round-trip. The tool auto-detects the application kind from the resolved application — no extra parameter is needed.
 
 ## Think twice — destructive (confirm-preview)
 
-**File infobase** (`applicationKind=infobase`): dissociating removes it from `get_applications` for the project (other projects that share the infobase are unaffected). With `deleteRegistration=true` (the default) it is also removed from the EDT Infobases view. The infobase **database files on disk are KEPT by default** — pass `deleteDatabaseFiles=true` to also delete the directory (the `1Cv8.1CD` folder), or remove it manually.
+**File/cluster infobase** (`applicationKind=infobase`): dissociating removes the target project's application. With `deleteRegistration=false`, other projects sharing the registration keep their applications. With `deleteRegistration=true` (the default), global removal also invalidates their applications and clears their matching defaults and RuntimeClient selections. The infobase **database files on disk are KEPT by default** — pass `deleteDatabaseFiles=true` to also delete a file infobase directory, or remove it manually.
 
 **Standalone server** (`applicationKind=standaloneServer`): this mirrors EDT's "Delete server" action — it **stops the server and removes the WST server registration plus its server config folder** (the `Серверы/…` runtime/session data). The **served database files at the `infobaseFile` path are KEPT by default** (`deleteServer` removes only the server config folder, never the served database) — pass `deleteDatabaseFiles=true` to also delete that directory. With `deleteRegistration=true` (the default) the orphaned entry in the standalone-server `infobases.yaml` registry is also cleaned (best-effort; it otherwise self-heals on the next EDT restart). Runs in a background Job (up to 120 s), unattended-safe (no modal).
 
@@ -29,14 +30,38 @@ The tool is guarded by a two-phase workflow (mirroring `delete_project`):
 
 - **projectName** (required): the EDT configuration project the infobase is bound to.
 - **applicationId** (string): application ID from `get_applications`. Either `applicationId` or `infobaseName` is required.
-- **infobaseName** (string): display name of the infobase. Used when `applicationId` is not known. Either `applicationId` or `infobaseName` is required.
+- **infobaseName** (string): display name of a project application when `applicationId` is unknown. A name alone never selects an orphan entry from the global launcher list.
+- **registrationId** (string): explicit UUID returned by file/cluster `create_infobase`, including failed-registration rollback results. This selects an exact **global** launcher entry, independently of application visibility; it is not a project-ownership claim. Requires the exact `infobaseName`, `deleteRegistration=true`, `deleteDatabaseFiles=false` and no `applicationId`. Preview and confirmation return `registrationId`, not an application ID. Repeat the same UUID and name on confirmation; stale/mismatched UUIDs are refused even if an identically named entry exists. Credentials are cleared before removal; if that fails, a still-present registration is retained and a verified recovery snapshot remains available in the current EDT session. Database files are never deleted by this mode.
 - **deleteRegistration** (boolean, default true): for a file infobase — also deregister from the global EDT Infobases list; for a standalone server — also clean the orphaned `infobases.yaml` registry entry. false = skip that registry cleanup.
-- **deleteDatabaseFiles** (boolean, default false): **true = also delete the infobase database files/directory from disk** (the `1Cv8.1CD` directory) — IRREVERSIBLE. Default false = keep the data on disk (only the registration is removed). Works for both kinds; for a standalone server it deletes the served-database directory (`database.path` = the `infobaseFile`). Guarded for safety on three counts: (1) it only deletes a directory that is actually a 1C infobase (contains a `1Cv8.1CD`) and never a filesystem root — otherwise it skips and reports `databaseFilesDeleted=false`; (2) **shared-infobase guard** — if any OTHER workspace project still references the same on-disk database, the files are KEPT (deleting them would break those projects) and `databaseFilesDeleted=false`; (3) if the directory is locked the delete is best-effort and likewise reports `databaseFilesDeleted=false` with a note to remove it manually. The preview (`confirm` omitted) already reflects whether the files would be deleted or kept-because-shared.
+- **deleteDatabaseFiles** (boolean, default false): **true = also delete the infobase database files/directory from disk** (the `1Cv8.1CD` directory) — IRREVERSIBLE. Default false = keep the data on disk (only the registration is removed). Works for both kinds; for a standalone server it deletes the served-database directory (`database.path` = the `infobaseFile`). Guarded for safety on three counts: (1) it only deletes a directory that is actually a 1C infobase (contains a `1Cv8.1CD`) and never a filesystem root — otherwise it skips and reports `databaseFilesDeleted=false` with `databaseFilesKept='deleteFailed'`; (2) **shared-infobase guard** — if any OTHER workspace project still references the same on-disk database, the files are KEPT (deleting them would break those projects) and `databaseFilesKept='shared'`. That check is bounded: when it does NOT complete the files are likewise KEPT, but the answer is `databaseFilesKept='unknown'` rather than a claim that a co-owner was found — do not read that as "another project uses it"; (3) if the directory is locked the delete is best-effort and likewise reports `databaseFilesKept='deleteFailed'` with a note to remove it manually. The preview (`confirm` omitted) already reflects whether the files would be deleted or kept, and carries the same `databaseFilesKept` reason. The check runs again on the `confirm=true` call, so a preview whose check did NOT complete is not binding: it says so, and the confirm may then reach the other answer.
 - **confirm** (boolean, default false): false previews; true performs the removal.
 
 ## Result
 
-JSON with `action` ('preview'/'deleted'), `confirmationRequired` (preview only), `applicationKind` (standalone-server removals), `project`, `applicationId`, `infobaseName`, `deleteRegistration`, `databaseFilesDeleted` (whether the on-disk database was actually removed), and a `message`.
+If a verified launcher entry disappears during failed credential cleanup, the same UUID and exact name can resume the pending cleanup in the current EDT session. The retained snapshot is never selected by name alone; successful cleanup retires that recovery handle. Wait for any reported in-flight native write to finish before retrying. A restart discards this session recovery state, so finish cleanup before restarting EDT.
+
+The project's association context is captured before target lookup and checked again after consent, immediately before mutation. A branch/context change requires a fresh lookup and preview; nothing is deleted in that case. This requirement applies to file/cluster and explicit UUID cleanup. Standalone-server deletion uses WST bindings and remains available if the infobase-association context provider is temporarily unavailable.
+
+JSON with `action` ('preview'/'deleted'), `confirmationRequired` (preview only), `applicationKind` (standalone-server removals), `project`, `applicationId`, `infobaseName`, `deleteRegistration`, `databaseFilesDeleted` (whether the on-disk database was actually removed; deletions only), `databaseFilesKept` (WHY they were kept), and a `message`.
+
+`databaseFilesKept` is absent exactly when the files were — or, on a preview, would be — deleted. Otherwise it is one of:
+
+| value | meaning |
+| --- | --- |
+| `notRequested` | `deleteDatabaseFiles` was not asked for (the default). |
+| `noDirectory` | no on-disk database directory could be resolved. |
+| `shared` | another workspace project was FOUND using the same database. |
+| `unknown` | the shared-infobase check did NOT conclude, so co-ownership was never measured — this is not `shared`; the next call re-runs the check. |
+| `deleteFailed` | the removal did not leave the directory gone: it was refused (a filesystem root, or no `1Cv8.1CD` — which is also how a directory that was already gone looks) or the delete itself failed (locked). Check the EDT log and remove it manually if it is still there. |
+| `deregistrationFailed` | deregistration failed, so the deletion was deliberately not attempted — and no earlier reason applied. A measured `shared`/`unknown`/`noDirectory` still wins over it, so the confirm answer never contradicts the preview. |
+
+The last two arise only on a deletion; a preview can only report the first four.
+
+## Application bindings
+
+Unrelated project defaults and RuntimeClient selections are verified and restored if EDT cleared them. Differing non-null choices are kept; manual clears during the call are restored too. `preservedBindings` and `restoredBindings` report these outcomes. After confirmed deletion, stale defaults and launch bindings to the removed application are cleared through EDT and reported in `removedBindings` only after read-back verifies removal. Confirmed global removal returns `registrationId` even when selected by `applicationId` or `infobaseName`, and cleans matching bindings across projects. If deregistration fails, `deleteRegistration=false` limits cleanup to the target project's application.
+
+`unrestoredBindings` names incomplete recovery or cleanup and makes the response an error, even when `action='deleted'`. Inspect EDT's Applications/Run Configurations, `get_applications`, and `list_configurations` before retrying. A pending native write leaves recovery unverified until it finishes.
 
 ## Typical usage (round-trip cleanup)
 
@@ -50,12 +75,12 @@ delete_infobase  projectName="MyProject"  applicationId="<id>"  confirm=true
 
 ## Gotchas
 
-- **Database files: kept by default, opt in with `deleteDatabaseFiles=true`**: by default this tool removes only registrations — the infobase database files on disk stay (for a `standaloneServer` the server config folder `Серверы/…` is removed, but the served database at `infobaseFile` stays). Pass `deleteDatabaseFiles=true` to ALSO delete the database directory (irreversible); the result's `databaseFilesDeleted` tells you whether it actually went (a locked directory leaves it for manual cleanup).
+- **Database files: kept by default, opt in with `deleteDatabaseFiles=true`**: by default this tool removes only registrations — the infobase database files on disk stay (for a `standaloneServer` the server config folder `Серверы/…` is removed, but the served database at `infobaseFile` stays). Pass `deleteDatabaseFiles=true` to ALSO delete the database directory (irreversible); the result's `databaseFilesDeleted` tells you whether it actually went and `databaseFilesKept` names why it did not (a locked directory leaves it for manual cleanup).
 - **applicationId vs infobaseName**: prefer `applicationId` (from `get_applications`) for precision; `infobaseName` matches by display name and may be ambiguous if two applications share a name.
 - **Supported application types**: file infobases (`com.e1c.g5.dt.applications.type.infobase`) and standalone servers (`com.e1c.g5.dt.applications.type.wst-server`). Other types are rejected.
 - **Standalone-server registry orphan**: EDT's own server deletion leaves a stale entry in `infobases.yaml`; with `deleteRegistration=true` this tool cleans it (best-effort). It is harmless if not cleaned — it self-heals on the next EDT restart.
 - **Standalone-server timeout**: server deletion runs in a background Job with a 120 s budget. If it exceeds that, the tool returns an error stating the platform call **may still be completing in the background** — re-run `get_applications` to check the current state before retrying (it does not claim nothing changed).
-- **Other projects unaffected**: dissociating a file infobase from one project does not affect other projects that reference the same infobase. This extends to `deleteDatabaseFiles=true`: if another workspace project still uses the same on-disk database, the files are KEPT (the shared-infobase guard), so a delete never breaks a co-owner.
+- **Shared database files**: `deleteRegistration=false` keeps other projects' associations; global deregistration does not. The shared-file guard still keeps database files when another project uses the same directory (`databaseFilesKept='shared'`) or the check could not conclude (`'unknown'`). These reasons protect files, not launcher registrations. Branch on `databaseFilesKept`, not the message text.
 
 ---
 *Generated from the live MCP server (`get_tool_guide`) by `docs/generate_tool_docs.py`. Do not edit this file. Edit the tool's description/schema in its Java source and its guide body in `mcp/bundles/com.ditrix.edt.mcp.server/guides/<tool>.md`.*

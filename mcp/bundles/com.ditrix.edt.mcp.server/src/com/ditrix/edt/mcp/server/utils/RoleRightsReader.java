@@ -14,6 +14,7 @@ import org.eclipse.emf.ecore.EObject;
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractRoleDescription;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.rights.model.ObjectRight;
 import com._1c.g5.v8.dt.rights.model.ObjectRights;
 import com._1c.g5.v8.dt.rights.model.RestrictionTemplate;
@@ -63,6 +64,9 @@ public final class RoleRightsReader
 
     /** Label for a {@link RightValue#PROVIDED} cell (the right falls back to its default/inherited value). */
     static final String LABEL_DEFAULT = "default"; //$NON-NLS-1$
+
+    /** Appended to a target that no longer resolves (its object was deleted outside EDT). */
+    static final String UNRESOLVED_SUFFIX = " (unresolved)"; //$NON-NLS-1$
 
     private RoleRightsReader()
     {
@@ -145,9 +149,13 @@ public final class RoleRightsReader
 
         MatrixSelection selection = selectMatrixObjects(description, full);
         List<ObjectRights> selected = selection.selected;
+        // Counted over EVERY entry, not the selection: an unresolved entry holding only default
+        // cells is filtered out of the matrix but still blocks EDT's rights tasks.
+        String unresolved = unresolvedNotice(countUnresolved(description));
         if (selected.isEmpty())
         {
             sb.append(full ? "_(no rights)_\n\n" : "_(no non-default rights)_\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+            sb.append(unresolved);
             return;
         }
 
@@ -160,6 +168,7 @@ public final class RoleRightsReader
         sb.append("**Objects with non-default rights:** ").append(selection.totalWithAuthored); //$NON-NLS-1$
         sb.append(matrixWindowNotice(from, to, total, full));
         sb.append("\n\n"); //$NON-NLS-1$
+        sb.append(unresolved);
 
         sb.append(MarkdownUtils.tableHeader("Object", "Right", "Value")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         renderMatrixRows(sb, selected, from, to, full, language);
@@ -214,6 +223,36 @@ public final class RoleRightsReader
                     rightValueLabel(right.getValue())));
             }
         }
+    }
+
+    /** @return how many entries of the role name a target that does not resolve */
+    private static int countUnresolved(RoleDescription description)
+    {
+        int count = 0;
+        for (ObjectRights objectRights : description.getRights())
+        {
+            EObject target = objectRights.getObject();
+            if (target == null || target.eIsProxy())
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * @param unresolved the number of entries whose target does not resolve
+     * @return the notice for such entries, or an empty string. Pure.
+     */
+    static String unresolvedNotice(int unresolved)
+    {
+        if (unresolved == 0)
+        {
+            return ""; //$NON-NLS-1$
+        }
+        return "**" + unresolved + " entry(ies) marked (unresolved)** name an object that no longer " //$NON-NLS-1$ //$NON-NLS-2$
+            + "resolves; EDT cannot edit this role's rights while they remain. Review and remove them " //$NON-NLS-1$
+            + "with resync_to_disk (cleanOrphanRoleRights).\n\n"; //$NON-NLS-1$
     }
 
     /** The selected matrix objects plus the count of objects carrying an authored (non-default) cell. */
@@ -416,15 +455,25 @@ public final class RoleRightsReader
     // ==================== transaction-bound EObject helpers ====================
 
     /**
-     * @return the guarded object's metadata FQN - its BM FQN when it is a top object, else the FQN of the
-     *         top object it belongs to (a sub-object such as an attribute), else its EClass name. The
-     *         object is transaction-bound, so this must run inside the read boundary.
+     * @return the guarded object's metadata address, as the Object cell of both the matrix and the RLS
+     *         table: its BM FQN when it is a top object; for a subordinate object (an attribute, a
+     *         tabular section and its attributes, a register dimension / resource, a command ...) its
+     *         full address {@code Catalog.X.Attribute.Y} - the very form {@code rights[].object} of
+     *         {@code modify_metadata} accepts, so a cell read here can be written back; for a
+     *         subordinate the writer cannot address (a standard attribute, an integration service
+     *         channel, a cube dimension) the FQN of the top object it belongs to; else its EClass name.
+     *         The object is transaction-bound, so this must run inside the read boundary.
      */
     private static String objectFqnOf(EObject object)
     {
         if (object == null)
         {
             return "(unknown)"; //$NON-NLS-1$
+        }
+        if (object.eIsProxy())
+        {
+            // Deleted outside EDT: name the address the entry still carries, not its EClass.
+            return RoleRightsOrphans.addressOrUri(object) + UNRESOLVED_SUFFIX;
         }
         if (object instanceof IBmObject)
         {
@@ -434,6 +483,11 @@ public final class RoleRightsReader
                 if (bm.bmIsTop())
                 {
                     return safeFqn(bm.bmGetFqn(), object);
+                }
+                String address = subordinateAddress(object);
+                if (address != null)
+                {
+                    return address;
                 }
                 IBmObject top = bm.bmGetTopObject();
                 if (top != null)
@@ -455,6 +509,16 @@ public final class RoleRightsReader
     }
 
     /**
+     * @return the address a subordinate metadata object resolves back to through the writer's own
+     *         resolver ({@link MetadataNodeResolver#resolvableAddressOf}), or {@code null} when it is
+     *         not a metadata object or has no such address
+     */
+    private static String subordinateAddress(EObject object)
+    {
+        return object instanceof MdObject ? MetadataNodeResolver.resolvableAddressOf((MdObject)object) : null;
+    }
+
+    /**
      * @return the comma-joined names of the RLS-restricted fields for the given language CODE, or
      *         {@code "(whole object)"} when the restriction applies to the whole object (no fields). Each
      *         field is a {@link DuallyNamedElement} (a {@code DbViewFieldDef}), read bilingually without a
@@ -466,7 +530,11 @@ public final class RoleRightsReader
         boolean ru = LANG_RU.equalsIgnoreCase(language);
         for (Object field : rls.getFields())
         {
-            if (field instanceof DuallyNamedElement)
+            if (field instanceof EObject && ((EObject)field).eIsProxy())
+            {
+                names.add(RoleRightsOrphans.fieldLabel((EObject)field) + UNRESOLVED_SUFFIX);
+            }
+            else if (field instanceof DuallyNamedElement)
             {
                 DuallyNamedElement named = (DuallyNamedElement)field;
                 String preferred = safe(ru ? named.getNameRu() : named.getName());

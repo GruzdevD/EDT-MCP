@@ -17,21 +17,29 @@ import static org.junit.Assert.assertTrue;
 import java.util.Collections;
 import java.util.Set;
 
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EClass;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.EcoreFactory;
+import org.eclipse.emf.ecore.InternalEObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.xtext.resource.IEObjectDescription;
 import org.junit.Test;
 import org.mockito.Mockito;
 
 import com._1c.g5.v8.dt.core.platform.IExternalObjectProject;
+import com._1c.g5.v8.dt.mcore.BinaryQualifiers;
 import com._1c.g5.v8.dt.mcore.DateFractions;
+import com._1c.g5.v8.dt.mcore.DateQualifiers;
 import com._1c.g5.v8.dt.mcore.McoreFactory;
+import com._1c.g5.v8.dt.mcore.NumberQualifiers;
+import com._1c.g5.v8.dt.mcore.StringQualifiers;
 import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.mcore.TypeSet;
 import com._1c.g5.v8.dt.metadata.mdclass.CatalogAttribute;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassFactory;
@@ -45,8 +53,10 @@ import com.google.gson.JsonParser;
 
 /**
  * Tests the platform-independent parts of {@link MetadataTypeBuilder}: spec shape validation and the
- * kind / fractions parsing. Primitive/platform {@code build()} happy paths need the platform type
- * provider and are covered by e2e; the model-owned DefinedType path is reachable headlessly.
+ * kind / fractions parsing. The version-keyed {@code build()} looks its type provider up in the
+ * platform registry, so its primitive/platform happy paths are covered by e2e; {@code buildWithProvider}
+ * takes the provider from its caller, so its primitive paths are tested here against a mocked provider.
+ * The model-owned DefinedType path is reachable headlessly.
  */
 public class MetadataTypeBuilderTest
 {
@@ -218,10 +228,11 @@ public class MetadataTypeBuilderTest
     @Test
     public void testReferenceTargetMustBeANonEmptyString()
     {
-        // <Type>Ref keeps its OWN grammar, unchanged by the produced-type family: a ref is required,
-        // and an omitted one is the first case in this list. The family covers the Object / Manager /
-        // Record / RecordSet / ... types a Ref cannot name, and deliberately does not include Ref itself.
-        for (String suffix : new String[] { "", ",\"ref\":\"\"", ",\"ref\":\"   \"", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // <Type>Ref keeps its OWN grammar, unchanged by the produced-type family: a ref that is GIVEN
+        // must be a usable target. An OMITTED ref selects the generic reference type (issue #966,
+        // MetadataTypeBuilderGenericRefTest). The family covers the Object / Manager / Record /
+        // RecordSet / ... types a Ref cannot name, and deliberately does not include Ref itself.
+        for (String suffix : new String[] { ",\"ref\":\"\"", ",\"ref\":\"   \"", //$NON-NLS-1$ //$NON-NLS-2$
             ",\"ref\":1", ",\"ref\":true", ",\"ref\":{}", ",\"ref\":null" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         {
             assertInvalidMember("{\"types\":[{\"kind\":\"CatalogRef\"" + suffix + "}]}", //$NON-NLS-1$ //$NON-NLS-2$
@@ -377,6 +388,46 @@ public class MetadataTypeBuilderTest
         assertTrue("the error must name every tried candidate", //$NON-NLS-1$
             err.contains("UUID") && err.contains("UniqueIdentifier")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue(td.getTypes().isEmpty());
+        // A KNOWN kind the present provider could not build is the platform's failure, not the spec's.
+        assertTrue(MetadataTypeBuilder.appendType(td, item, "uuid", provider, //$NON-NLS-1$
+            MdClassFactory.eINSTANCE.createConfiguration(), null, false,
+            MetadataTypeBuilder.TypeTarget.METADATA).platformFailure);
+    }
+
+    @Test
+    public void testBuildWithProviderBuildsAQualifiedPrimitiveAgainstTheGivenProvider()
+    {
+        // The provider-explicit entry create_metadata's default member type goes through: the same
+        // primitive path as build(), against the provider the caller holds.
+        IEObjectProvider provider = Mockito.mock(IEObjectProvider.class);
+        Type numberType = McoreFactory.eINSTANCE.createType();
+        Mockito.doReturn(numberType).when(provider).createProxy("Number"); //$NON-NLS-1$
+
+        MetadataTypeBuilder.Result built = MetadataTypeBuilder.buildWithProvider(
+            json("{\"types\":[{\"kind\":\"Number\",\"precision\":12,\"scale\":3}]}"), provider, null, null, //$NON-NLS-1$
+            false, MetadataTypeBuilder.TypeTarget.METADATA);
+
+        assertNull(built.error);
+        assertEquals(Collections.singletonList(numberType), built.typeDescription.getTypes());
+        assertEquals(12, built.typeDescription.getNumberQualifiers().getPrecision());
+        assertEquals(3, built.typeDescription.getNumberQualifiers().getScale());
+    }
+
+    @Test
+    public void testBuildWithProviderKeepsTheSpecRefusalAheadOfTheMissingProvider()
+    {
+        // A malformed spec is the caller's refusal even with no provider at all; a well-formed one
+        // without a provider is the platform's failure - the order build() has always had.
+        MetadataTypeBuilder.Result malformed = MetadataTypeBuilder.buildWithProvider(json("{\"types\":[]}"), //$NON-NLS-1$
+            null, null, null, false, MetadataTypeBuilder.TypeTarget.METADATA);
+        assertNotNull(malformed.error);
+        assertFalse("a malformed spec is not the platform's failure", malformed.platformFailure); //$NON-NLS-1$
+
+        MetadataTypeBuilder.Result noProvider = MetadataTypeBuilder.buildWithProvider(
+            json("{\"types\":[{\"kind\":\"String\"}]}"), null, null, null, false, //$NON-NLS-1$
+            MetadataTypeBuilder.TypeTarget.METADATA);
+        assertTrue("a missing provider is the platform's failure", noProvider.platformFailure); //$NON-NLS-1$
+        assertNull(noProvider.typeDescription);
     }
 
     @Test
@@ -405,6 +456,179 @@ public class MetadataTypeBuilderTest
         assertTrue(err.contains("nonsense")); //$NON-NLS-1$
         assertTrue(err.contains("ValueStorage")); //$NON-NLS-1$
         assertTrue(err.contains("UUID")); //$NON-NLS-1$
+        assertFalse("an unknown kind is the caller's refusal", //$NON-NLS-1$
+            appendKind(item, "nonsense", null, MdClassFactory.eINSTANCE.createConfiguration(), //$NON-NLS-1$
+                MetadataTypeBuilder.TypeTarget.METADATA).platformFailure);
+        // An EXISTING DefinedType whose produced-type chain the platform did not yield is not the spec's fault.
+        Configuration config = MdClassFactory.eINSTANCE.createConfiguration();
+        seedDefinedType(config, "Money", false); //$NON-NLS-1$
+        assertTrue(appendKind(json("{\"kind\":\"DefinedType\",\"ref\":\"Money\"}").getAsJsonObject(), //$NON-NLS-1$
+            "DefinedType", null, config, MetadataTypeBuilder.TypeTarget.METADATA).platformFailure); //$NON-NLS-1$
+        // So is a resolved object whose produced types, or one produced type's chain, did not come back.
+        Configuration noProducedTypes = MdClassFactory.eINSTANCE.createConfiguration();
+        noProducedTypes.getDocuments().add(MdClassFactory.eINSTANCE.createDocument());
+        noProducedTypes.getDocuments().get(0).setName("Invoice"); //$NON-NLS-1$
+        JsonObject concrete = json("{\"kind\":\"DocumentObject\",\"ref\":\"Invoice\"}").getAsJsonObject(); //$NON-NLS-1$
+        assertTrue(appendKind(concrete, "DocumentObject", null, noProducedTypes, //$NON-NLS-1$
+            MetadataTypeBuilder.TypeTarget.FORM_ATTRIBUTE).platformFailure);
+        Configuration brokenChain = MdClassFactory.eINSTANCE.createConfiguration();
+        seedProducedType(brokenChain, "Document", "Invoice", "objectType", null); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue(appendKind(concrete, "DocumentObject", null, brokenChain, //$NON-NLS-1$
+            MetadataTypeBuilder.TypeTarget.FORM_ATTRIBUTE).platformFailure);
+        // A known primitive the provider did not build is the platform's failure too.
+        IEObjectProvider noString = Mockito.mock(IEObjectProvider.class);
+        assertTrue(appendKind(json("{\"kind\":\"String\"}").getAsJsonObject(), "String", noString, //$NON-NLS-1$ //$NON-NLS-2$
+            MdClassFactory.eINSTANCE.createConfiguration(), MetadataTypeBuilder.TypeTarget.METADATA)
+            .platformFailure);
+        // A caller's kind that merely SPELLS a chain failure is still the caller's refusal.
+        for (String spelled : new String[] { "resolved, but its produced types are not available yet.", //$NON-NLS-1$
+            "/type chain is not available yet.", //$NON-NLS-1$
+            "its producedTypes/containerType/typeSet chain is not available yet." }) //$NON-NLS-1$
+        {
+            String kind = "bogus " + spelled; //$NON-NLS-1$
+            JsonObject bogus = new JsonObject();
+            bogus.addProperty("kind", kind); //$NON-NLS-1$
+            assertFalse(spelled, appendKind(bogus, kind, null, MdClassFactory.eINSTANCE.createConfiguration(),
+                MetadataTypeBuilder.TypeTarget.METADATA).platformFailure);
+        }
+    }
+
+    /** The typed failure of one spec item, asserting that it failed at all. */
+    private static MetadataTypeBuilder.Result appendKind(JsonObject item, String kind, IEObjectProvider provider,
+        Configuration config, MetadataTypeBuilder.TypeTarget target)
+    {
+        TypeDescription td = McoreFactory.eINSTANCE.createTypeDescription();
+        MetadataTypeBuilder.Result failure =
+            MetadataTypeBuilder.appendType(td, item, kind, provider, config, null, false, target);
+        assertNotNull(kind + " must fail", failure); //$NON-NLS-1$
+        assertTrue(kind + " must add nothing", td.getTypes().isEmpty()); //$NON-NLS-1$
+        return failure;
+    }
+
+    // ---- typed failures: the branch that produces a failure classifies it (issue #653) ------------
+
+    @Test
+    public void testRefToAReferenceKindWithoutItsRefTypeIsAPlatformFailure()
+    {
+        // getRefType routes a Catalog and answers null only when its produced Ref type is absent -
+        // derived data the platform has not computed, never the caller's choice of target.
+        Configuration config = MdClassFactory.eINSTANCE.createConfiguration();
+        config.getCatalogs().add(MdClassFactory.eINSTANCE.createCatalog());
+        config.getCatalogs().get(0).setName("Goods"); //$NON-NLS-1$
+        String ruCatalog = MetadataLanguageUtils.cp(0x0421, 0x043F, 0x0440, 0x0430, 0x0432, 0x043E,
+            0x0447, 0x043D, 0x0438, 0x043A);
+        for (String ref : new String[] { "Catalog.Goods", ruCatalog + ".Goods" }) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            JsonObject item = new JsonObject();
+            item.addProperty("kind", "Ref"); //$NON-NLS-1$ //$NON-NLS-2$
+            item.addProperty("ref", ref); //$NON-NLS-1$
+            MetadataTypeBuilder.Result failure = appendKind(item, "Ref", null, config, //$NON-NLS-1$
+                MetadataTypeBuilder.TypeTarget.METADATA);
+
+            assertTrue(ref, failure.platformFailure);
+            assertFalse(ref + ": " + failure.error, failure.error.contains("is not a reference type")); //$NON-NLS-1$ //$NON-NLS-2$
+            assertTrue(ref + ": " + failure.error, failure.error.startsWith( //$NON-NLS-1$
+                "Object 'Goods' resolved, but its Ref type is not available yet.")); //$NON-NLS-1$
+        }
+        MetadataTypeBuilder.Result byTypedKind = appendKind(
+            json("{\"kind\":\"CatalogRef\",\"ref\":\"Goods\"}").getAsJsonObject(), "CatalogRef", null, //$NON-NLS-1$ //$NON-NLS-2$
+            config, MetadataTypeBuilder.TypeTarget.METADATA);
+        assertTrue(byTypedKind.platformFailure);
+    }
+
+    @Test
+    public void testRefToAReferenceKindWithItsRefTypeSucceeds()
+    {
+        Configuration config = MdClassFactory.eINSTANCE.createConfiguration();
+        Type refType = McoreFactory.eINSTANCE.createType();
+        seedProducedType(config, "Catalog", "Goods", "refType", refType); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        TypeDescription td = McoreFactory.eINSTANCE.createTypeDescription();
+
+        assertNull(MetadataTypeBuilder.appendType(td,
+            json("{\"kind\":\"Ref\",\"ref\":\"Catalog.Goods\"}").getAsJsonObject(), "Ref", null, config, //$NON-NLS-1$ //$NON-NLS-2$
+            null, false, MetadataTypeBuilder.TypeTarget.METADATA));
+        assertSame(refType, td.getTypes().get(0));
+    }
+
+    @Test
+    public void testRefToAKindWithNoRefTypeStaysTheCallersRefusal()
+    {
+        // The dispatcher does not route a register at all (AssertionError): the caller picked a
+        // target that has no Ref type, and the refusal text is unchanged.
+        Configuration config = MdClassFactory.eINSTANCE.createConfiguration();
+        config.getInformationRegisters().add(MdClassFactory.eINSTANCE.createInformationRegister());
+        config.getInformationRegisters().get(0).setName("Rates"); //$NON-NLS-1$
+
+        MetadataTypeBuilder.Result failure = appendKind(
+            json("{\"kind\":\"Ref\",\"ref\":\"InformationRegister.Rates\"}").getAsJsonObject(), "Ref", //$NON-NLS-1$ //$NON-NLS-2$
+            null, config, MetadataTypeBuilder.TypeTarget.METADATA);
+
+        assertFalse(failure.platformFailure);
+        assertNull(failure.cause);
+        assertEquals("Object 'Rates' is not a reference type. Only objects with a Ref type (Catalog / " //$NON-NLS-1$
+            + "Document / Enum / ChartOf* / ExchangePlan / BusinessProcess / Task) can be referenced.", //$NON-NLS-1$
+            failure.error);
+    }
+
+    @Test
+    public void testProviderCrashOnAKnownNameIsAPlatformFailureWithItsCause()
+    {
+        // The provider knows ValueList (it has a description for it), so its throw is a crash - not
+        // the "unknown name" answer the unknown-kind refusal is built on.
+        IEObjectProvider provider = Mockito.mock(IEObjectProvider.class);
+        IllegalStateException crash = new IllegalStateException("index corrupted"); //$NON-NLS-1$
+        Mockito.doThrow(crash).when(provider).createProxy("ValueList"); //$NON-NLS-1$
+        Mockito.doReturn(Mockito.mock(IEObjectDescription.class)).when(provider)
+            .getEObjectDescription("ValueList"); //$NON-NLS-1$
+
+        MetadataTypeBuilder.Result failure = appendKind(
+            json("{\"kind\":\"ValueList\"}").getAsJsonObject(), "ValueList", provider, //$NON-NLS-1$ //$NON-NLS-2$
+            MdClassFactory.eINSTANCE.createConfiguration(), MetadataTypeBuilder.TypeTarget.FORM_ATTRIBUTE);
+
+        assertTrue(failure.platformFailure);
+        assertSame("the provider's exception must be preserved", crash, failure.cause); //$NON-NLS-1$
+        assertFalse(failure.error, failure.error.contains("Unknown type kind")); //$NON-NLS-1$
+        assertEquals("Could not create the platform type. Tried: ValueList.", failure.error); //$NON-NLS-1$
+
+        // The raised form keeps OUR message for the client and carries the crash for the log.
+        IllegalStateException raised = failure.asException("Cannot build 'valueType': " + failure.error); //$NON-NLS-1$
+        assertEquals("Cannot build 'valueType': " + failure.error, raised.getMessage()); //$NON-NLS-1$
+        assertNull("a cause would replace the client's message (unwrapCauseMessage)", raised.getCause()); //$NON-NLS-1$
+        assertSame(crash, raised.getSuppressed()[0]);
+    }
+
+    @Test
+    public void testProviderCrashOnAKnownSimpleTypeKeepsItsCause()
+    {
+        IEObjectProvider provider = Mockito.mock(IEObjectProvider.class);
+        IllegalStateException crash = new IllegalStateException("index corrupted"); //$NON-NLS-1$
+        Mockito.doThrow(crash).when(provider).createProxy("UUID"); //$NON-NLS-1$
+        Mockito.doReturn(Mockito.mock(IEObjectDescription.class)).when(provider).getEObjectDescription("UUID"); //$NON-NLS-1$
+        Mockito.doThrow(new IllegalArgumentException("Can't create proxy for unknown name")) //$NON-NLS-1$
+            .when(provider).createProxy("UniqueIdentifier"); //$NON-NLS-1$
+
+        MetadataTypeBuilder.Result failure = appendKind(json("{\"kind\":\"UUID\"}").getAsJsonObject(), "UUID", //$NON-NLS-1$ //$NON-NLS-2$
+            provider, MdClassFactory.eINSTANCE.createConfiguration(), MetadataTypeBuilder.TypeTarget.METADATA);
+
+        assertTrue(failure.platformFailure);
+        assertSame(crash, failure.cause);
+    }
+
+    @Test
+    public void testUnknownNameStaysTheCallersRefusal()
+    {
+        // The real provider THROWS for a name it does not index and has no description for it.
+        IEObjectProvider provider = Mockito.mock(IEObjectProvider.class);
+        Mockito.doThrow(new IllegalArgumentException("Can't create proxy for unknown name 'Nonsense'")) //$NON-NLS-1$
+            .when(provider).createProxy(Mockito.anyString());
+
+        MetadataTypeBuilder.Result failure = appendKind(json("{\"kind\":\"Nonsense\"}").getAsJsonObject(), //$NON-NLS-1$
+            "Nonsense", provider, MdClassFactory.eINSTANCE.createConfiguration(), //$NON-NLS-1$
+            MetadataTypeBuilder.TypeTarget.FORM_ATTRIBUTE);
+
+        assertFalse(failure.platformFailure);
+        assertNull(failure.cause);
+        assertTrue(failure.error, failure.error.startsWith("Unknown type kind 'Nonsense'.")); //$NON-NLS-1$
     }
 
     // ---- ValueTable / ValueTree in-memory collections (issue #295) --------------------------------
@@ -503,6 +727,87 @@ public class MetadataTypeBuilderTest
         assertTrue("nothing may be added when the kind is refused", td.getTypes().isEmpty()); //$NON-NLS-1$
         // refused BEFORE any platform call
         Mockito.verify(provider, Mockito.never()).createProxy(Mockito.anyString());
+    }
+
+    @Test
+    public void testSessionParameterAcceptsTheFixedCollectionsInBothLanguages()
+    {
+        for (String kind : new String[] { "FixedArray", "ФиксированныйМассив", "FixedStructure", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "ФиксированнаяСтруктура", "FixedMap", "ФиксированноеСоответствие" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        {
+            IEObjectProvider provider = Mockito.mock(IEObjectProvider.class);
+            Type fixedType = McoreFactory.eINSTANCE.createType();
+            Mockito.doReturn(fixedType).when(provider).createProxy(kind);
+
+            TypeDescription td = McoreFactory.eINSTANCE.createTypeDescription();
+            String err = MetadataTypeBuilder.addType(td, json("{\"kind\":\"" + kind + "\"}").getAsJsonObject(), //$NON-NLS-1$ //$NON-NLS-2$
+                kind, provider, MdClassFactory.eINSTANCE.createConfiguration(), false,
+                MetadataTypeBuilder.TypeTarget.SESSION_PARAMETER);
+
+            assertNull(kind + " must be accepted on a session parameter: " + err, err); //$NON-NLS-1$
+            assertEquals(1, td.getTypes().size());
+            assertSame(fixedType, td.getTypes().get(0));
+        }
+    }
+
+    @Test
+    public void testStoredMetadataStillRefusesAFixedCollection()
+    {
+        IEObjectProvider provider = Mockito.mock(IEObjectProvider.class);
+        Mockito.doReturn(McoreFactory.eINSTANCE.createType()).when(provider).createProxy("FixedArray"); //$NON-NLS-1$
+
+        TypeDescription td = McoreFactory.eINSTANCE.createTypeDescription();
+        String err = MetadataTypeBuilder.addType(td, json("{\"kind\":\"FixedArray\"}").getAsJsonObject(), //$NON-NLS-1$
+            "FixedArray", provider, MdClassFactory.eINSTANCE.createConfiguration(), false, //$NON-NLS-1$
+            MetadataTypeBuilder.TypeTarget.METADATA);
+
+        assertNotNull("the carve-out belongs to the session parameter only", err); //$NON-NLS-1$
+        assertTrue(err.contains("stored metadata feature")); //$NON-NLS-1$
+        assertTrue(td.getTypes().isEmpty());
+    }
+
+    @Test
+    public void testSessionParameterRefusesAMutableCollectionInItsOwnWords()
+    {
+        IEObjectProvider provider = Mockito.mock(IEObjectProvider.class);
+        Mockito.doReturn(McoreFactory.eINSTANCE.createType()).when(provider).createProxy("Array"); //$NON-NLS-1$
+
+        TypeDescription td = McoreFactory.eINSTANCE.createTypeDescription();
+        String err = MetadataTypeBuilder.addType(td, json("{\"kind\":\"Array\"}").getAsJsonObject(), //$NON-NLS-1$
+            "Array", provider, MdClassFactory.eINSTANCE.createConfiguration(), false, //$NON-NLS-1$
+            MetadataTypeBuilder.TypeTarget.SESSION_PARAMETER);
+
+        assertNotNull(err);
+        assertTrue("the refusal must name its target: " + err, err.contains("session parameter")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("and point at the fixed counterpart: " + err, err.contains("FixedArray")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("a session parameter is not a stored feature: " + err, //$NON-NLS-1$
+            err.contains("stored metadata feature")); //$NON-NLS-1$
+        assertTrue(td.getTypes().isEmpty());
+    }
+
+    @Test
+    public void testSessionParameterRefusesValueTableInItsOwnWords()
+    {
+        TypeDescription td = McoreFactory.eINSTANCE.createTypeDescription();
+        String err = MetadataTypeBuilder.addType(td, json("{\"kind\":\"ValueTable\"}").getAsJsonObject(), //$NON-NLS-1$
+            "ValueTable", Mockito.mock(IEObjectProvider.class), //$NON-NLS-1$
+            MdClassFactory.eINSTANCE.createConfiguration(), false,
+            MetadataTypeBuilder.TypeTarget.SESSION_PARAMETER);
+
+        assertNotNull(err);
+        assertTrue(err.contains("session parameter")); //$NON-NLS-1$
+        assertFalse(err.contains("stored metadata feature")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testIsFixedCollectionKind()
+    {
+        assertTrue(MetadataTypeBuilder.isFixedCollectionKind("fixedarray")); //$NON-NLS-1$
+        assertTrue(MetadataTypeBuilder.isFixedCollectionKind(" FixedMap ")); //$NON-NLS-1$
+        assertTrue(MetadataTypeBuilder.isFixedCollectionKind("ФиксированнаяСтруктура")); //$NON-NLS-1$
+        assertFalse(MetadataTypeBuilder.isFixedCollectionKind("Array")); //$NON-NLS-1$
+        assertFalse(MetadataTypeBuilder.isFixedCollectionKind("ValueTable")); //$NON-NLS-1$
+        assertFalse(MetadataTypeBuilder.isFixedCollectionKind(null));
     }
 
     @Test
@@ -934,8 +1239,8 @@ public class MetadataTypeBuilderTest
 
             assertEquals(target.name(), "Unknown type kind 'RecalculationObject'. Use String / " //$NON-NLS-1$
                 + "Number / Boolean / Date / ValueStorage / UUID, ValueTable / ValueTree (in-memory " //$NON-NLS-1$
-                + "collections - a FORM attribute only), a DefinedType ({kind:'DefinedType', " //$NON-NLS-1$
-                + "ref:'Name'} or {kind:'DefinedType.Name'}), a produced type " //$NON-NLS-1$
+                + "collections - a FORM attribute or a DefinedType's own type only), a DefinedType " //$NON-NLS-1$
+                + "({kind:'DefinedType', ref:'Name'} or {kind:'DefinedType.Name'}), a produced type " //$NON-NLS-1$
                 + "({kind:'DocumentObject', ref:'Invoice'} or {kind:'ExchangePlanObject'}), or a " //$NON-NLS-1$
                 + "reference ({kind:'Ref', ref:'Type.Name'}). On a FORM attribute any platform type " //$NON-NLS-1$
                 + "name also works (ValueList / SpreadsheetDocument / Chart / StandardPeriod / ..., " //$NON-NLS-1$
@@ -961,8 +1266,8 @@ public class MetadataTypeBuilderTest
 
             assertEquals(target.name(), "Unknown type kind 'RecalculationObject'. Use String / " //$NON-NLS-1$
                 + "Number / Boolean / Date / ValueStorage / UUID, ValueTable / ValueTree (in-memory " //$NON-NLS-1$
-                + "collections - a FORM attribute only), a DefinedType ({kind:'DefinedType', " //$NON-NLS-1$
-                + "ref:'Name'} or {kind:'DefinedType.Name'}), a produced type " //$NON-NLS-1$
+                + "collections - a FORM attribute or a DefinedType's own type only), a DefinedType " //$NON-NLS-1$
+                + "({kind:'DefinedType', ref:'Name'} or {kind:'DefinedType.Name'}), a produced type " //$NON-NLS-1$
                 + "({kind:'DocumentObject', ref:'Invoice'} or {kind:'ExchangePlanObject'}), or a " //$NON-NLS-1$
                 + "reference ({kind:'Ref', ref:'Type.Name'}). On a FORM attribute any platform type " //$NON-NLS-1$
                 + "name also works (ValueList / SpreadsheetDocument / Chart / StandardPeriod / ..., " //$NON-NLS-1$
@@ -1488,13 +1793,15 @@ public class MetadataTypeBuilderTest
         JsonObject item = json(
             "{\"kind\":\"DefinedType\",\"ref\":\"MoneyAmount\"}").getAsJsonObject(); //$NON-NLS-1$
 
+        // The item level, below EDT's DefinedType category: a DEFINED_TYPE build refuses a DefinedType in
+        // a DefinedType through that category (MetadataTypeBuilderDefinedTypeTest, issue #727).
         for (MetadataTypeBuilder.TypeTarget target : MetadataTypeBuilder.TypeTarget.values())
         {
             TypeDescription td = McoreFactory.eINSTANCE.createTypeDescription();
             String error = MetadataTypeBuilder.addType(td, item, "DefinedType", null, config, false, //$NON-NLS-1$
                 target);
 
-            assertNull("DefinedType must be accepted for " + target, error); //$NON-NLS-1$
+            assertNull("the item level must build the DefinedType's TypeSet for " + target, error); //$NON-NLS-1$
             assertEquals(1, td.getTypes().size());
             assertSame("the model-owned TypeSet must be shared", expected, td.getTypes().get(0)); //$NON-NLS-1$
         }
@@ -1831,9 +2138,12 @@ public class MetadataTypeBuilderTest
         assertFalse(kind, split.isNested());
     }
 
-    /** Seeds one top-level object and one generated produced-type wrapper in its model holder. */
+    /**
+     * Seeds one top-level object and one generated produced-type wrapper in its model holder.
+     * Package-visible: the DefinedType target's tests (issue #727) build on the same fixture.
+     */
     @SuppressWarnings("unchecked")
-    private static MdObject seedProducedType(Configuration config, String englishMetadataType,
+    static MdObject seedProducedType(Configuration config, String englishMetadataType,
         String name, String producedFeature, Type expectedType)
     {
         MdObject object = seedProducedType(englishMetadataType, name, producedFeature, expectedType);
@@ -1866,9 +2176,12 @@ public class MetadataTypeBuilderTest
             0x044F, 0x0435, 0x043C, 0x044B, 0x0439, 0x0422, 0x0438, 0x043F);
     }
 
-    /** Seeds a generated DefinedType and, optionally, its full produced TypeSet chain. */
+    /**
+     * Seeds a generated DefinedType and, optionally, its full produced TypeSet chain.
+     * Package-visible: the DefinedType target's tests (issue #727) build on the same fixture.
+     */
     @SuppressWarnings("unchecked")
-    private static TypeItem seedDefinedType(Configuration config, String name, boolean withProducedTypeSet)
+    static TypeItem seedDefinedType(Configuration config, String name, boolean withProducedTypeSet)
     {
         MdObject definedType = (MdObject)EcoreUtil.create(MdClassPackage.Literals.DEFINED_TYPE);
         definedType.setName(name);
@@ -1898,5 +2211,214 @@ public class MetadataTypeBuilderTest
         EObject value = EcoreUtil.create(reference.getEReferenceType());
         owner.eSet(reference, value);
         return value;
+    }
+
+    // ---- describesSameType (issue #599) ---------------------------------------------------------
+    //
+    // These tests exist for ONE direction. Answering "different" for equal types costs a dialog
+    // nobody needed; answering "SAME" for different types silences the destructive-consent gate and
+    // loses stored data with no question asked. So all but the first two attack the second.
+
+    @Test
+    public void testTheSameSingleTypeComparesEqual()
+    {
+        assertTrue("a valueType write that lands the very same type is not a retype", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(describing("CatalogObject.Goods"), //$NON-NLS-1$
+                describing("CatalogObject.Goods"))); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testADifferentTypeNameComparesDifferent()
+    {
+        assertFalse(MetadataTypeBuilder.describesSameType(describing("CatalogObject.Goods"), //$NON-NLS-1$
+            describing("String"))); //$NON-NLS-1$
+        assertFalse("the head matching is not enough - the object is part of the name", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(describing("CatalogRef.Goods"), //$NON-NLS-1$
+                describing("CatalogRef.Partners"))); //$NON-NLS-1$
+    }
+
+    /** A String(10) and a String(20) are the same type NAME and a different type. */
+    @Test
+    public void testStringQualifiersAreCompared()
+    {
+        assertFalse("a shorter string truncates stored values", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(string(10, false), string(9, false)));
+        assertFalse("variable vs fixed length is a different type", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(string(10, false), string(10, true)));
+        assertFalse("a String written with NO length is not a stored String(10)", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(string(10, false), describing("String"))); //$NON-NLS-1$
+        assertTrue(MetadataTypeBuilder.describesSameType(string(10, true), string(10, true)));
+    }
+
+    @Test
+    public void testNumberQualifiersAreCompared()
+    {
+        assertFalse("precision decides how much fits", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(number(10, 2, false), number(8, 2, false)));
+        assertFalse("scale decides the fractional digits", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(number(10, 2, false), number(10, 0, false)));
+        assertFalse("non-negative refuses half the range", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(number(10, 2, false), number(10, 2, true)));
+        assertTrue(MetadataTypeBuilder.describesSameType(number(10, 2, true), number(10, 2, true)));
+    }
+
+    @Test
+    public void testDateCompositionIsCompared()
+    {
+        assertFalse("a Date drops the time part of a DateTime", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(date(DateFractions.DATE_TIME),
+                date(DateFractions.DATE)));
+        assertFalse(MetadataTypeBuilder.describesSameType(date(DateFractions.DATE),
+            date(DateFractions.TIME)));
+        assertTrue(MetadataTypeBuilder.describesSameType(date(DateFractions.DATE_TIME),
+            date(DateFractions.DATE_TIME)));
+    }
+
+    /**
+     * The qualifier our own builder never writes. A stored binary-qualified type must still compare
+     * different from a rebuilt one that carries no binary qualifier at all.
+     */
+    @Test
+    public void testBinaryQualifiersAreCompared()
+    {
+        TypeDescription stored = describing("ValueStorage"); //$NON-NLS-1$
+        BinaryQualifiers binary = McoreFactory.eINSTANCE.createBinaryQualifiers();
+        binary.setLength(1024);
+        stored.setBinaryQualifiers(binary);
+        assertFalse(MetadataTypeBuilder.describesSameType(stored, describing("ValueStorage"))); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testACompositeTypeIsComparedMemberByMemberAndInORDER()
+    {
+        assertTrue(MetadataTypeBuilder.describesSameType(describing("String", "Number"), //$NON-NLS-1$ //$NON-NLS-2$
+            describing("String", "Number"))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("the ORDER of the types is part of the description", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(describing("String", "Number"), //$NON-NLS-1$ //$NON-NLS-2$
+                describing("Number", "String"))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("dropping one member of a composite drops its values", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(describing("String", "Number"), //$NON-NLS-1$ //$NON-NLS-2$
+                describing("String"))); //$NON-NLS-1$
+        assertFalse("and adding one is a retype too", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(describing("String"), //$NON-NLS-1$
+                describing("String", "Number"))); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** A DefinedType is a TypeSet, and two different ones expand to different type sets. */
+    @Test
+    public void testDefinedTypesAreComparedByName()
+    {
+        assertTrue(MetadataTypeBuilder.describesSameType(definedType("MoneyAmount"), //$NON-NLS-1$
+            definedType("MoneyAmount"))); //$NON-NLS-1$
+        assertFalse(MetadataTypeBuilder.describesSameType(definedType("MoneyAmount"), //$NON-NLS-1$
+            definedType("Quantity"))); //$NON-NLS-1$
+    }
+
+    /**
+     * An unresolved proxy names nothing this process can read - and something that names nothing may
+     * not compare equal to anything, not even to another copy of itself. Whether the platform's
+     * type-name resolver is up in this JVM or not, the answer must be the same: ask.
+     */
+    @Test
+    public void testAnUnresolvedProxyNeverComparesEqual()
+    {
+        assertFalse("two unreadable proxies are not evidence of an unchanged type", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(unresolvedProxy(), unresolvedProxy()));
+        assertFalse(MetadataTypeBuilder.describesSameType(unresolvedProxy(),
+            describing("CatalogRef.Goods"))); //$NON-NLS-1$
+        assertFalse(MetadataTypeBuilder.describesSameType(describing("CatalogRef.Goods"), //$NON-NLS-1$
+            unresolvedProxy()));
+    }
+
+    /** A type item with no name at all is the same non-evidence as a proxy. */
+    @Test
+    public void testANamelessTypeNeverComparesEqual()
+    {
+        TypeDescription nameless = McoreFactory.eINSTANCE.createTypeDescription();
+        nameless.getTypes().add(McoreFactory.eINSTANCE.createType());
+        TypeDescription other = McoreFactory.eINSTANCE.createTypeDescription();
+        other.getTypes().add(McoreFactory.eINSTANCE.createType());
+        assertFalse(MetadataTypeBuilder.describesSameType(nameless, other));
+    }
+
+    /**
+     * Nothing is equal by DEFAULT. An empty type list would leave the whole verdict to the
+     * qualifiers, and two descriptions carrying neither types nor qualifiers would then compare
+     * equal on no evidence at all.
+     */
+    @Test
+    public void testNothingIsEqualByDefault()
+    {
+        assertFalse("two empty descriptions say nothing about each other", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(McoreFactory.eINSTANCE.createTypeDescription(),
+                McoreFactory.eINSTANCE.createTypeDescription()));
+        assertFalse("an attribute with no stored type is not the type about to be written", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType(null, describing("String"))); //$NON-NLS-1$
+        assertFalse(MetadataTypeBuilder.describesSameType(describing("String"), null)); //$NON-NLS-1$
+        assertFalse("and neither is something that is not a TypeDescription at all", //$NON-NLS-1$
+            MetadataTypeBuilder.describesSameType("String", describing("String"))); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** A {@code TypeDescription} naming each of {@code typeNames}, in order. */
+    private static TypeDescription describing(String... typeNames)
+    {
+        TypeDescription description = McoreFactory.eINSTANCE.createTypeDescription();
+        for (String typeName : typeNames)
+        {
+            Type type = McoreFactory.eINSTANCE.createType();
+            type.setName(typeName);
+            description.getTypes().add(type);
+        }
+        return description;
+    }
+
+    private static TypeDescription string(int length, boolean fixed)
+    {
+        TypeDescription description = describing("String"); //$NON-NLS-1$
+        StringQualifiers qualifiers = McoreFactory.eINSTANCE.createStringQualifiers();
+        qualifiers.setLength(length);
+        qualifiers.setFixed(fixed);
+        description.setStringQualifiers(qualifiers);
+        return description;
+    }
+
+    private static TypeDescription number(int precision, int scale, boolean nonNegative)
+    {
+        TypeDescription description = describing("Number"); //$NON-NLS-1$
+        NumberQualifiers qualifiers = McoreFactory.eINSTANCE.createNumberQualifiers();
+        qualifiers.setPrecision(precision);
+        qualifiers.setScale(scale);
+        qualifiers.setNonNegative(nonNegative);
+        description.setNumberQualifiers(qualifiers);
+        return description;
+    }
+
+    private static TypeDescription date(DateFractions fractions)
+    {
+        TypeDescription description = describing("Date"); //$NON-NLS-1$
+        DateQualifiers qualifiers = McoreFactory.eINSTANCE.createDateQualifiers();
+        qualifiers.setDateFractions(fractions);
+        description.setDateQualifiers(qualifiers);
+        return description;
+    }
+
+    private static TypeDescription definedType(String name)
+    {
+        TypeDescription description = McoreFactory.eINSTANCE.createTypeDescription();
+        TypeSet typeSet = McoreFactory.eINSTANCE.createTypeSet();
+        typeSet.setName("DefinedType." + name); //$NON-NLS-1$
+        description.getTypes().add(typeSet);
+        return description;
+    }
+
+    /** A description whose single type is an EMF proxy no type-name resolver in this JVM knows. */
+    private static TypeDescription unresolvedProxy()
+    {
+        TypeDescription description = McoreFactory.eINSTANCE.createTypeDescription();
+        Type type = McoreFactory.eINSTANCE.createType();
+        ((InternalEObject)type).eSetProxyURI(
+            URI.createURI("http://ditrix.com/test/no-such-type#//NoSuchType")); //$NON-NLS-1$
+        description.getTypes().add(type);
+        return description;
     }
 }

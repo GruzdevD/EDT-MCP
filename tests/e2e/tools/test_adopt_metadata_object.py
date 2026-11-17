@@ -12,30 +12,49 @@ ENVIRONMENT / SCOPE:
   The fixture `TestConfiguration` has exactly one extension `TestConfiguration.tests`, which
   already ADOPTS `CommonModule.Calc` and `Catalog.Catalog` from the base. That gives us a
   stable, NON-MUTATING happy assertion: adopting an already-adopted object returns
-  action='alreadyAdopted' (the tool's isAdopted branch) WITHOUT changing anything. The other
-  cases are negative/contract (missing args, unknown object, unknown extension name) — all
-  benign, mutation-sensitive, and leaving the tree clean. The actual mutating adoptAndAttach
-  happy path (adopt a NOT-yet-adopted base object → objectBelonging=Adopted +
-  extendedConfigurationObject on disk) is validated LIVE during the dev redeploy loop and is a
-  candidate for the gated live-infobase suite; it is deliberately NOT run headless here because
-  the black-box harness resets only the BASE fixture per-test, not the extension, so a real
-  adopt would pollute tests/tests for later extension-reading tests (final_cleanup reverts it
-  only at run end).
+  action='alreadyAdopted' (the tool's isAdopted branch) WITHOUT changing anything. The
+  negative/contract cases (missing args, unknown object, unknown extension name) are benign,
+  mutation-sensitive, and leave the tree clean.
 
-DIFF: adopt mutates the EXTENSION, never the base git-tracked project on these paths; every
-case is non-mutating, so each asserts assert_no_diff() on the base fixture.
+  The NESTED-SUBSYSTEM cases (issue #708) run the real, mutating adoptAndAttach: they seed a
+  nested child under the base's `Subsystem.Subsystem` with create_metadata, adopt it into the
+  extension, and read the extension's files back. That used to be deliberately avoided because
+  the harness reset only the BASE fixture between tests; it no longer does: a write tool's
+  response names the projects it wrote (`writtenProjects`), the harness records that evidence
+  (harness._record_outcome) and the orchestrator resets the model of every fixture project a
+  test wrote (inside run_all._reset_after_write), so an adoption into the extension is reset
+  like a write into the base. Each such test still restores the extension itself in a finally
+  block, through harness.restore_extension_fixture - the restore every test that writes into
+  the extension shares - so a later extension-reading test never depends on that order.
+
+DIFF: the non-mutating cases assert assert_no_diff() on the base fixture; the nested-subsystem
+cases mutate the base (their seed) and the extension (the adoption), so they assert the files
+the adoption must write instead, and that a refused adoption leaves the extension untouched.
 """
 
 from harness import (
+    E2ECallTimeout,
+    calls_aborted,
     call,
+    rename_call,
     assert_ok,
     assert_error,
     assert_error_quality,
     assert_contains,
+    assert_not_contains,
     assert_no_diff,
+    assert_no_diff_rel,
+    poll_disk_contains_all,
+    poll_disk_path_gone,
+    read_disk,
+    read_fixture_file,
+    restore_extension_fixture,
+    settle_or_fail,
+    wait_for_project_ready,
     e2e_test,
     PROJECT,
     TESTS_PROJECT,
+    TESTS_PROJECT_REL,
 )
 
 
@@ -78,6 +97,8 @@ def test_already_adopted_object_is_benign_not_readopted():
         raise AssertionError(
             "a success that queued nothing must publish an EMPTY writtenProjects, got %r"
             % (s.get("writtenProjects"),))
+    if "dependencies" in s:
+        raise AssertionError("non-form re-adoption must keep the master response shape: %r" % s)
 
     assert_no_diff("adopt of an already-adopted object must not touch the base project")
 
@@ -122,3 +143,753 @@ def test_unknown_extension_name_lists_candidates():
     assert_error_quality(err, names=["NoSuchExtension_e2e", TESTS_PROJECT], suggests=[],
                          ctx="unknown extension names the bad value + the real candidate")
     assert_no_diff("a rejected adopt must not touch the project")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NESTED SUBSYSTEM (issue #708) — mutating: the adoption lands in the extension
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# A nested subsystem is a separate top object that its parent only REFERS to, so the source
+# resolver never found it: every spelling of the chain - the one list_subsystems prints included -
+# answered "Object not found". The base fixture's only subsystem is Subsystem.Subsystem; each test
+# seeds a nested child under it, adopts it, and reads the EXTENSION's files back directly. The
+# adoption submits the export of every file it changed (the child, each parent subsystem, the
+# extension's Configuration.mdo) and waits for the extension's export queue before it answers, so
+# the files are normally settled when the call returns. Each check still POLLS for one read that
+# holds every needle (poll_disk_contains_all on the extension's fixture path): that wait is skipped
+# where the export state cannot be observed, and a late export pass (the platform also exports a
+# changed top object on its own) may still be rewriting the file.
+
+_FIXTURE_SUBSYSTEM = "Subsystem"
+_PARENT_FQN = "Subsystem." + _FIXTURE_SUBSYSTEM
+# "Подсистема" - the Russian type token, written as escapes like the Java tests.
+_RU_SUBSYSTEM = "\u041f\u043e\u0434\u0441\u0438\u0441\u0442\u0435\u043c\u0430"
+# Extension-side files, relative to the extension fixture (TESTS_PROJECT_REL).
+_EXT_CONFIGURATION_MDO = "src/Configuration/Configuration.mdo"
+_EXT_PARENT_MDO = "src/Subsystems/%s/%s.mdo" % (_FIXTURE_SUBSYSTEM, _FIXTURE_SUBSYSTEM)
+_ADOPTED = "<objectBelonging>Adopted</objectBelonging>"
+
+
+def _nested_fqn(child):
+    """The chain of a subsystem nested directly under the fixture subsystem."""
+    return "%s.Subsystem.%s" % (_PARENT_FQN, child)
+
+
+def _ext_child_mdo(child):
+    """The extension-relative .mdo of a nested subsystem under the fixture subsystem."""
+    return "src/Subsystems/%s/Subsystems/%s/%s.mdo" % (_FIXTURE_SUBSYSTEM, child, child)
+
+
+def _seed_nested_child(child):
+    """Create a nested subsystem under the fixture subsystem in the BASE project; return its chain."""
+    fqn = _nested_fqn(child)
+    assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": fqn}),
+              "seed the nested subsystem %s in the base" % fqn)
+    wait_for_project_ready()
+    return fqn
+
+
+def _assert_adopted(r, fqn, ctx):
+    """An adoption that ran: the canonical chain, into the extension, written there and only there."""
+    assert_ok(r, ctx)
+    s = _structured(r, ctx)
+    for key, value in (("action", "adopted"), ("fqn", fqn), ("extensionProject", TESTS_PROJECT),
+                       ("objectBelonging", "ADOPTED")):
+        if s.get(key) != value:
+            raise AssertionError("expected %s=%r [%s]; got %r" % (key, value, ctx, s))
+    if s.get("writtenProjects") != [TESTS_PROJECT]:
+        raise AssertionError("an adoption writes the EXTENSION and nothing else [%s]; got "
+                             "writtenProjects=%r" % (ctx, s.get("writtenProjects")))
+    return s
+
+
+def _assert_nested_adoption_on_disk(child, ctx):
+    """The three files a nested adoption changes in the extension, each by its structural element."""
+    poll_disk_contains_all(
+        _ext_child_mdo(child),
+        ["<name>%s</name>" % child, _ADOPTED, "<parentSubsystem>%s</parentSubsystem>" % _PARENT_FQN],
+        ctx=ctx + ": the adopted child has its own .mdo, linked to its parent",
+        fixture_rel=TESTS_PROJECT_REL)
+    poll_disk_contains_all(
+        _EXT_PARENT_MDO,
+        ["<name>%s</name>" % _FIXTURE_SUBSYSTEM, _ADOPTED, "<subsystems>%s</subsystems>" % child],
+        ctx=ctx + ": the adopted parent lists the child in <subsystems>",
+        fixture_rel=TESTS_PROJECT_REL)
+    poll_disk_contains_all(
+        _EXT_CONFIGURATION_MDO, ["<subsystems>%s</subsystems>" % _PARENT_FQN],
+        ctx=ctx + ": the extension's configuration lists the top-level parent",
+        fixture_rel=TESTS_PROJECT_REL)
+
+
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
+def test_nested_subsystem_is_adopted_by_the_chain_list_subsystems_prints():
+    """#708 in the reporter's order: the top-level parent is adopted FIRST (step 4, which always
+    worked), then the nested child by exactly the chain list_subsystems prints (step 2, which
+    answered "Object not found"). The platform then links the child under the parent the extension
+    already holds - a different branch from the cascade below - and the parent's .mdo has to be
+    exported again, because it now lists the child.
+
+    Mutation thinking: without the chain branch the child is refused; a chain resolved one level
+    short answers 'alreadyAdopted' for the PARENT; a result that echoes the input instead of the
+    canonical chain fails the Russian re-adoption, in its `fqn` and in its `message`. WHICH files
+    the adoption queues for export is pinned by the unit test (AdoptMetadataObjectToolTest), not
+    here: the platform also exports a changed top object on its own after the commit, so this test
+    asserts the state the extension ends in on disk, not which call queued it."""
+    child = "E2EAdoptNestedAfterParent"
+    try:
+        fqn = _seed_nested_child(child)
+        listed = call("list_subsystems", {"projectName": PROJECT})
+        assert_ok(listed, "list_subsystems read-back of the seed")
+        assert_contains(listed.text, fqn, "list_subsystems prints the chain the adoption is addressed by")
+
+        _assert_adopted(call("adopt_metadata_object", {"projectName": PROJECT, "fqn": _PARENT_FQN}),
+                        _PARENT_FQN, "adopt the top-level parent first")
+        r = call("adopt_metadata_object", {"projectName": PROJECT, "fqn": fqn})
+        _assert_adopted(r, fqn, "adopt the nested subsystem by the chain list_subsystems prints")
+        _assert_nested_adoption_on_disk(child, "adopted under an already adopted parent")
+
+        # MODEL read-back in the extension: its own tree renders the adopted child by the chain.
+        wait_for_project_ready()
+        details = call("get_metadata_details", {"projectName": TESTS_PROJECT, "objectFqns": [fqn]})
+        assert_ok(details, "read the adopted nested subsystem back from the extension")
+        assert_contains(details.text, "## Subsystem: " + child,
+                        "the extension renders the adopted NESTED subsystem, not its parent")
+        assert_contains(details.text, "**Origin:** core (adopted)",
+                        "the extension's copy is an adopted base object")
+
+        # The Russian spelling of the same chain addresses the same, now adopted, object - and the
+        # result names it by the canonical chain, not by the half-translated input.
+        ru = "%s.%s.%s.%s" % (_RU_SUBSYSTEM, _FIXTURE_SUBSYSTEM, _RU_SUBSYSTEM, child)
+        again = call("adopt_metadata_object", {"projectName": PROJECT, "fqn": ru})
+        assert_ok(again, "re-adopt the nested subsystem by its Russian spelling")
+        s = _structured(again, "re-adoption payload")
+        if s.get("action") != "alreadyAdopted":
+            raise AssertionError("the same nested subsystem must be found already adopted; got %r" % (s,))
+        if s.get("fqn") != fqn:
+            raise AssertionError("the Russian spelling must come back as the canonical chain %r; got %r"
+                                 % (fqn, s.get("fqn")))
+        message = "'%s' is already adopted in extension '%s'." % (fqn, TESTS_PROJECT)
+        if s.get("message") != message:
+            raise AssertionError("the message must name the canonical chain too: expected %r; got %r"
+                                 % (message, s.get("message")))
+        if s.get("writtenProjects") != []:
+            raise AssertionError("a re-adoption queues nothing and must say so; got writtenProjects=%r"
+                                 % (s.get("writtenProjects"),))
+    except E2ECallTimeout:
+        # NO cleanup here: the timed-out call may still be writing these very files, and a git
+        # reset would race it. The orchestrator aborts the run on this.
+        raise
+    except BaseException:
+        restore_extension_fixture("a nested-subsystem adoption")
+        raise
+    else:
+        restore_extension_fixture("a nested-subsystem adoption")
+
+
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
+def test_exchange_plan_cascade_reports_and_exports_actual_added_objects():
+    """Seed real exchange-plan content; compare the response with disk and model on any EDT.
+
+    Older EDT may adopt only the plan. A silent cascade must fail even if the response omits it:
+    both the extension's catalog listing and its files are independent evidence of the addition.
+    """
+    catalog_name = "E2EAdoptCascadeGoods"
+    plan_name = "E2EAdoptCascadePlan"
+    catalog = "Catalog." + catalog_name
+    plan = "ExchangePlan." + plan_name
+    catalog_path = "src/Catalogs/%s/%s.mdo" % (catalog_name, catalog_name)
+    plan_path = "src/ExchangePlans/%s/%s.mdo" % (plan_name, plan_name)
+    try:
+        for fqn in (catalog, plan):
+            assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": fqn}),
+                      "seed cascade source " + fqn)
+            wait_for_project_ready()
+        assert_ok(call("modify_metadata", {
+            "projectName": PROJECT, "fqn": plan,
+            "content": [{"metadata": catalog, "autoRecord": "Allow"}],
+        }), "include the catalog in the base exchange plan")
+        wait_for_project_ready()
+        before = call("get_metadata_objects", {
+            "projectName": TESTS_PROJECT, "metadataType": "Catalog", "nameFilter": catalog_name,
+        })
+        assert_ok(before, "catalog is not adopted before this call")
+        assert_not_contains(before.text, catalog_name, "the cascade target must start absent")
+
+        response = _assert_adopted(call("adopt_metadata_object", {
+            "projectName": PROJECT, "fqn": plan, "extensionProjectName": TESTS_PROJECT,
+        }), plan, "adopt an exchange plan with real catalog content")
+        unavailable = response.get("cascadeAttribution") == "unavailable"
+        if "cascadeAttribution" in response and not unavailable:
+            raise AssertionError("unexpected cascade attribution status: %r" % response)
+        if unavailable:
+            if "cascadedObjects" in response or "cascadedCount" in response:
+                raise AssertionError("an unknown cascade must not publish a guessed list/count: %r" % response)
+            assert_contains(response.get("warning", ""), "Adoption committed", "the write succeeded")
+            assert_contains(response.get("warning", ""), "get_metadata_objects", "the warning gives an inspection step")
+            assert_contains(response.get("warning", ""), "do not retry", "the agent must not repeat a committed write")
+
+        # Disk first: adoption submits its own exports and waits before answering.
+        plan_disk = read_fixture_file(TESTS_PROJECT_REL, plan_path)
+        config_disk = read_fixture_file(TESTS_PROJECT_REL, _EXT_CONFIGURATION_MDO)
+        assert_contains(plan_disk, "<name>%s</name>" % plan_name, "requested plan is exported")
+        assert_contains(plan_disk, _ADOPTED, "the plan on disk is adopted")
+        assert_contains(config_disk, "<exchangePlans>%s</exchangePlans>" % plan,
+                        "the extension registers the plan")
+        try:
+            catalog_disk = read_fixture_file(TESTS_PROJECT_REL, catalog_path)
+        except FileNotFoundError:
+            catalog_disk = None
+
+        listed = call("get_metadata_objects", {
+            "projectName": TESTS_PROJECT, "metadataType": "Catalog", "nameFilter": catalog_name,
+        })
+        assert_ok(listed, "read back whether EDT actually cascaded")
+        if catalog_name in listed.text:
+            if not unavailable and (response.get("cascadedObjects") != [catalog]
+                                    or response.get("cascadedCount") != 1):
+                raise AssertionError("EDT adopted the catalog, but the response must name it exactly: %r"
+                                     % response)
+            if catalog_disk is None:
+                raise AssertionError("the reported cascade has no catalog .mdo on disk")
+            assert_contains(catalog_disk, "<name>%s</name>" % catalog_name, "cascaded catalog is exported")
+            assert_contains(catalog_disk, _ADOPTED, "cascaded catalog is an adopted copy")
+            assert_contains(config_disk, "<catalogs>%s</catalogs>" % catalog,
+                            "the extension registers the cascaded catalog")
+            assert_contains(plan_disk, "<mdObject>%s</mdObject>" % catalog,
+                            "the adopted exchange plan preserves its content")
+            details = call("get_metadata_details", {
+                "projectName": TESTS_PROJECT, "objectFqns": [catalog],
+            })
+            assert_ok(details, "read back the cascaded catalog")
+            assert_contains(details.text, "## Catalog: " + catalog_name, "the model holds the added catalog")
+            assert_contains(details.text, "**Origin:** core (adopted)", "the model copy is adopted")
+        else:
+            if "cascadedObjects" in response or "cascadedCount" in response:
+                raise AssertionError("EDT did not cascade; the response must retain the ordinary shape: %r"
+                                     % response)
+            if catalog_disk is not None:
+                raise AssertionError("no model cascade was reported, but a catalog .mdo was added")
+            assert_not_contains(config_disk, "<catalogs>%s</catalogs>" % catalog,
+                                "older EDT adds only the requested plan")
+            assert_not_contains(plan_disk, "<mdObject>%s</mdObject>" % catalog,
+                                "older EDT does not adopt exchange-plan content")
+        details = call("get_metadata_details", {"projectName": TESTS_PROJECT, "objectFqns": [plan]})
+        assert_ok(details, "read back the requested adopted plan")
+        assert_contains(details.text, "## ExchangePlan: " + plan_name, "the model holds the requested plan")
+        again = call("adopt_metadata_object", {
+            "projectName": PROJECT, "fqn": plan, "extensionProjectName": TESTS_PROJECT,
+        })
+        assert_ok(again, "re-adopting the plan is a no-op")
+        repeated = _structured(again, "repeated adoption")
+        if repeated.get("action") != "alreadyAdopted" or repeated.get("writtenProjects") != []:
+            raise AssertionError("a repeated adoption must write nothing: %r" % repeated)
+        if any(key in repeated for key in ("cascadedObjects", "cascadedCount", "cascadeAttribution", "warning")):
+            raise AssertionError("a previous transaction's cascade must not be attributed again: %r" % repeated)
+    except E2ECallTimeout:
+        raise
+    except BaseException:
+        restore_extension_fixture("an exchange-plan cascade adoption")
+        raise
+    else:
+        restore_extension_fixture("an exchange-plan cascade adoption")
+
+
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
+def test_nested_subsystem_adoption_adopts_its_parent_too():
+    """The cascade: the nested child is adopted - by its Russian spelling - while the extension does
+    not hold its parent, so the platform adopts the parent first. Before that, the two refusals
+    around it: the bare child name (the issue's fourth spelling, which names a TOP-level subsystem
+    only) and a chain that does not exist - neither may adopt anything, the parent in particular.
+
+    Mutation thinking: a resolver that answered a missing chain with its PARENT would adopt
+    Subsystem.Subsystem here - a success where the refusal is expected, so assert_error fails
+    first (the extension would not stay clean either); a refusal without the chain hint leaves the
+    caller where the issue left the reporter; a result that echoes the Russian input instead of the
+    canonical chain fails _assert_adopted. The export list is pinned by the unit test, as above."""
+    child = "E2EAdoptNestedCascade"
+    try:
+        fqn = _seed_nested_child(child)
+
+        bare = "Subsystem." + child
+        e = assert_error(call("adopt_metadata_object", {"projectName": PROJECT, "fqn": bare}),
+                         "a bare nested child names a top-level subsystem only")
+        assert_error_quality(e, names=[bare],
+                             suggests=["Type.Name", "Subsystem.<Parent>.Subsystem.<Child>",
+                                       "list_subsystems"],
+                             ctx="the refusal names the value and teaches the chain")
+        missing = _nested_fqn("E2EAdoptNoSuchChild")
+        e = assert_error(call("adopt_metadata_object", {"projectName": PROJECT, "fqn": missing}),
+                         "a nested chain that does not exist")
+        assert_error_quality(e, names=[missing], suggests=["not found", "list_subsystems"],
+                             ctx="a missing chain is not found - never its parent")
+        assert_no_diff_rel(TESTS_PROJECT_REL, "a refused adoption must not touch the extension - "
+                           "in particular, the parent must not have been adopted in its place")
+
+        # Adopted by the Russian spelling of the chain: the result must still name the canonical one.
+        ru = "%s.%s.%s.%s" % (_RU_SUBSYSTEM, _FIXTURE_SUBSYSTEM, _RU_SUBSYSTEM, child)
+        r = call("adopt_metadata_object", {"projectName": PROJECT, "fqn": ru})
+        _assert_adopted(r, fqn, "adopt a nested subsystem whose parent the extension does not hold, "
+                        "by its Russian spelling")
+        _assert_nested_adoption_on_disk(child, "the cascade adopted the parent")
+
+        # MODEL read-back: the cascade really adopted the parent, and the extension's own tree
+        # holds the whole chain.
+        wait_for_project_ready()
+        parent = call("adopt_metadata_object", {"projectName": PROJECT, "fqn": _PARENT_FQN})
+        assert_ok(parent, "the parent after the cascade")
+        if _structured(parent, "parent payload").get("action") != "alreadyAdopted":
+            raise AssertionError("the cascade must have adopted the parent; got %r" % (parent.structured,))
+        listed = call("list_subsystems", {"projectName": TESTS_PROJECT})
+        assert_ok(listed, "list_subsystems on the extension")
+        assert_contains(listed.text, fqn, "the extension's tree holds the adopted chain")
+    except E2ECallTimeout:
+        # NO cleanup here: the timed-out call may still be writing these very files.
+        raise
+    except BaseException:
+        restore_extension_fixture("a nested-subsystem adoption")
+        raise
+    else:
+        restore_extension_fixture("a nested-subsystem adoption")
+
+
+# Common pictures referenced by a newly adopted form (issue #539).
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
+def test_adopting_form_also_adopts_its_common_picture_on_disk():
+    """First adoption persists both dependencies and deduplicates repeated references."""
+    picture_name = "E2EAdoptFormPicture"
+    picture_fqn = "CommonPicture." + picture_name
+    form_name = "E2EAdoptPictureForm"
+    form_fqn = "Catalog.Catalog.Form." + form_name
+    form_disk = "src/Catalogs/Catalog/Forms/%s/Form.form" % form_name
+    picture_disk = "src/CommonPictures/%s/%s.mdo" % (picture_name, picture_name)
+    try:
+        assert_ok(call("create_metadata", {
+            "projectName": PROJECT, "fqn": picture_fqn,
+        }), "seed the form's common picture in the base configuration")
+        wait_for_project_ready()
+        assert_ok(call("create_metadata", {
+            "projectName": PROJECT, "fqn": form_fqn, "generateContent": True,
+        }), "seed a new base form that the extension has never adopted")
+        wait_for_project_ready()
+        for field in ("Code", "Description"):
+            assert_ok(call("modify_metadata", {
+                "projectName": PROJECT,
+                "fqn": form_fqn + ".Field." + field,
+                "properties": [{"name": "headerPicture", "value": picture_fqn}],
+            }), "set the shared picture on the new form's " + field + " field")
+            # The write submits its export: inspect the settled bytes immediately, once.
+            assert_contains(read_disk(form_disk), picture_fqn,
+                            "the form must persist its common-picture reference")
+
+        # Re-import the saved reference to exercise a CommonPicture proxy as well as a live object.
+        assert_ok(call("clean_project", {"projectName": PROJECT}),
+                  "reload the saved form before adopting it")
+        wait_for_project_ready()
+        adopted = call("adopt_metadata_object", {
+            "projectName": PROJECT, "fqn": form_fqn,
+            "extensionProjectName": TESTS_PROJECT, "includeReferencedPictures": True,
+        })
+        assert_ok(adopted, "the first call must adopt the form and picture without a warm-up retry")
+
+        # DISK FIRST: every affected top object must already be exported.
+        picture_xml = read_fixture_file(TESTS_PROJECT_REL, picture_disk)
+        assert_contains(picture_xml, "<name>%s</name>" % picture_name,
+                        "the common picture must have its own extension .mdo")
+        assert_contains(picture_xml, _ADOPTED, "the common picture must be adopted")
+        extension_xml = read_fixture_file(TESTS_PROJECT_REL, _EXT_CONFIGURATION_MDO)
+        assert_contains(extension_xml, "<commonPictures>%s</commonPictures>" % picture_fqn,
+                        "the extension must register the adopted picture")
+        assert _structured(adopted, "form adoption").get("action") == "adopted", \
+            "the newly seeded form must be adopted for the first time"
+
+        pictures = _picture_dependencies(adopted, "first-adoption dependencies")
+        assert pictures == {"found": [picture_fqn], "adopted": [picture_fqn],
+                            "alreadyPresent": [], "unresolved": []}, pictures
+        details = call("get_metadata_details", {
+            "projectName": TESTS_PROJECT, "objectFqns": [picture_fqn],
+        })
+        assert_ok(details, "read the adopted common picture from the extension's model")
+        assert_contains(details.text, picture_name, "the extension model must contain the picture")
+        assert_contains(details.text, "**Origin:** core (adopted)",
+                        "the extension model must identify the picture as an adopted base object")
+
+        again = call("adopt_metadata_object", {
+            "projectName": PROJECT, "fqn": form_fqn,
+            "extensionProjectName": TESTS_PROJECT, "includeReferencedPictures": True,
+        })
+        assert_ok(again, "repeat the form adoption without duplicating its picture")
+        assert_contains(read_fixture_file(TESTS_PROJECT_REL, picture_disk), _ADOPTED,
+                        "the repeat call must preserve the adopted picture on disk")
+        repeated = _structured(again, "repeat form adoption")
+        assert repeated.get("action") == "alreadyAdopted", repeated
+        assert repeated.get("writtenProjects") == [], repeated
+        assert _picture_dependencies(again, "idempotent dependencies") == {
+            "found": [picture_fqn], "adopted": [], "alreadyPresent": [picture_fqn], "unresolved": []}
+        _assert_no_adoption_errors(form_fqn, picture_fqn)
+    finally:
+        # A timed-out tool can still be writing: never race it by restoring fixture files.
+        if not calls_aborted():
+            restore_extension_fixture("a form adoption with common pictures")
+
+
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
+def test_adopting_picture_form_also_adopts_new_owner_on_first_call():
+    """Run first after an EDT restart to cover a cold member lookup with a newly adopted owner."""
+    owner_name = "E2EFormOwner539"
+    owner_fqn = "Catalog." + owner_name
+    form_name = "ColdForm539"
+    form_fqn = owner_fqn + ".Form." + form_name
+    picture_name = "E2EFormOwnerPicture539"
+    picture_fqn = "CommonPicture." + picture_name
+    try:
+        for fqn in (owner_fqn, picture_fqn):
+            assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": fqn}),
+                      "seed the new form owner and picture")
+            settle_or_fail("preparing first adoption with a new owner")
+        assert_ok(call("create_metadata", {
+            "projectName": PROJECT, "fqn": form_fqn, "generateContent": True,
+        }), "seed the new owner's form")
+        settle_or_fail("setting the form-root picture")
+        assert_ok(call("modify_metadata", {
+            "projectName": PROJECT, "fqn": form_fqn,
+            "properties": [{"name": "createButtonsGroupPicture", "value": picture_fqn}],
+        }), "persist a picture on the form root")
+        assert_ok(call("clean_project", {"projectName": PROJECT}), "reload the saved base form")
+        settle_or_fail("adopting a form whose owner is absent from the extension")
+        before = call("get_metadata_objects", {"projectName": TESTS_PROJECT, "metadataType": "catalogs"})
+        assert_ok(before, "read extension owners before adoption")
+        assert_not_contains(before.text, owner_name, "positive control: the owner has not been adopted")
+
+        result = call("adopt_metadata_object", {
+            "projectName": PROJECT, "fqn": form_fqn, "extensionProjectName": TESTS_PROJECT,
+            "includeReferencedPictures": True,
+        })
+        assert_ok(result, "the first adoption must attach the owner, form and picture without retry")
+        owner_xml = read_fixture_file(TESTS_PROJECT_REL, "src/Catalogs/%s/%s.mdo" % (owner_name, owner_name))
+        assert_contains(owner_xml, "<name>%s</name>" % owner_name, "the new owner must be exported")
+        assert_contains(owner_xml, _ADOPTED, "the new owner must be adopted")
+        assert_contains(read_fixture_file(TESTS_PROJECT_REL,
+                        "src/Catalogs/%s/Forms/%s/Form.form" % (owner_name, form_name)),
+                        picture_fqn, "the adopted form must retain its picture")
+        assert_contains(read_fixture_file(TESTS_PROJECT_REL,
+                        "src/CommonPictures/%s/%s.mdo" % (picture_name, picture_name)),
+                        _ADOPTED, "the picture must be exported as adopted")
+        payload = _structured(result, "first adoption with a new owner")
+        assert payload.get("action") == "adopted", payload
+        assert payload.get("persisted") is True, payload
+        assert payload.get("writtenProjects") == [TESTS_PROJECT], payload
+        assert _picture_dependencies(result, "new-owner dependencies") == {
+            "found": [picture_fqn], "adopted": [picture_fqn], "alreadyPresent": [], "unresolved": []}
+        details = call("get_metadata_details", {
+            "projectName": TESTS_PROJECT, "objectFqns": [owner_fqn, form_fqn],
+        })
+        assert_ok(details, "read back the newly adopted owner and form")
+        assert_contains(details.text, "**Origin:** core (adopted)", "the owner must be adopted in the model")
+        assert_contains(details.text, "# Form Structure: Catalog.%s.Form.%s" % (owner_name, form_name),
+                        "the form must be present in the model")
+        _assert_no_adoption_errors(owner_fqn, form_fqn, picture_fqn)
+    finally:
+        if not calls_aborted():
+            restore_extension_fixture("first adoption of a picture form and its new owner")
+
+
+def _picture_dependencies(result, ctx):
+    payload = _structured(result, ctx)
+    dependencies = payload.get("dependencies", {}).get("commonPictures")
+    assert isinstance(dependencies, dict), "missing common-picture dependency result: %r" % payload
+    return dependencies
+
+
+def _seed_picture_form(form_name, picture_value):
+    form_fqn = "Catalog.Catalog.Form." + form_name
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT, "fqn": form_fqn, "generateContent": True,
+    }), "create a fresh base form for picture adoption")
+    settle_or_fail("setting the new form's picture")
+    assert_ok(call("modify_metadata", {
+        "projectName": PROJECT, "fqn": form_fqn + ".Field.Code",
+        "properties": [{"name": "headerPicture", "value": picture_value}],
+    }), "set the fresh form's header picture")
+    content = read_disk("src/Catalogs/Catalog/Forms/%s/Form.form" % form_name)
+    assert_contains(content, "<headerPicture", "the seed must persist its picture containment")
+    assert_contains(content, picture_value.rsplit(".", 1)[-1],
+                    "the seed must persist the chosen picture target")
+    return form_fqn
+
+
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
+def test_readopting_form_repairs_deleted_extension_picture():
+    """Repair must resolve the existing extension form's cross-project picture reference."""
+    _repair_adopted_form_picture(False)
+
+
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
+def test_readopting_form_under_renamed_extension_owner_repairs_picture():
+    """An ID-mapped adopted owner may have a different programmatic name in the extension."""
+    _repair_adopted_form_picture(True)
+
+
+def _repair_adopted_form_picture(rename_owner):
+    name = "E2ERepairAdoptedPicture"
+    picture_fqn = "CommonPicture." + name
+    form_name = "E2ERepairPictureForm"
+    picture_disk = "src/CommonPictures/%s/%s.mdo" % (name, name)
+    form_disk = "src/Catalogs/Catalog/Forms/%s/Form.form" % form_name
+    try:
+        assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": picture_fqn}),
+                  "seed the repair picture in the base")
+        settle_or_fail("preparing the picture-adoption fixture")
+        form_fqn = _seed_picture_form(form_name, picture_fqn)
+        first = call("adopt_metadata_object", {
+            "projectName": PROJECT, "fqn": form_fqn, "extensionProjectName": TESTS_PROJECT, "includeReferencedPictures": True,
+        })
+        assert_ok(first, "adopt the form and picture before removing the picture copy")
+        first_outcome = _structured(first, "first adoption into an existing owner")
+        assert first_outcome.get("action") == "adopted", first.text
+        assert first_outcome.get("persisted") is True, first.text
+        assert_contains(read_fixture_file(TESTS_PROJECT_REL, picture_disk), "<name>%s</name>" % name,
+                        "positive control: the extension picture must exist before deletion")
+        assert_contains(read_fixture_file(TESTS_PROJECT_REL, form_disk), picture_fqn,
+                        "the adopted form must persist its common-picture reference")
+        assert_contains(read_fixture_file(TESTS_PROJECT_REL, form_disk.replace("/Form.form", "/BaseForm/Form.form")),
+                        picture_fqn, "the native base snapshot must be exported under the adopted owner")
+        _assert_no_adoption_errors(form_fqn, picture_fqn)
+
+        renamed_owner = "E2ERenamedAdoptOwner"
+        if rename_owner:
+            assert_ok(rename_call({
+                "projectName": TESTS_PROJECT, "objectFqn": "Catalog.Catalog",
+                "newName": renamed_owner, "confirm": True,
+            }), "rename only the extension's ID-mapped adopted owner")
+            poll_disk_contains_all("src/Catalogs/%s/%s.mdo" % (renamed_owner, renamed_owner),
+                                   ["<name>%s</name>" % renamed_owner, _ADOPTED,
+                                    'extendedConfigurationObject="'],
+                                   ctx="the renamed owner must retain its origin link on disk",
+                                   fixture_rel=TESTS_PROJECT_REL)
+            form_disk = "src/Catalogs/%s/Forms/%s/Form.form" % (renamed_owner, form_name)
+            poll_disk_contains_all(form_disk, [picture_fqn], fixture_rel=TESTS_PROJECT_REL,
+                                   ctx="the form content must follow the renamed extension owner")
+            renamed = call("get_metadata_details", {
+                "projectName": TESTS_PROJECT,
+                "objectFqns": ["Catalog.%s.Form.%s" % (renamed_owner, form_name)],
+            })
+            assert_ok(renamed, "read the form at its current extension address")
+            assert_contains(renamed.text, "# Form Structure: Catalog.%s.Form.%s" % (renamed_owner, form_name),
+                            "the extension model must expose the renamed owner's form")
+
+        preview = call("delete_metadata", {"projectName": TESTS_PROJECT, "fqn": picture_fqn})
+        assert_ok(preview, "preview deleting only the extension picture copy")
+        assert _structured(preview, "picture delete preview").get("action") == "preview", preview
+        deleted = call("delete_metadata", {
+            "projectName": TESTS_PROJECT, "fqn": picture_fqn, "confirm": True, "force": True,
+        })
+        assert_ok(deleted, "remove the extension picture while retaining the base picture")
+        # The container export is submitted by delete_metadata; its own file removal is not.
+        assert_not_contains(read_fixture_file(TESTS_PROJECT_REL, _EXT_CONFIGURATION_MDO),
+                            "<commonPictures>%s</commonPictures>" % picture_fqn,
+                            "the extension must unregister its deleted picture")
+        poll_disk_path_gone("../%s/%s" % (TESTS_PROJECT_REL.rsplit("/", 1)[-1], picture_disk),
+                            ctx="the extension picture's own file must really be deleted")
+        assert_contains(read_fixture_file(TESTS_PROJECT_REL, form_disk), picture_fqn,
+                        "repair requires the adopted form to retain its picture reference")
+        missing = call("get_metadata_objects", {
+            "projectName": TESTS_PROJECT, "metadataType": "commonPictures",
+        })
+        assert_ok(missing, "read the extension model after deleting its picture")
+        assert_not_contains(missing.text, name, "the extension picture must be absent from the model")
+        assert_ok(call("clean_project", {"projectName": TESTS_PROJECT}),
+                  "reload the adopted form's cross-project picture reference before repair")
+        settle_or_fail("repairing the reloaded extension form")
+
+        for option in (() if rename_owner else ({}, {"includeReferencedPictures": False})):
+            unchanged = call("adopt_metadata_object", {
+                "projectName": PROJECT, "fqn": form_fqn, "extensionProjectName": TESTS_PROJECT, **option,
+            })
+            assert_ok(unchanged, "default/false must keep the earlier no-op contract")
+            unchanged_payload = _structured(unchanged, "default readoption")
+            assert "dependencies" not in unchanged_payload, unchanged_payload
+            assert unchanged_payload.get("writtenProjects") == [], unchanged_payload
+        repaired = call("adopt_metadata_object", {
+            "projectName": PROJECT, "fqn": form_fqn, "extensionProjectName": TESTS_PROJECT, "includeReferencedPictures": True,
+        })
+        assert_ok(repaired, "re-adopt the existing form to repair its missing picture")
+        picture_xml = read_fixture_file(TESTS_PROJECT_REL, picture_disk)
+        assert_contains(picture_xml, "<name>%s</name>" % name, "repair must recreate the picture .mdo")
+        assert_contains(picture_xml, _ADOPTED, "the repaired picture must be adopted")
+        assert_contains(read_fixture_file(TESTS_PROJECT_REL, _EXT_CONFIGURATION_MDO),
+                        "<commonPictures>%s</commonPictures>" % picture_fqn,
+                        "repair must register the recreated extension picture")
+        payload = _structured(repaired, "repair result")
+        assert payload.get("action") == "alreadyAdopted", payload
+        assert payload.get("writtenProjects") == [TESTS_PROJECT], payload
+        pictures = _picture_dependencies(repaired, "repair dependencies")
+        assert pictures.get("found") == [picture_fqn], pictures
+        assert pictures.get("adopted") == [picture_fqn], pictures
+        assert pictures.get("unresolved") == [], pictures
+        details = call("get_metadata_details", {
+            "projectName": TESTS_PROJECT, "objectFqns": [picture_fqn],
+        })
+        assert_ok(details, "read the repaired picture from the extension model")
+        assert_contains(details.text, "**Origin:** core (adopted)", "the repaired model copy must be adopted")
+        if rename_owner:
+            # EDT allows this rename but validates unequal base/extension names as a separate error.
+            assert_ok(rename_call({
+                "projectName": TESTS_PROJECT, "objectFqn": "Catalog." + renamed_owner,
+                "newName": "Catalog", "confirm": True,
+            }), "restore the owner's base name before checking project errors")
+            poll_disk_contains_all("src/Catalogs/Catalog/Catalog.mdo", ["<name>Catalog</name>"],
+                                   fixture_rel=TESTS_PROJECT_REL, ctx="restore the adopted owner's name")
+        _assert_no_adoption_errors(form_fqn, picture_fqn)
+    finally:
+        if not calls_aborted():
+            restore_extension_fixture("repair of an adopted form's missing picture")
+
+
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
+def test_readoption_reads_extension_item_form_instead_of_base_only_picture():
+    picture_fqn = "CommonPicture.E2EBaseOnlyAdoptPicture"
+    form_fqn = "Catalog.Catalog.Form.ItemForm"
+    form_disk = "src/Catalogs/Catalog/Forms/ItemForm/Form.form"
+    extension_before = read_fixture_file(TESTS_PROJECT_REL, form_disk)
+    try:
+        assert_ok(call("clean_project", {"projectName": TESTS_PROJECT}),
+                  "reload the persisted extension form before testing base-only references")
+        settle_or_fail("reading the persisted extension form")
+        assert_ok(call("create_metadata", {"projectName": PROJECT, "fqn": picture_fqn}),
+                  "seed a picture referenced only by the base form")
+        settle_or_fail("preparing the picture-adoption fixture")
+        assert_ok(call("modify_metadata", {
+            "projectName": PROJECT, "fqn": form_fqn + ".Field.Description",
+            "properties": [{"name": "headerPicture", "value": picture_fqn}],
+        }), "set a base-only header picture after ItemForm was already adopted")
+        assert_contains(read_disk(form_disk), picture_fqn, "the base must contain the new reference")
+        assert_not_contains(read_fixture_file(TESTS_PROJECT_REL, form_disk), picture_fqn,
+                            "positive control: the extension copy has no such reference")
+        inherited = call("get_metadata_details", {
+            "projectName": TESTS_PROJECT, "objectFqns": [form_fqn + ".Field.Description"],
+            "assignable": True,
+        })
+        assert_ok(inherited, "read the merged extension model before filtering inherited pictures")
+        assert_contains(inherited.text, picture_fqn,
+                        "positive control: the merged model exposes the inherited base-only picture")
+
+        again = call("adopt_metadata_object", {
+            "projectName": PROJECT, "fqn": form_fqn, "extensionProjectName": TESTS_PROJECT, "includeReferencedPictures": True,
+        })
+        assert_ok(again, "re-adopt ItemForm using the extension copy's own dependencies")
+        assert read_fixture_file(TESTS_PROJECT_REL, form_disk) == extension_before, \
+            "re-adoption must preserve the extension's form content"
+        assert_no_diff_rel(TESTS_PROJECT_REL, "a base-only picture must not cause extension writes")
+        payload = _structured(again, "base-only picture repeat")
+        assert payload.get("action") == "alreadyAdopted", payload
+        assert payload.get("writtenProjects") == [], payload
+        pictures = _picture_dependencies(again, "base-only picture dependencies")
+        assert pictures == {"found": [], "adopted": [], "alreadyPresent": [], "unresolved": []}, pictures
+        details = call("get_metadata_details", {
+            "projectName": TESTS_PROJECT, "objectFqns": [form_fqn + ".Field.Description"],
+            "assignable": True,
+        })
+        assert_ok(details, "read back the extension field's own picture property")
+        assert_contains(details.text, picture_fqn,
+                        "read-only dependency discovery must preserve the merged model's inherited value")
+    finally:
+        if not calls_aborted():
+            restore_extension_fixture("a base-only picture during ItemForm re-adoption")
+
+
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
+def test_adopting_standard_picture_only_form_has_no_common_dependencies():
+    form_name = "E2EStandardPictureAdoptForm"
+    form_disk = "src/Catalogs/Catalog/Forms/%s/Form.form" % form_name
+    try:
+        form_fqn = _seed_picture_form(form_name, "StdPicture.Change")
+        adopted = call("adopt_metadata_object", {
+            "projectName": PROJECT, "fqn": form_fqn, "extensionProjectName": TESTS_PROJECT, "includeReferencedPictures": True,
+        })
+        assert_ok(adopted, "adopt a form referencing only a standard platform picture")
+        form_xml = read_fixture_file(TESTS_PROJECT_REL, form_disk)
+        assert_contains(form_xml, "<headerPicture", "the adopted form must preserve its PictureRef")
+        assert_contains(form_xml, "Change", "the adopted form must preserve its standard picture")
+        snapshot = read_fixture_file(TESTS_PROJECT_REL, form_disk.replace("/Form.form", "/BaseForm/Form.form"))
+        assert_contains(snapshot, "Change", "the native base snapshot must retain the standard picture")
+        pictures = _picture_dependencies(adopted, "standard-picture dependencies")
+        payload = _structured(adopted, "first standard-picture form adoption into an existing owner")
+        assert payload.get("action") == "adopted", payload
+        assert payload.get("writtenProjects") == [TESTS_PROJECT], payload
+        assert pictures == {"found": [], "adopted": [], "alreadyPresent": [], "unresolved": []}, pictures
+        details = call("get_metadata_details", {
+            "projectName": TESTS_PROJECT, "objectFqns": [form_fqn + ".Field.Code"], "assignable": True,
+        })
+        assert_ok(details, "read the adopted standard-picture field from the extension model")
+        assert_contains(details.text, "StdPicture.Change", "the platform picture must round-trip in the copy")
+        _assert_no_adoption_errors(form_fqn)
+    finally:
+        if not calls_aborted():
+            restore_extension_fixture("adoption of a standard-picture-only form")
+
+
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
+def test_include_referenced_pictures_refuses_non_form_fqns():
+    for fqn in ("Catalog.Catalog", "CommonModule.Calc", "Catalog.Catalog.Attribute.Attribute"):
+        result = call("adopt_metadata_object", {
+            "projectName": PROJECT, "fqn": fqn, "includeReferencedPictures": True,
+        })
+        error = assert_error(result, "picture adoption requires a form FQN")
+        assert_error_quality(error, names=[fqn, "includeReferencedPictures"],
+                             suggests=["CommonForm.Name", "Type.Object.Form.Name"])
+    assert_no_diff("refusing the option on objects and members must not write the base")
+    assert_no_diff_rel(TESTS_PROJECT_REL, "refusing the option must not write the extension")
+
+
+@e2e_test(tool="adopt_metadata_object", kind="write-metadata")
+def test_common_form_without_pictures_has_empty_dependencies():
+    name = "E2EAdoptCommonForm539"
+    fqn = "CommonForm." + name
+    try:
+        assert_ok(call("create_metadata", {
+            "projectName": PROJECT, "fqn": fqn,
+        }), "seed a common form")
+        settle_or_fail("adopting a common form")
+        result = call("adopt_metadata_object", {
+            "projectName": PROJECT, "fqn": fqn, "extensionProjectName": TESTS_PROJECT,
+            "includeReferencedPictures": True,
+        })
+        assert_ok(result, "adopt a common form with the explicit picture option")
+        payload = _structured(result, "common form adoption")
+        assert payload.get("action") == "adopted", payload
+        assert payload.get("fqn") == fqn, payload
+        assert payload.get("extensionProject") == TESTS_PROJECT, payload
+        assert payload.get("objectBelonging") == "ADOPTED", payload
+        assert payload.get("persisted") is True, payload
+        xml = read_fixture_file(TESTS_PROJECT_REL, "src/CommonForms/%s/%s.mdo" % (name, name))
+        assert_contains(xml, "<name>%s</name>" % name, "common form must be persisted")
+        assert_contains(xml, _ADOPTED, "common form must be marked adopted")
+        assert _picture_dependencies(result, "empty common form") == {
+            "found": [], "adopted": [], "alreadyPresent": [], "unresolved": []}
+        listing = call("get_metadata_objects", {
+            "projectName": TESTS_PROJECT, "metadataType": "commonForms",
+        })
+        assert_ok(listing, "read the common form's origin from the metadata listing")
+        rows = [line for line in listing.text.splitlines() if line.startswith("| " + name + " |")]
+        assert len(rows) == 1, listing.text
+        assert_contains(rows[0], "| core (adopted) |", "common form model belonging")
+        details = call("get_metadata_details", {"projectName": TESTS_PROJECT, "objectFqns": [fqn]})
+        assert_ok(details, "read back the adopted common form")
+        assert_contains(details.text, "# Form Structure: " + fqn,
+                        "the adopted common form must be readable through the form-structure view")
+    finally:
+        if not calls_aborted():
+            restore_extension_fixture("common form adoption with picture option")
+
+
+def _assert_no_adoption_errors(*fqns):
+    settle_or_fail("validating the adopted form and picture")
+    checked = call("get_project_errors", {
+        "projectName": TESTS_PROJECT, "objectFqns": list(fqns), "severity": "ERRORS",
+    })
+    assert_ok(checked, "validate adopted form and picture dependencies")
+    payload = checked.structured
+    report = payload.get("report") if isinstance(payload, dict) else checked.text
+    assert isinstance(report, str), "missing validation report: %r / %r" % (payload, checked.text)
+    assert_contains(report, "# No Errors Found",
+                    "adopted form and pictures must validate cleanly; actual report:\n" + report)

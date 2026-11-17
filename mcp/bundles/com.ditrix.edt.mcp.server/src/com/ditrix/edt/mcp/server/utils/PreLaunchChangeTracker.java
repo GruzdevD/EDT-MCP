@@ -16,6 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
@@ -37,8 +38,9 @@ import com.ditrix.edt.mcp.server.Activator;
  *
  * <p>Drives the selective recompute in
  * {@link LaunchLifecycleUtils#recomputeAndSettleIfDirty}: only projects whose
- * workspace content actually changed need a forced {@code recomputeAll()}; the
- * rest still get the cheap {@link BuildUtils#waitForDerivedData} pass to guard
+ * workspace content actually changed need fresh preparation. Only dirty extensions
+ * need a forced {@code recomputeAll()}; configurations drain EDT's incremental queue
+ * via {@link BuildUtils#awaitDerivedData} to guard
  * against any background-derived-data work already in flight.
  *
  * <h3>Two signals, one of which outlives the plugin</h3>
@@ -106,6 +108,7 @@ public final class PreLaunchChangeTracker
 
     /** Guards the one-time listener installation. */
     private static final AtomicBoolean LISTENER_INSTALLED = new AtomicBoolean(false);
+    private static Runnable listenerDisposable;
 
     /**
      * Projects whose resource tree THIS plugin instance has already synced with the
@@ -209,13 +212,13 @@ public final class PreLaunchChangeTracker
     }
 
     /** Live fingerprinter (production: the workspace walk below). */
-    private static volatile ProjectFingerprinter fingerprinter = defaultFingerprinter();
+    private static final AtomicReference<ProjectFingerprinter> fingerprinter = new AtomicReference<>(defaultFingerprinter());
 
     /** Live store (production: the project persistent property). */
-    private static volatile FingerprintStore store = defaultStore();
+    private static final AtomicReference<FingerprintStore> store = new AtomicReference<>(defaultStore());
 
     /** Live disk sync (production: a bounded {@code refreshLocal}). */
-    private static volatile DiskSync diskSync = defaultDiskSync();
+    private static final AtomicReference<DiskSync> diskSync = new AtomicReference<>(defaultDiskSync());
 
     /**
      * The production bindings live in ONE place each, used both to initialise the
@@ -286,9 +289,10 @@ public final class PreLaunchChangeTracker
         Map<String, Long> generations = new HashMap<>();
         Map<String, String> fingerprints = new HashMap<>();
         Set<String> dirtyNames = new HashSet<>();
+        Set<String> synchronizedSources = new HashSet<>();
         if (projects == null)
         {
-            return new PrepareSnapshot(generations, fingerprints, dirtyNames);
+            return new PrepareSnapshot(generations, fingerprints, dirtyNames, synchronizedSources);
         }
         for (IProject project : projects)
         {
@@ -300,6 +304,10 @@ public final class PreLaunchChangeTracker
             ensureTreeReflectsDisk(project);
             Evaluation evaluation = evaluate(project);
             fingerprints.put(name, evaluation.fingerprint);
+            if (DISK_SYNCED.contains(name) && evaluation.fingerprint != null)
+            {
+                synchronizedSources.add(name);
+            }
             if (evaluation.dirty)
             {
                 dirtyNames.add(name);
@@ -310,7 +318,7 @@ public final class PreLaunchChangeTracker
                 generations.put(name, generation != null ? generation : -1L);
             }
         }
-        return new PrepareSnapshot(generations, fingerprints, dirtyNames);
+        return new PrepareSnapshot(generations, fingerprints, dirtyNames, synchronizedSources);
     }
 
     /**
@@ -380,11 +388,11 @@ public final class PreLaunchChangeTracker
                 // Either we never managed to read the content, or the project
                 // re-dirtied while it was being recomputed. Both mean "this content
                 // state is not prepared" — erase, so no session certifies it.
-                store.clear(project);
+                store.get().clear(project);
             }
             else
             {
-                store.save(project, fingerprint);
+                store.get().save(project, fingerprint);
             }
         }
     }
@@ -399,13 +407,21 @@ public final class PreLaunchChangeTracker
         private final Map<String, Long> generations;
         private final Map<String, String> fingerprints;
         private final Set<String> dirtyNames;
+        private final Set<String> synchronizedSources;
 
         PrepareSnapshot(Map<String, Long> generations, Map<String, String> fingerprints,
-                Set<String> dirtyNames)
+                Set<String> dirtyNames, Set<String> synchronizedSources)
         {
             this.generations = Collections.unmodifiableMap(generations);
             this.fingerprints = Collections.unmodifiableMap(fingerprints);
             this.dirtyNames = Collections.unmodifiableSet(dirtyNames);
+            this.synchronizedSources = Collections.unmodifiableSet(synchronizedSources);
+        }
+
+        /** @return whether disk refresh and source fingerprinting succeeded before preparation */
+        public boolean hasSynchronizedSources(IProject project)
+        {
+            return project != null && synchronizedSources.contains(project.getName());
         }
 
         /**
@@ -454,8 +470,8 @@ public final class PreLaunchChangeTracker
      */
     private static Evaluation evaluate(IProject project)
     {
-        String fingerprint = fingerprinter.fingerprintOf(project);
-        String prepared = store.load(project);
+        String fingerprint = fingerprinter.get().fingerprintOf(project);
+        String prepared = store.get().load(project);
         boolean contentMatchesPrepared = fingerprint != null && fingerprint.equals(prepared);
         boolean dirty = !contentMatchesPrepared || DIRTY.containsKey(project.getName());
         return new Evaluation(fingerprint, dirty);
@@ -512,7 +528,7 @@ public final class PreLaunchChangeTracker
                 return;
             }
             long startedAt = System.currentTimeMillis();
-            if (diskSync.sync(project))
+            if (diskSync.get().sync(project))
             {
                 DISK_SYNCED.add(name);
                 Activator.logInfo("Pre-launch: synced " + name //$NON-NLS-1$
@@ -901,14 +917,19 @@ public final class PreLaunchChangeTracker
      * {@link IResourceChangeEvent#POST_CHANGE} and walks the delta to mark
      * affected open projects dirty.
      */
-    static void ensureListenerInstalled()
+    static synchronized Runnable ensureListenerInstalled()
     {
         if (LISTENER_INSTALLED.compareAndSet(false, true))
         {
             try
             {
-                ResourcesPlugin.getWorkspace().addResourceChangeListener(
-                    new ChangeListener(), IResourceChangeEvent.POST_CHANGE);
+                var workspace = ResourcesPlugin.getWorkspace();
+                IResourceChangeListener listener = new ChangeListener();
+                workspace.addResourceChangeListener(listener, IResourceChangeEvent.POST_CHANGE);
+                listenerDisposable = ListenerDisposables.register(() -> {
+                    workspace.removeResourceChangeListener(listener);
+                    LISTENER_INSTALLED.set(false);
+                });
             }
             catch (IllegalStateException e)
             {
@@ -917,6 +938,7 @@ public final class PreLaunchChangeTracker
                 LISTENER_INSTALLED.set(false);
             }
         }
+        return listenerDisposable;
     }
 
     // =========================================================================
@@ -931,9 +953,9 @@ public final class PreLaunchChangeTracker
     static void resetForTest()
     {
         simulatePluginRestartForTest();
-        fingerprinter = defaultFingerprinter();
-        store = defaultStore();
-        diskSync = defaultDiskSync();
+        fingerprinter.set(defaultFingerprinter());
+        store.set(defaultStore());
+        diskSync.set(defaultDiskSync());
         diskSyncTimeoutMs = DEFAULT_DISK_SYNC_TIMEOUT_MS;
     }
 
@@ -957,19 +979,19 @@ public final class PreLaunchChangeTracker
     /** Test hook: replaces the project fingerprinter. */
     static void setFingerprinterForTest(ProjectFingerprinter testFingerprinter)
     {
-        fingerprinter = testFingerprinter;
+        fingerprinter.set(testFingerprinter);
     }
 
     /** Test hook: replaces the prepared-content store. */
     static void setStoreForTest(FingerprintStore testStore)
     {
-        store = testStore;
+        store.set(testStore);
     }
 
     /** Test hook: replaces the disk sync. */
     static void setDiskSyncForTest(DiskSync testDiskSync)
     {
-        diskSync = testDiskSync;
+        diskSync.set(testDiskSync);
     }
 
     /** Test hook: shrinks the disk-sync deadline so the timeout path is testable. */

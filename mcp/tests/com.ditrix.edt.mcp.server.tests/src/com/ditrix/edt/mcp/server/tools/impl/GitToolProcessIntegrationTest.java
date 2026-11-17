@@ -9,6 +9,7 @@ package com.ditrix.edt.mcp.server.tools.impl;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -24,7 +25,9 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
@@ -36,6 +39,9 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import com.ditrix.edt.mcp.server.utils.git.BranchBindingLock;
+import com.ditrix.edt.mcp.server.utils.git.GitRepositoryResolver;
+import com.ditrix.edt.mcp.server.utils.git.GitCheckoutSupport;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -74,6 +80,9 @@ public class GitToolProcessIntegrationTest
     private static String gitUnavailableReason;
 
     private Path repository;
+
+    /** Extra temporary folders a test created outside {@link #repository} (the {@code init} tests). */
+    private final List<Path> scratch = new ArrayList<>();
 
     @BeforeClass
     public static void resolveGit()
@@ -122,12 +131,21 @@ public class GitToolProcessIntegrationTest
     @After
     public void deleteRepository() throws IOException
     {
-        if (repository == null || !Files.exists(repository))
+        deleteTree(repository);
+        for (Path folder : scratch)
+        {
+            deleteTree(folder);
+        }
+    }
+
+    private static void deleteTree(Path root) throws IOException
+    {
+        if (root == null || !Files.exists(root))
         {
             return;
         }
         List<String> undeleted = new ArrayList<>();
-        try (Stream<Path> paths = Files.walk(repository))
+        try (Stream<Path> paths = Files.walk(root))
         {
             Iterator<Path> deepestFirst = paths.sorted(Comparator.reverseOrder()).iterator();
             while (deepestFirst.hasNext())
@@ -259,6 +277,552 @@ public class GitToolProcessIntegrationTest
             output.replace('\\', '/'));
     }
 
+    /**
+     * Control bytes leave ESCAPED. Git prints a commit message byte for byte, so an {@code ESC[31m}
+     * stored in one is an ANSI command to whatever renders this output in a terminal, and a
+     * {@code 0x01} is invisible to whatever reads it. Measured on git 2.35.1: {@code log --format=%s}
+     * emits both RAW, which is why this needs a real process rather than a unit test of the helper.
+     */
+    @Test
+    public void testControlBytesInGitOutputReachTheCallerEscaped() throws Exception
+    {
+        commitWithMessage("bad" + (char)0x01 + "msg"); //$NON-NLS-1$ //$NON-NLS-2$
+        commitWithMessage((char)0x1B + "[31mred"); //$NON-NLS-1$
+
+        // Positive control for the whole test: real git must PRINT the raw bytes here, or the
+        // assertions below would hold against a setup that never stored them in the first place.
+        String raw = gitOutput("log", "-2", "--format=%s"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue("git itself must print the raw 0x01", raw.indexOf(0x01) >= 0); //$NON-NLS-1$
+        assertTrue("git itself must print the raw ESC", raw.indexOf(0x1B) >= 0); //$NON-NLS-1$
+
+        JsonObject result = run("log -2 --format=%s"); //$NON-NLS-1$
+        String output = result.get("output").getAsString(); //$NON-NLS-1$
+
+        assertTrue(result.toString(), result.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertTrue(output, output.contains("bad\\x01msg")); //$NON-NLS-1$
+        assertTrue(output, output.contains("\\x1b[31mred")); //$NON-NLS-1$
+        assertEquals("a raw C0 byte must not reach the caller: " + output, -1, output.indexOf(0x01)); //$NON-NLS-1$
+        assertEquals("a raw ESC must not reach the caller: " + output, -1, output.indexOf(0x1B)); //$NON-NLS-1$
+    }
+
+    /**
+     * Tab and the line break are the STRUCTURE of git's output - {@code status --short} is one entry
+     * per line, a diff hunk is indented - so they are exempt from the escaping. (CR is exempt for the
+     * same reason and is pinned by the unit table; git prints LF here on every platform.)
+     */
+    @Test
+    public void testTabAndLineBreaksSurviveUnescaped() throws Exception
+    {
+        commitWithMessage("tab" + (char)0x09 + "here"); //$NON-NLS-1$ //$NON-NLS-2$
+        Files.write(repository.resolve("tracked.txt"), //$NON-NLS-1$
+            "changed line\n".getBytes(StandardCharsets.UTF_8)); //$NON-NLS-1$
+        Files.write(repository.resolve("untracked.txt"), //$NON-NLS-1$
+            "x\n".getBytes(StandardCharsets.UTF_8)); //$NON-NLS-1$
+
+        String subject = run("log -1 --format=%s").get("output").getAsString(); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(subject, subject.contains("tab" + (char)0x09 + "here")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("a tab is structure and must not be escaped: " + subject, //$NON-NLS-1$
+            subject.contains("\\x09")); //$NON-NLS-1$
+
+        String status = run("status --short").get("output").getAsString(); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("a line break is structure and must not be escaped: " + status, //$NON-NLS-1$
+            status.contains("\\x0a")); //$NON-NLS-1$
+        assertTrue("the entries must stay on separate lines: " + status, //$NON-NLS-1$
+            status.lines().filter(line -> !line.isBlank()).count() >= 2);
+    }
+
+    /**
+     * The escaping runs AFTER the credential redaction, so it cannot hand back a secret the
+     * redaction would otherwise have masked. Both carriers are exercised in one test: a credential
+     * stored in the repository's own config (printed by {@code remote -v}) and one git prints out of
+     * a commit message that ALSO carries a control byte, so one output holds both at once. (A diff
+     * hunk over a file that contains a credential URL and a control byte would do just as well; the
+     * commit message is simply the cheapest way to build such an output.)
+     */
+    @Test
+    public void testEscapingDoesNotDefeatTheCredentialRedaction() throws Exception
+    {
+        git("remote", "add", "origin", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "https://user:s3cr3t-token@example.com/team/repo.git"); //$NON-NLS-1$
+        commitWithMessage("see https://user:s3cr3t-token@example.com/team/repo.git" //$NON-NLS-1$
+            + (char)0x01 + " end"); //$NON-NLS-1$
+
+        String remotes = run("remote -v").get("output").getAsString(); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(remotes, remotes.contains("origin")); //$NON-NLS-1$
+        assertFalse("the stored secret must not reach the caller: " + remotes, //$NON-NLS-1$
+            remotes.contains("s3cr3t-token")); //$NON-NLS-1$
+
+        String log = run("log -1 --format=%s").get("output").getAsString(); //$NON-NLS-1$ //$NON-NLS-2$
+        // Positive control: the line IS there, so the absence below is not the absence of an output.
+        assertTrue(log, log.contains("example.com/team/repo.git")); //$NON-NLS-1$
+        assertTrue("the control byte in the same output must be escaped: " + log, //$NON-NLS-1$
+            log.contains("\\x01")); //$NON-NLS-1$
+        assertFalse("the secret must not reach the caller: " + log, //$NON-NLS-1$
+            log.contains("s3cr3t-token")); //$NON-NLS-1$
+    }
+
+    // ==================== #656: branch-changing subcommands share set_branch_infobase's lock ====================
+
+    /** Holds {@link BranchBindingLock} on another thread until {@code release} opens; returns once it is held. */
+    private static Thread holdTheBindingLock(CountDownLatch release) throws InterruptedException
+    {
+        CountDownLatch held = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            if (BranchBindingLock.tryLock())
+            {
+                try
+                {
+                    held.countDown();
+                    release.await(30, TimeUnit.SECONDS);
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                }
+                finally
+                {
+                    BranchBindingLock.unlock();
+                }
+            }
+        });
+        holder.start();
+        assertTrue("the holder must take the lock", held.await(10, TimeUnit.SECONDS)); //$NON-NLS-1$
+        return holder;
+    }
+
+    /**
+     * A switch changes the branch the repository has checked out, so it waits while a binding change of
+     * {@code set_branch_infobase} holds the shared lock, and runs once it is released.
+     */
+    @Test(timeout = 60_000)
+    public void testASwitchWaitsWhileABindingChangeHoldsTheSharedLock() throws Exception
+    {
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = holdTheBindingLock(release);
+        AtomicReference<JsonObject> result = new AtomicReference<>();
+        Thread switching = new Thread(() -> {
+            try
+            {
+                result.set(run("switch -c lock-656")); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                throw new IllegalStateException(e);
+            }
+        });
+        try
+        {
+            switching.start();
+            switching.join(500);
+            assertTrue("the switch must wait while a binding change holds the lock: " + result.get(), //$NON-NLS-1$
+                switching.isAlive());
+            release.countDown();
+            switching.join(30_000);
+            assertFalse("the switch must run once the lock is released", switching.isAlive()); //$NON-NLS-1$
+            assertTrue(String.valueOf(result.get()), result.get().get("success").getAsBoolean()); //$NON-NLS-1$
+            assertEquals("lock-656", gitOutput("rev-parse", "--abbrev-ref", "HEAD").trim()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        }
+        finally
+        {
+            release.countDown();
+            holder.join(10_000);
+            switching.join(10_000);
+        }
+    }
+
+    /**
+     * A {@code pull --rebase} (or a {@code pull} with {@code pull.rebase} configured) detaches HEAD while the rebase
+     * runs, so a pull changes the branch the repository has checked out like a switch does: it waits while a binding
+     * change of {@code set_branch_infobase} holds the shared lock, and runs once it is released.
+     */
+    @Test(timeout = 60_000)
+    public void testAPullWaitsWhileABindingChangeHoldsTheSharedLock() throws Exception
+    {
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = holdTheBindingLock(release);
+        AtomicReference<JsonObject> result = new AtomicReference<>();
+        Thread pulling = new Thread(() -> {
+            try
+            {
+                result.set(run("pull --rebase")); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                throw new IllegalStateException(e);
+            }
+        });
+        try
+        {
+            pulling.start();
+            pulling.join(500);
+            assertTrue("a pull must wait while a binding change holds the lock: " + result.get(), //$NON-NLS-1$
+                pulling.isAlive());
+            release.countDown();
+            pulling.join(30_000);
+            assertFalse("the pull must run once the lock is released", pulling.isAlive()); //$NON-NLS-1$
+            // The test repository has no upstream, so git itself answers (non-zero): the process ran.
+            assertTrue("git must have run the pull: " + result.get(), //$NON-NLS-1$
+                result.get() != null && result.get().has("exitCode")); //$NON-NLS-1$
+        }
+        finally
+        {
+            release.countDown();
+            holder.join(10_000);
+            pulling.join(10_000);
+        }
+    }
+
+    /** A read that changes no branch is not held up by the lock: the lock covers only what can move the branch. */
+    @Test(timeout = 60_000)
+    public void testAStatusDoesNotWaitForTheSharedLock() throws Exception
+    {
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = holdTheBindingLock(release);
+        try
+        {
+            long started = System.nanoTime();
+            JsonObject status = run("status --short"); //$NON-NLS-1$
+            long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            assertTrue(String.valueOf(status), status.get("success").getAsBoolean()); //$NON-NLS-1$
+            // The holder keeps the lock for up to 30 s: a status that waited for it would take that long.
+            assertTrue("a status must not wait for the lock (took " + tookMillis + " ms)", //$NON-NLS-1$ //$NON-NLS-2$
+                tookMillis < 15_000);
+        }
+        finally
+        {
+            release.countDown();
+            holder.join(10_000);
+        }
+    }
+
+    /**
+     * {@code git stash branch <name>} checks a new branch out ("Switched to a new branch"), so it changes the branch
+     * the repository has checked out like a switch does: it waits while a binding change of
+     * {@code set_branch_infobase} holds the shared lock, and runs once it is released.
+     */
+    @Test(timeout = 60_000)
+    public void testAStashBranchWaitsWhileABindingChangeHoldsTheSharedLock() throws Exception
+    {
+        Files.write(repository.resolve("tracked.txt"), //$NON-NLS-1$
+            "stashed line\n".getBytes(StandardCharsets.UTF_8)); //$NON-NLS-1$
+        git("stash", "-q"); //$NON-NLS-1$ //$NON-NLS-2$
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = holdTheBindingLock(release);
+        AtomicReference<JsonObject> result = new AtomicReference<>();
+        Thread branching = new Thread(() -> {
+            try
+            {
+                result.set(run("stash branch from-stash-656")); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                throw new IllegalStateException(e);
+            }
+        });
+        try
+        {
+            branching.start();
+            branching.join(500);
+            assertTrue("a stash branch must wait while a binding change holds the lock: " + result.get(), //$NON-NLS-1$
+                branching.isAlive());
+            assertEquals("nothing may be checked out while it waits", "master", //$NON-NLS-1$ //$NON-NLS-2$
+                currentBranchOrMaster());
+            release.countDown();
+            branching.join(30_000);
+            assertFalse("the stash branch must run once the lock is released", branching.isAlive()); //$NON-NLS-1$
+            assertTrue(String.valueOf(result.get()), result.get().get("success").getAsBoolean()); //$NON-NLS-1$
+            assertEquals("from-stash-656", gitOutput("rev-parse", "--abbrev-ref", "HEAD").trim()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        }
+        finally
+        {
+            release.countDown();
+            holder.join(10_000);
+            branching.join(10_000);
+        }
+    }
+
+    /** The checked-out branch, with git's default initial branch ('master' or 'main') reported as 'master'. */
+    private String currentBranchOrMaster() throws IOException, InterruptedException
+    {
+        String branch = gitOutput("rev-parse", "--abbrev-ref", "HEAD").trim(); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return "main".equals(branch) ? "master" : branch; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * The step after a branch-changing command - in production the workspace refresh, where EDT's workspace catches
+     * up with the new branch - runs while the shared lock is still held, so no detach takes the lock between the
+     * checkout and EDT seeing it. After a command that moves no branch the step runs without the lock.
+     */
+    @Test(timeout = 60_000)
+    public void testTheStepAfterABranchChangeRunsUnderTheSharedLock() throws Exception
+    {
+        AtomicReference<Boolean> heldAfterSwitch = new AtomicReference<>();
+        String switched = new GitTool().runGit(GitTool.parseCommand("switch -c step-656"), repository.toFile(), //$NON-NLS-1$
+            () -> heldAfterSwitch.set(BranchBindingLock.isHeldByCurrentThread()));
+        assertTrue(switched, JsonParser.parseString(switched).getAsJsonObject().get("success").getAsBoolean()); //$NON-NLS-1$
+        assertEquals("the step after a switch must run under the lock", Boolean.TRUE, heldAfterSwitch.get()); //$NON-NLS-1$
+        assertFalse("the lock is released once the step is done", BranchBindingLock.isHeldByCurrentThread()); //$NON-NLS-1$
+
+        AtomicReference<Boolean> heldAfterStatus = new AtomicReference<>();
+        new GitTool().runGit(GitTool.parseCommand("status --short"), repository.toFile(), //$NON-NLS-1$
+            () -> heldAfterStatus.set(BranchBindingLock.isHeldByCurrentThread()));
+        assertEquals("the step after a status runs, without the lock", Boolean.FALSE, heldAfterStatus.get()); //$NON-NLS-1$
+    }
+
+    /**
+     * {@code git init} (#934) creates the repository in the folder, with the initial branch asked for,
+     * leaves the files already there untouched and untracked, runs the refresh step, and tells the
+     * caller what is left to do in EDT.
+     */
+    @Test(timeout = 60_000)
+    public void testInitCreatesARepositoryInTheFolderOnTheRequestedBranch() throws Exception
+    {
+        Path folder = scratchFolder();
+        Files.write(folder.resolve("Configuration.mdo"), "<mdclass/>\n".getBytes(StandardCharsets.UTF_8)); //$NON-NLS-1$ //$NON-NLS-2$
+        AtomicReference<Boolean> refreshed = new AtomicReference<>(Boolean.FALSE);
+
+        String json = new GitTool().runInit(GitTool.parseCommand("init -b trunk"), folder.toFile(), //$NON-NLS-1$
+            () -> refreshed.set(Boolean.TRUE));
+        JsonObject result = JsonParser.parseString(json).getAsJsonObject();
+
+        assertTrue(json, result.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertEquals(GitTool.INIT_NEXT_STEP, result.get("nextStep").getAsString()); //$NON-NLS-1$
+        assertEquals("the workspace refresh runs after the process", Boolean.TRUE, refreshed.get()); //$NON-NLS-1$
+        assertTrue("the repository is the folder's own", Files.isDirectory(folder.resolve(".git"))); //$NON-NLS-1$
+        try (Repository created = new FileRepositoryBuilder().setGitDir(folder.resolve(".git").toFile()).build()) //$NON-NLS-1$
+        {
+            assertEquals("refs/heads/trunk", created.getFullBranch()); //$NON-NLS-1$
+            assertEquals(folder.toFile().getCanonicalFile(), created.getWorkTree().getCanonicalFile());
+        }
+        assertEquals("an existing file is left as it was", "<mdclass/>\n", //$NON-NLS-1$ //$NON-NLS-2$
+            new String(Files.readAllBytes(folder.resolve("Configuration.mdo")), StandardCharsets.UTF_8)); //$NON-NLS-1$
+        HelperResult status = runHelper(folder, Arrays.asList(gitExecutable, "status", "--porcelain")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(status.output, 0, status.exitCode);
+        assertTrue("and is untracked - init stages nothing: " + status.output, //$NON-NLS-1$
+            status.output.contains("?? Configuration.mdo")); //$NON-NLS-1$
+    }
+
+    /** Real git reads the accepted cluster {@code -qb<name>} exactly as the grammar does: quiet, branch main. */
+    @Test(timeout = 60_000)
+    public void testInitClusterIsReadByGitAsTheGrammarReadsIt() throws Exception
+    {
+        Path folder = scratchFolder();
+        JsonObject result = JsonParser.parseString(
+            new GitTool().runInit(GitTool.parseCommand("init -qbmain"), folder.toFile(), null)).getAsJsonObject(); //$NON-NLS-1$
+        assertTrue(result.toString(), result.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertEquals("quiet: git printed nothing", "", result.get("output").getAsString().trim()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        try (Repository created = new FileRepositoryBuilder().setGitDir(folder.resolve(".git").toFile()).build()) //$NON-NLS-1$
+        {
+            assertEquals("refs/heads/main", created.getFullBranch()); //$NON-NLS-1$
+        }
+    }
+
+    /** A failed init is a failure with git's message and no next step to follow. */
+    @Test(timeout = 60_000)
+    public void testAFailedInitCarriesNoNextStep() throws Exception
+    {
+        Path folder = scratchFolder();
+        // A '.git' file git cannot follow makes it fail; the tool's own refusal is bypassed on purpose
+        // by driving the run seam directly.
+        Files.write(folder.resolve(".git"), "not a gitfile\n".getBytes(StandardCharsets.UTF_8)); //$NON-NLS-1$ //$NON-NLS-2$
+        JsonObject result = JsonParser.parseString(
+            new GitTool().runInit(GitTool.parseCommand("init"), folder.toFile(), null)).getAsJsonObject(); //$NON-NLS-1$
+        assertFalse(result.toString(), result.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertTrue(result.toString(), result.get("exitCode").getAsInt() != 0); //$NON-NLS-1$
+        assertFalse("no next step after a failure: " + result, result.has("nextStep")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * git itself DOES create a repository nested inside another (positive control), which is exactly
+     * why the tool's refusal is needed: for a folder inside this test's repository it refuses and names
+     * the repository's root.
+     */
+    @Test(timeout = 60_000)
+    public void testANestedInitIsRefusedAlthoughGitWouldRunIt() throws Exception
+    {
+        Path nested = Files.createDirectories(repository.resolve("projects").resolve("Sales")); //$NON-NLS-1$ //$NON-NLS-2$
+        String refusal = GitRepositoryResolver.existingRepositoryRefusal(nested.toFile(), "Sales"); //$NON-NLS-1$
+        assertNotNull("a folder inside a work tree must be refused", refusal); //$NON-NLS-1$
+        assertTrue(refusal, refusal.contains("lies inside that repository")); //$NON-NLS-1$
+        assertTrue(refusal, refusal.contains(repository.getFileName().toString()));
+
+        Path control = Files.createDirectories(repository.resolve("control")); //$NON-NLS-1$
+        HelperResult nestedByGit = runHelper(control, Arrays.asList(gitExecutable, "init", "-q")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals("git nests a repository without complaint: " + nestedByGit.output, 0, nestedByGit.exitCode); //$NON-NLS-1$
+        assertTrue(Files.isDirectory(control.resolve(".git"))); //$NON-NLS-1$
+    }
+
+    /**
+     * In a LINKED worktree ({@code git worktree add}) the refusal names the worktree folder - where the
+     * project's files are - not its git directory under {@code .git/worktrees}, which is what the
+     * bundled JGit reports for one (it sees a linked worktree as bare).
+     */
+    @Test(timeout = 60_000)
+    public void testANestedInitInALinkedWorktreeNamesTheWorktreeFolder() throws Exception
+    {
+        Path linked = scratchFolder().resolve("linked"); //$NON-NLS-1$
+        git("worktree", "add", "-q", "-b", "linked-934", linked.toString()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        Path nested = Files.createDirectories(linked.resolve("projects").resolve("Sales")); //$NON-NLS-1$ //$NON-NLS-2$
+
+        String refusal = GitRepositoryResolver.existingRepositoryRefusal(nested.toFile(), "Sales"); //$NON-NLS-1$
+
+        assertNotNull(refusal);
+        assertTrue(refusal, refusal.contains("repository at '" + linked.toRealPath() + "'")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse(refusal, refusal.contains("worktrees")); //$NON-NLS-1$
+        git("worktree", "remove", "--force", linked.toString()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /**
+     * The machine can make a plain {@code init} create what the grammar refuses: {@code GIT_DEFAULT_HASH}
+     * in EDT's environment a SHA-256 repository (unreadable for the bundled JGit), and
+     * {@code core.sharedRepository} in the user's configuration a shared one. Real git, both ways: the
+     * hostile setup really does it without the pins (positive control), and does not with them.
+     */
+    @Test(timeout = 60_000)
+    public void testTheInitPinsDefeatAHostileEnvironmentAndConfiguration() throws Exception
+    {
+        Path home = scratchFolder();
+        Path hostileConfig = home.resolve("hostile.gitconfig"); //$NON-NLS-1$
+        Files.write(hostileConfig, ("[core]\n\tsharedRepository = group\n" //$NON-NLS-1$
+            + "[init]\n\tdefaultObjectFormat = sha256\n\tdefaultRefFormat = reftable\n") //$NON-NLS-1$
+            .getBytes(StandardCharsets.UTF_8));
+        Map<String, String> hostile = new java.util.HashMap<>();
+        hostile.put("GIT_CONFIG_GLOBAL", hostileConfig.toString()); //$NON-NLS-1$
+        hostile.put("GIT_DEFAULT_HASH", "sha256"); //$NON-NLS-1$ //$NON-NLS-2$
+
+        Path unpinned = Files.createDirectories(home.resolve("unpinned")); //$NON-NLS-1$
+        HelperResult control = runHelperWithEnv(unpinned,
+            new ArrayList<>(Arrays.asList(gitExecutable, "init", "-q")), new java.util.HashMap<>(hostile)); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(control.output, 0, control.exitCode);
+        String controlConfig = new String(Files.readAllBytes(unpinned.resolve(".git").resolve("config")), //$NON-NLS-1$ //$NON-NLS-2$
+            StandardCharsets.UTF_8);
+        assertTrue("positive control: the hostile setup makes a SHA-256 repository: " + controlConfig, //$NON-NLS-1$
+            controlConfig.contains("objectformat = sha256")); //$NON-NLS-1$
+        assertTrue("positive control: ... and a shared one: " + controlConfig, //$NON-NLS-1$
+            controlConfig.contains("sharedrepository")); //$NON-NLS-1$
+
+        Path pinned = Files.createDirectories(home.resolve("pinned")); //$NON-NLS-1$
+        List<String> command = new ArrayList<>(Arrays.asList(gitExecutable, "init", "-q")); //$NON-NLS-1$ //$NON-NLS-2$
+        Map<String, String> env = new java.util.HashMap<>(hostile);
+        GitTool.applyInitDefaults(command, env);
+        HelperResult result = runHelperWithEnv(pinned, command, env);
+        assertEquals(result.output, 0, result.exitCode);
+        String config = new String(Files.readAllBytes(pinned.resolve(".git").resolve("config")), //$NON-NLS-1$ //$NON-NLS-2$
+            StandardCharsets.UTF_8);
+        assertFalse("the pinned init must create a SHA-1 repository: " + config, config.contains("objectformat")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("the pinned init must not create a shared repository: " + config, //$NON-NLS-1$
+            config.contains("sharedrepository")); //$NON-NLS-1$
+    }
+
+    /** {@link #runHelper} with extra environment variables applied after the scrub. */
+    private static HelperResult runHelperWithEnv(Path workingDirectory, List<String> command,
+        Map<String, String> extra) throws IOException, InterruptedException
+    {
+        ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
+        builder.directory(workingDirectory.toFile());
+        scrubGitEnvironment(builder.environment());
+        builder.environment().putAll(extra);
+        Process process = builder.start();
+        process.getOutputStream().close();
+        AtomicReference<String> captured = new AtomicReference<>(""); //$NON-NLS-1$
+        Thread drain = new Thread(() -> captured.set(readAllQuietly(process)), "git-helper-drain"); //$NON-NLS-1$
+        drain.setDaemon(true);
+        drain.start();
+        if (!process.waitFor(HELPER_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+        {
+            killAndAwait(process);
+            fail("helper git hung: " + command); //$NON-NLS-1$
+        }
+        drain.join(TimeUnit.SECONDS.toMillis(5));
+        return new HelperResult(process.exitValue(), captured.get());
+    }
+
+    /** A temporary folder outside every repository, deleted after the test. */
+    private Path scratchFolder() throws IOException
+    {
+        Path folder = Files.createTempDirectory("git-init-exec"); //$NON-NLS-1$
+        scratch.add(folder);
+        Assume.assumeTrue("the temporary directory lies inside a git repository on this machine", //$NON-NLS-1$
+            GitRepositoryResolver.existingRepositoryRefusal(folder.toFile(), "scratch") == null); //$NON-NLS-1$
+        return folder;
+    }
+
+    /**
+     * Codex P1 on #928 (round 5): a command of this tool that switches the work tree is a branch change of this
+     * server - the step after it gets the change registered before the process ran, the lifecycle
+     * {@code switch_git_branch} uses (#922). A command that moves only a ref, or none, gets no change.
+     */
+    @Test(timeout = 60_000)
+    public void testASwitchOfTheWorkTreeIsABranchChangeOfThisServer() throws Exception
+    {
+        AtomicReference<GitCheckoutSupport.BranchChange> afterSwitch = new AtomicReference<>();
+        String switched = new GitTool().runGitWith(GitTool.parseCommand("switch -c reload-922"), repository.toFile(), //$NON-NLS-1$
+            afterSwitch::set);
+        assertTrue(switched, JsonParser.parseString(switched).getAsJsonObject().get("success").getAsBoolean()); //$NON-NLS-1$
+        assertTrue("a switch reaches its step as a registered branch change", afterSwitch.get() != null); //$NON-NLS-1$
+
+        AtomicReference<GitCheckoutSupport.BranchChange> afterBranch = new AtomicReference<>();
+        AtomicBoolean branchStepRan = new AtomicBoolean();
+        new GitTool().runGitWith(GitTool.parseCommand("branch other-922"), repository.toFile(), change -> { //$NON-NLS-1$
+            branchStepRan.set(true);
+            afterBranch.set(change);
+        });
+        assertTrue(branchStepRan.get());
+        assertNull("a ref-only command rewrites no work tree", afterBranch.get()); //$NON-NLS-1$
+
+        AtomicBoolean statusStepRan = new AtomicBoolean();
+        AtomicReference<GitCheckoutSupport.BranchChange> afterStatus = new AtomicReference<>();
+        new GitTool().runGitWith(GitTool.parseCommand("status --short"), repository.toFile(), change -> { //$NON-NLS-1$
+            statusStepRan.set(true);
+            afterStatus.set(change);
+        });
+        assertTrue(statusStepRan.get());
+        assertNull(afterStatus.get());
+    }
+
+    /**
+     * Codex P2 on #928 (round 6): the project of a nested repository is not part of the outer repository's branch
+     * switch - the switch registers only the projects that repository checks out.
+     */
+    @Test(timeout = 120_000)
+    public void testANestedRepositorysProjectIsNotRegisteredWithTheSwitch() throws Exception
+    {
+        Path outerDir = Files.createDirectories(repository.resolve("Outer922")); //$NON-NLS-1$
+        Path nestedRepo = Files.createDirectories(repository.resolve("nested922")); //$NON-NLS-1$
+        Files.createDirectories(nestedRepo.resolve(".git")); //$NON-NLS-1$
+        Path innerDir = Files.createDirectories(nestedRepo.resolve("Inner922")); //$NON-NLS-1$
+        org.eclipse.core.resources.IProject outer = createProjectAt("GitOuter922r6", outerDir); //$NON-NLS-1$
+        org.eclipse.core.resources.IProject inner = createProjectAt("GitInner922r6", innerDir); //$NON-NLS-1$
+        try
+        {
+            AtomicReference<GitCheckoutSupport.BranchChange> change = new AtomicReference<>();
+            String switched = new GitTool().runGitWith(GitTool.parseCommand("switch -c nested-922"), //$NON-NLS-1$
+                repository.toFile(), change::set);
+            assertTrue(switched, JsonParser.parseString(switched).getAsJsonObject().get("success").getAsBoolean()); //$NON-NLS-1$
+            List<String> registered = com.ditrix.edt.mcp.server.utils.git.WorkTreeProjects.names(change.get().projects());
+            assertTrue(String.valueOf(registered), registered.contains("GitOuter922r6")); //$NON-NLS-1$
+            assertFalse("a nested repository's project is not part of the switch: " + registered, //$NON-NLS-1$
+                registered.contains("GitInner922r6")); //$NON-NLS-1$
+        }
+        finally
+        {
+            outer.delete(false, true, new org.eclipse.core.runtime.NullProgressMonitor());
+            inner.delete(false, true, new org.eclipse.core.runtime.NullProgressMonitor());
+        }
+    }
+
+    /** An open workspace project whose content lives at {@code location}. */
+    private static org.eclipse.core.resources.IProject createProjectAt(String name, Path location) throws Exception
+    {
+        org.eclipse.core.resources.IWorkspace workspace = org.eclipse.core.resources.ResourcesPlugin.getWorkspace();
+        org.eclipse.core.resources.IProject project = workspace.getRoot().getProject(name);
+        org.eclipse.core.resources.IProjectDescription description = workspace.newProjectDescription(name);
+        description.setLocation(org.eclipse.core.runtime.Path.fromOSString(location.toString()));
+        project.create(description, new org.eclipse.core.runtime.NullProgressMonitor());
+        project.open(new org.eclipse.core.runtime.NullProgressMonitor());
+        return project;
+    }
+
     /** Parses {@code command} through the production parser and runs it in the test repository. */
     private JsonObject run(String command) throws Exception
     {
@@ -267,8 +831,42 @@ public class GitToolProcessIntegrationTest
         return JsonParser.parseString(json).getAsJsonObject();
     }
 
+    /**
+     * Commits {@code message} verbatim, with no working-tree change of its own.
+     * <p>
+     * The message travels through a FILE rather than an argv element on purpose: a C0 byte in a
+     * process argument would depend on the platform's command-line encoding, and a setup that
+     * silently mangled it would make every assertion that reads the message back prove nothing.
+     * {@code --cleanup=verbatim} stops git from rewriting what the file holds. The file is created
+     * OUTSIDE the repository, or it would itself show up as an untracked entry in
+     * {@code status --short}.
+     */
+    private void commitWithMessage(String message) throws IOException, InterruptedException
+    {
+        Path messageFile = Files.createTempFile("git-tool-message", ".txt"); //$NON-NLS-1$ //$NON-NLS-2$
+        try
+        {
+            Files.write(messageFile, message.getBytes(StandardCharsets.UTF_8));
+            git("commit", "-q", "--allow-empty", "--cleanup=verbatim", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                "-F", messageFile.toString()); //$NON-NLS-1$
+        }
+        finally
+        {
+            Files.deleteIfExists(messageFile);
+        }
+    }
+
     /** Runs a helper git command directly (test setup, not through the tool under test). */
     private void git(String... args) throws IOException, InterruptedException
+    {
+        gitOutput(args);
+    }
+
+    /**
+     * Runs a helper git command directly and returns its output - for a positive control that says
+     * what real git PRINTS, independently of what the tool then does with it.
+     */
+    private String gitOutput(String... args) throws IOException, InterruptedException
     {
         List<String> argv = new ArrayList<>();
         argv.add(gitExecutable);
@@ -282,6 +880,7 @@ public class GitToolProcessIntegrationTest
 
         HelperResult result = runHelper(repository, argv);
         assertEquals("helper git failed: " + argv + " -> " + result.output, 0, result.exitCode); //$NON-NLS-1$ //$NON-NLS-2$
+        return result.output;
     }
 
     /**

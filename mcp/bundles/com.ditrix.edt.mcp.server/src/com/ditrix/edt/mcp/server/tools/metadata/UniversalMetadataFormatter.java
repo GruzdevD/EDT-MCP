@@ -8,26 +8,38 @@ package com.ditrix.edt.mcp.server.tools.metadata;
 
 import java.util.Collection;
 
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.emf.ecore.InternalEObject;
 
+import com._1c.g5.v8.bm.core.BmUriUtil;
+import com._1c.g5.v8.dt.metadata.mdclass.AutoRegistrationChanges;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
+import com._1c.g5.v8.dt.metadata.mdclass.DbObjectTabularSection;
+import com._1c.g5.v8.dt.metadata.mdclass.HierarchicalDbObjectTabularSection;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicTabularSection;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
 import com._1c.g5.v8.dt.metadata.mdclass.CharacteristicsDescription;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonAttributeContentItem;
 import com._1c.g5.v8.dt.metadata.mdclass.DbObjectAttribute;
+import com._1c.g5.v8.dt.metadata.mdclass.ExchangePlanContentItem;
 import com._1c.g5.v8.dt.mcore.ColorValue;
 import com._1c.g5.v8.dt.mcore.FontValue;
 import com._1c.g5.v8.dt.mcore.Value;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.ObjectBelonging;
+import com._1c.g5.v8.dt.metadata.mdclass.PaletteColor;
 import com._1c.g5.v8.dt.metadata.mdclass.StandardAttribute;
 import com._1c.g5.v8.dt.metadata.mdclass.StyleItem;
+import com._1c.g5.v8.dt.metadata.mdclass.TemplateType;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.utils.ExtensionOriginUtils;
+import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
+import com.ditrix.edt.mcp.server.utils.MetadataPropertyIntrospector;
 import com.ditrix.edt.mcp.server.utils.StyleValueBuilder;
 
 /**
@@ -75,13 +87,24 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter // NOS
         return mdObject != null;
     }
     
+    public record Outcome(String text, String error) { }
+
+    public Outcome formatOutcome(MdObject mdObject, boolean full, String language)
+    {
+        return mdObject == null ? new Outcome(null, "MdObject is null")
+            : new Outcome(formatValue(mdObject, full, language), null);
+    }
+
     @Override
     public String format(MdObject mdObject, boolean full, String language)
     {
-        if (mdObject == null)
-        {
-            return "Error: MdObject is null"; //$NON-NLS-1$
-        }
+        Outcome result = formatOutcome(mdObject, full, language);
+        if (result.error() != null) throw new IllegalArgumentException(result.error());
+        return result.text();
+    }
+
+    private String formatValue(MdObject mdObject, boolean full, String language)
+    {
         
         StringBuilder sb = new StringBuilder();
         
@@ -114,6 +137,12 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter // NOS
         if (mdObject instanceof StyleItem)
         {
             formatStyleItemValue(sb, (StyleItem) mdObject);
+        }
+        else if (mdObject instanceof PaletteColor)
+        {
+            addSectionHeader(sb, VALUE_TOKEN);
+            startTable(sb, "Property", VALUE_TOKEN); //$NON-NLS-1$
+            addPropertyRow(sb, "Color", StyleValueBuilder.renderColor(((PaletteColor)mdObject).getColor())); //$NON-NLS-1$
         }
 
         // Format containment collections (attributes, tabular sections, forms, commands, etc.)
@@ -255,6 +284,10 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter // NOS
         {
             formatCommonAttributeContentCollection(sb, collectionName, collection);
         }
+        else if (firstItem instanceof ExchangePlanContentItem)
+        {
+            formatExchangePlanContentCollection(sb, collectionName, collection);
+        }
         else if (firstItem instanceof MdObject)
         {
             formatMdObjectCollection(sb, collectionName, collection, full, language);
@@ -287,7 +320,102 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter // NOS
             }
         }
     }
-    
+
+    /**
+     * Formats an exchange plan's content: one row per member with its address and its
+     * {@code autoRecord} flag ({@code Allow} / {@code Deny}) - the pair {@code modify_metadata}'s
+     * {@code content[]} payload writes ({@code metadata} / {@code autoRecord}), so a written content
+     * list can be read back. The member is printed by {@link MetadataNodeResolver#addressOf} (the
+     * {@code Type.Name} address, {@code CalculationRegister.R.Recalculation.X} for a recalculation).
+     * A real plan can list thousands of members, so at most {@link #MAX_DYNAMIC_ROWS} rows are
+     * printed in content order; the notice row then counts the omitted members by flag, so the
+     * Allow / Deny totals stay complete.
+     */
+    private void formatExchangePlanContentCollection(StringBuilder sb, String name, Collection<?> items)
+    {
+        addSectionHeader(sb, name);
+        startTable(sb, "Object", "AutoRecord"); //$NON-NLS-1$ //$NON-NLS-2$
+
+        int rendered = 0;
+        int omittedAllow = 0;
+        int omittedDeny = 0;
+        for (Object item : items)
+        {
+            if (!(item instanceof ExchangePlanContentItem))
+            {
+                continue;
+            }
+            ExchangePlanContentItem contentItem = (ExchangePlanContentItem)item;
+            AutoRegistrationChanges autoRecord = contentItem.getAutoRecord();
+            if (rendered >= MAX_DYNAMIC_ROWS)
+            {
+                if (autoRecord == AutoRegistrationChanges.ALLOW)
+                {
+                    omittedAllow++;
+                }
+                else
+                {
+                    omittedDeny++;
+                }
+                continue;
+            }
+            addTableRow(sb, exchangePlanContentObject(contentItem.getMdObject()), formatEnum(autoRecord));
+            rendered++;
+        }
+        int omitted = omittedAllow + omittedDeny;
+        if (omitted > 0)
+        {
+            addTableRow(sb, "[truncated]", omitted + " more content items omitted (section capped at " //$NON-NLS-1$ //$NON-NLS-2$
+                + MAX_DYNAMIC_ROWS + "): " + omittedAllow + " Allow, " + omittedDeny + " Deny"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+    }
+
+    /**
+     * The Object cell of an exchange-plan content row. A member that no longer resolves is not
+     * dropped and not printed as a plain address: it is marked {@link #UNRESOLVED_METADATA}, followed
+     * by the address its stored reference still carries (the top-object FQN of a BM proxy URI, else
+     * the raw URI), so a dangling entry cannot pass for a valid one.
+     */
+    private static String exchangePlanContentObject(MdObject member)
+    {
+        if (member == null)
+        {
+            return UNRESOLVED_METADATA;
+        }
+        if (member.eIsProxy())
+        {
+            URI uri = member instanceof InternalEObject ? ((InternalEObject)member).eProxyURI() : null;
+            String carried = proxyAddress(uri);
+            return carried == null ? UNRESOLVED_METADATA : UNRESOLVED_METADATA + " " + carried; //$NON-NLS-1$
+        }
+        return MetadataNodeResolver.addressOf(member);
+    }
+
+    /** The address a proxy URI carries: a BM URI's top-object FQN, otherwise the URI itself. */
+    private static String proxyAddress(URI uri)
+    {
+        if (uri == null)
+        {
+            return null;
+        }
+        try
+        {
+            if (BmUriUtil.isBmUri(uri))
+            {
+                String fqn = BmUriUtil.extractTopObjectFqn(uri);
+                if (fqn != null && !fqn.isEmpty())
+                {
+                    return fqn;
+                }
+            }
+        }
+        catch (RuntimeException e)
+        {
+            // Not a well-formed BM URI: fall back to the URI text below.
+        }
+        return uri.toString();
+    }
+
     /**
      * Format a collection of forms.
      */
@@ -437,8 +565,8 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter // NOS
                     indexing = formatEnum(((DbObjectAttribute) attr).getIndexing());
                 }
 
-                String passwordMode = formatReflectiveBoolean(attr, "isPasswordMode"); //$NON-NLS-1$
-                String multiLine = formatReflectiveBoolean(attr, "isMultiLine"); //$NON-NLS-1$
+                String passwordMode = formatBoolean(attr.isPasswordMode()); //$NON-NLS-1$
+                String multiLine = formatBoolean(attr.isMultiLine()); //$NON-NLS-1$
 
                 // Get fullTextSearch if it's DbObjectAttribute
                 String fullTextSearch = DASH;
@@ -467,27 +595,7 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter // NOS
         }
     }
 
-    /**
-     * Reads a boolean-returning method (e.g. {@code isPasswordMode} / {@code isMultiLine}) that lives
-     * in BasicFeature but not in the API interface, via reflection. Returns {@link #NO} when the
-     * method is absent or any error occurs, matching the original default. Never throws.
-     */
-    private String formatReflectiveBoolean(BasicFeature attr, String methodName)
-    {
-        try
-        {
-            java.lang.reflect.Method method = attr.getClass().getMethod(methodName);
-            Boolean flag = (Boolean) method.invoke(attr);
-            return formatBoolean(flag != null && flag);
-        }
-        catch (Exception e)
-        {
-            // Method doesn't exist or error - use default
-            return NO;
-        }
-    }
-
-    /**
+/**
      * Renders the compact (full=false) attribute table: Name, Synonym, Type (plus an Origin column
      * when {@code showOrigin}). Output matches the original inline code exactly.
      */
@@ -582,47 +690,21 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter // NOS
         formatTabularSectionAttributes(sb, ts, full, language);
     }
 
-    /**
-     * Adds the "Use" row of a tabular section, read reflectively (available in
-     * HierarchicalDbObjectTabularSection). No-op when the getter is absent or returns {@code null}.
-     */
+    /** Renders the hierarchical tabular section use policy. */
     private void formatTabularSectionUse(StringBuilder sb, BasicTabularSection ts)
     {
-        // Use (via reflection, available in HierarchicalDbObjectTabularSection)
-        try
+        if (ts instanceof HierarchicalDbObjectTabularSection section && section.getUse() != null)
         {
-            java.lang.reflect.Method method = ts.getClass().getMethod("getUse");
-            Object use = method.invoke(ts);
-            if (use != null)
-            {
-                addPropertyRow(sb, "Use", formatEnum(use));
-            }
-        }
-        catch (Exception e)
-        {
-            // Method doesn't exist - skip
+            addPropertyRow(sb, "Use", formatEnum(section.getUse()));
         }
     }
 
-    /**
-     * Adds the "Line Number Length" row of a tabular section, read reflectively. No-op when the getter
-     * is absent or returns {@code null}.
-     */
+    /** Renders the database tabular section line number length. */
     private void formatTabularSectionLineNumberLength(StringBuilder sb, BasicTabularSection ts)
     {
-        // LineNumberLength (via reflection)
-        try
+        if (ts instanceof DbObjectTabularSection section)
         {
-            java.lang.reflect.Method method = ts.getClass().getMethod("getLineNumberLength");
-            Object lineNumLen = method.invoke(ts);
-            if (lineNumLen != null)
-            {
-                addPropertyRow(sb, "Line Number Length", lineNumLen.toString());
-            }
-        }
-        catch (Exception e)
-        {
-            // Method doesn't exist - skip
+            addPropertyRow(sb, "Line Number Length", Integer.toString(section.getLineNumberLength()));
         }
     }
 
@@ -734,8 +816,8 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter // NOS
     }
     
     /**
-     * Format command group to a readable string.
-     * Uses EObjectInspector to extract the category enum from StandardCommandGroup.
+     * Format command group to a readable string: {@code CommandGroup.<Name>} for a configuration
+     * group, the name of a standard group (see {@link MetadataPropertyIntrospector#commandGroupLabel}).
      */
     private String formatCommandGroup(Object groupObj)
     {
@@ -743,14 +825,15 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter // NOS
         {
             return DASH;
         }
-        
-        // If it's an EObject (StandardCommandGroup), use EObjectInspector
+
         if (groupObj instanceof EObject)
         {
-            // EObjectInspector will properly extract the 'category' enum value
-            return EObjectInspector.getPrimaryValueAsString((EObject) groupObj);
+            String label = MetadataPropertyIntrospector.commandGroupLabel((EObject) groupObj);
+            // A group the platform names nothing (e.g. command-interface derived data) keeps the
+            // generic primary-value rendering.
+            return label != null ? label : EObjectInspector.getPrimaryValueAsString((EObject) groupObj);
         }
-        
+
         return groupObj.toString();
     }
     
@@ -828,6 +911,12 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter // NOS
      */
     private String getTypeFromMdObject(MdObject mdObj)
     {
+        // A template has no value type; its Type is the content type (issue #919: a DCS template read as '-').
+        if (mdObj instanceof BasicTemplate)
+        {
+            TemplateType templateType = ((BasicTemplate) mdObj).getTemplateType();
+            return templateType == null ? DASH : templateType.getLiteral();
+        }
         // Try to find a "type" feature
         EStructuralFeature typeFeature = mdObj.eClass().getEStructuralFeature("type"); //$NON-NLS-1$
         if (typeFeature != null)

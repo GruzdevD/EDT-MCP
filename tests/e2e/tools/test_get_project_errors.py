@@ -33,6 +33,8 @@ There are TWO object filters and they behave differently on purpose:
                    owning node. Scoping it to the member alone would match nothing and answer
                    `objectsResolved` next to "# No Errors Found" - the false all-clear this
                    input exists to prevent.
+                   If none of the requested addresses resolves, the call is refused because no
+                   marker scan ran; use `objects` or `get_metadata_objects` to recover.
 
 Anything that must observe a REAL marker seeds it first (a syntax error written into a
 fixture module with write_module_source, then a forced revalidation): the live marker set
@@ -52,12 +54,13 @@ ProjectStateChecker):
   - objects + objectFqns    -> refused (the two filters have different semantics)
 """
 
+import re
 import time
 
 from harness import (
     call, assert_ok, assert_contains, assert_not_contains, assert_error,
     assert_error_quality, assert_no_diff, e2e_test, PROJECT, _fail,
-    wait_for_project_ready,
+    wait_for_project_ready, diff,
 )
 
 # A checkId that cannot match any real check id or short UID, so EVERY marker is
@@ -242,6 +245,57 @@ def _seed_bsl_error_and_wait():
 # ──────────────────────────────────────────────────────────────────────────────
 # HAPPY PATHS
 # ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="get_project_errors", kind="write-metadata")
+def test_saved_text_ranges_in_structured_rows_and_detailed_table():
+    """A seeded BSL text marker must expose saved coordinates on both output channels."""
+    _seed_bsl_error_and_wait()
+    before = diff()
+    args = {"projectName": PROJECT, "objectFqns": [EN_MODULE_OWNER],
+            "responseFormat": "detailed"}
+    result = call("get_project_errors", args)
+    assert_ok(result, "reading the seeded text marker with saved ranges")
+    _assert_verdicts(result, resolved=[EN_MODULE_OWNER], not_found=[], unsupported=[])
+    payload = result.structured or {}
+    problems = payload.get("problems")
+    if not isinstance(problems, list) or not problems or payload.get("problemsFound") != len(problems):
+        _fail("the seeded marker must appear in structured problems with an accurate count: %r" % payload)
+    if any(p.get("project") != PROJECT for p in problems):
+        _fail("every problem must retain its project: %r" % problems)
+    text_rows = [p for p in problems if p.get("modulePath") == SEEDED_MODULE_PATH
+                 and type(p.get("offset")) is int and type(p.get("length")) is int]
+    if not text_rows:
+        _fail("the seeded BSL text marker must expose its saved range: %r" % problems)
+    row = text_rows[0]
+    for key in ("line", "offset", "length"):
+        if type(row.get(key)) is not int or row[key] < (1 if key == "line" else 0):
+            _fail("the seeded BSL text marker must carry a numeric %s: %r" % (key, row))
+    if not row.get("message") or not row.get("checkCode"):
+        _fail("structured problems must preserve the message and short UID: %r" % row)
+    assert_contains(_report(result), "| Offset | Length |", "detailed range columns")
+    assert_contains(_report(result), "| %d | %d | %d |" %
+                    (row["line"], row["offset"], row["length"]),
+                    "Markdown coordinates must match structured numeric values")
+    args["responseFormat"] = "concise"
+    concise = call("get_project_errors", args)
+    assert_ok(concise, "concise structured marker report")
+    assert_not_contains(_report(concise), "| Offset |", "concise keeps its compact columns")
+    if (concise.structured or {}).get("problems") != problems:
+        _fail("responseFormat must not change the structured problem rows")
+    args["limit"] = 1
+    limited = call("get_project_errors", args)
+    assert_ok(limited, "limiting the structured marker report")
+    if len((limited.structured or {}).get("problems", [])) != 1 or limited.structured.get("problemsFound") != 1:
+        _fail("limit=1 must cap the structured rows and count together: %r" % limited.structured)
+    # The page says how much there is and how to get it (#917): the total is the unlimited row count.
+    paged = limited.structured
+    if paged.get("problemsTotal") != len(problems) or paged.get("nextOffset") != 1 \
+            or paged.get("hasMore") != (len(problems) > 1):
+        _fail("a limited page must carry problemsTotal=%d, nextOffset=1 and hasMore: %r"
+              % (len(problems), paged))
+    if diff() != before:
+        _fail("reading saved marker ranges must not change the already seeded source")
+
 
 @e2e_test(tool="get_project_errors", kind="read")
 def test_no_match_filter_renders_no_errors_banner_for_project():
@@ -429,12 +483,8 @@ def test_exact_address_that_exists_is_not_reported_missing_and_a_typo_is():
 
     typo = "Catalog.%s" % NO_SUCH_OBJECT
     bad = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [typo]})
-    assert_ok(bad, "exact address that does not exist")
-    _assert_verdicts(bad, resolved=[], not_found=[typo], unsupported=[])
-    assert_contains(_report(bad), "objectsNotFound",
-                    "the human report must mirror the machine verdict")
-    assert_contains(_report(bad), "get_metadata_objects",
-                    "the report must point at the discovery tool")
+    error = assert_error(bad, "an all-miss exact-address call")
+    assert_error_quality(error, names=[typo], suggests=["objects", "get_metadata_objects"])
     assert_no_diff("reading project errors must not touch the project on disk")
 
 
@@ -462,16 +512,18 @@ def test_exact_form_member_leaf_is_really_checked():
     _assert_verdicts(r, resolved=[form], not_found=[], unsupported=[])
 
     ghost = "%s.Attribute.%s" % (form, NO_SUCH_ATTRIBUTE)
-    m = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [ghost]})
-    assert_ok(m, "a form member that does not exist")
-    _assert_verdicts(m, resolved=[], not_found=[ghost], unsupported=[])
+    m = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [form, ghost]})
+    assert_ok(m, "a form plus a member that does not exist")
+    _assert_verdicts(m, resolved=[form], not_found=[ghost], unsupported=[])
 
     # A CommonForm member leaf is checked the same way (its members live in the content
     # model too, while the CommonForm top object resolves on its own).
+    common_form = "CommonForm.%s" % FIXTURE_COMMON_FORM
     common_ghost = "CommonForm.%s.Attribute.%s" % (FIXTURE_COMMON_FORM, NO_SUCH_ATTRIBUTE)
-    c = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [common_ghost]})
-    assert_ok(c, "a common-form member that does not exist")
-    _assert_verdicts(c, resolved=[], not_found=[common_ghost], unsupported=[])
+    c = call("get_project_errors",
+             {"projectName": PROJECT, "objectFqns": [common_form, common_ghost]})
+    assert_ok(c, "a common form plus a member that does not exist")
+    _assert_verdicts(c, resolved=[common_form], not_found=[common_ghost], unsupported=[])
     assert_no_diff("reading project errors must not touch the project on disk")
 
 
@@ -494,13 +546,14 @@ def test_exact_form_member_kind_must_match_the_element():
     assert_ok(r, "form members addressed with their own kind")
     _assert_verdicts(r, resolved=right, not_found=[], unsupported=[])
 
-    # The SAME names with the other item's kind, plus a misspelt kind token: all misses.
+    # Keep one real member in the request so the wrong-kind verdicts remain observable as a partial.
     wrong = ["%s.Button.%s" % (form, FIXTURE_FORM_FIELD),
              "%s.Field.%s" % (form, FIXTURE_FORM_DECORATION),
              "%s.Fielld.%s" % (form, FIXTURE_FORM_FIELD)]
-    w = call("get_project_errors", {"projectName": PROJECT, "objectFqns": wrong})
+    w = call("get_project_errors", {"projectName": PROJECT,
+                                    "objectFqns": [right[0]] + wrong})
     assert_ok(w, "form members addressed with a foreign / misspelt kind")
-    _assert_verdicts(w, resolved=[], not_found=wrong, unsupported=[])
+    _assert_verdicts(w, resolved=[right[0]], not_found=wrong, unsupported=[])
     assert_contains(_report(w), "objectsNotFound",
                     "the human report must name the wrong-kind addresses")
     assert_no_diff("reading project errors must not touch the project on disk")
@@ -535,17 +588,18 @@ def test_exact_handler_address_must_name_the_owning_items_kind():
     # A FOREIGN owner kind (Code is a FormField, not a Button) and a misspelt one: both misses.
     wrong = ["%s.Button.%s.Handler.OnChange" % (form, FIXTURE_FORM_FIELD),
              "%s.Fielld.%s.Handler.OnChange" % (form, FIXTURE_FORM_FIELD)]
-    w = call("get_project_errors", {"projectName": PROJECT, "objectFqns": wrong})
+    w = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [right] + wrong})
     assert_ok(w, "handler addressed through a foreign / misspelt owner kind")
-    _assert_verdicts(w, resolved=[], not_found=wrong, unsupported=[])
+    _assert_verdicts(w, resolved=[right], not_found=wrong, unsupported=[])
     assert_contains(_report(w), "objectsNotFound",
                     "the human report must name the wrong-owner-kind addresses")
 
     # The EVENT leaf keeps its own say: a real owner with a bogus event is still a miss.
     ghost_event = "%s.Field.%s.Handler.NoSuchEvent_e2e_xyz" % (form, FIXTURE_FORM_FIELD)
-    g = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [ghost_event]})
-    assert_ok(g, "a handler address whose event is bound to nothing")
-    _assert_verdicts(g, resolved=[], not_found=[ghost_event], unsupported=[])
+    g = call("get_project_errors",
+             {"projectName": PROJECT, "objectFqns": [right, ghost_event]})
+    assert_ok(g, "a real handler plus an event that is bound to nothing")
+    _assert_verdicts(g, resolved=[right], not_found=[ghost_event], unsupported=[])
 
 
 @e2e_test(tool="get_project_errors", kind="write-metadata")
@@ -625,15 +679,13 @@ def test_exact_form_and_form_member_addresses_really_select_the_forms_problems()
         assert_contains(_report(m), location,
                         "the member's rows must be the form's own rows, location included")
 
-    # 3) The widening must not blur the MISS verdicts: a ghost member and a wrong-kind member are
-    #    still reported missing and select nothing, even though their form has a problem.
+    # 3) The widening must not blur the misses: none resolved, so the dangerous unrun scan is refused
+    #    even though their containing form has a problem.
     misses = ["%s.Field.%s" % (form, NO_SUCH_ATTRIBUTE),
               "%s.Button.%s" % (form, FIXTURE_FORM_FIELD)]
     w = call("get_project_errors", {"projectName": PROJECT, "objectFqns": misses})
-    assert_ok(w, "ghost / wrong-kind members of a form that HAS a problem")
-    _assert_verdicts(w, resolved=[], not_found=misses, unsupported=[])
-    if (w.structured or {}).get("problemsFound", 0) != 0:
-        _fail("an address that resolved to nothing must select nothing: %r" % (w.structured,))
+    error = assert_error(w, "ghost / wrong-kind members of a form that HAS a problem")
+    assert_error_quality(error, names=misses, suggests=["objects", "get_metadata_objects"])
 
 
 @e2e_test(tool="get_project_errors", kind="write-metadata")
@@ -661,12 +713,12 @@ def test_exact_address_written_with_yo_resolves_against_the_stored_ye_name():
         # The verdict keeps the caller's own spelling, whichever one resolved.
         _assert_verdicts(r, resolved=[requested], not_found=[], unsupported=[])
 
-    # A ё name that exists in NEITHER spelling is still an ordinary miss: the fallback must not
+    # A ё name that exists in NEITHER spelling still refuses an all-miss scan: the fallback must not
     # blur the verdict into "everything resolves".
     ghost = "Catalog.Полёт" + NO_SUCH_OBJECT
     g = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [ghost]})
-    assert_ok(g, "a ё address that exists in neither spelling")
-    _assert_verdicts(g, resolved=[], not_found=[ghost], unsupported=[])
+    error = assert_error(g, "a ё address that exists in neither spelling")
+    assert_error_quality(error, names=[ghost], suggests=["objects", "get_metadata_objects"])
 
 
 @e2e_test(tool="get_project_errors", kind="read")
@@ -692,15 +744,16 @@ def test_exact_form_member_kind_token_accepts_both_numbers_and_both_languages():
     # The guarantee is about SPELLING, not about accepting anything: a wrong kind is still a miss,
     # in the plural too.
     wrong = "%s.Buttons.%s" % (form, FIXTURE_FORM_FIELD)
-    w = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [wrong]})
+    right = "%s.Field.%s" % (form, FIXTURE_FORM_FIELD)
+    w = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [right, wrong]})
     assert_ok(w, "a plural token of the WRONG kind")
-    _assert_verdicts(w, resolved=[], not_found=[wrong], unsupported=[])
+    _assert_verdicts(w, resolved=[right], not_found=[wrong], unsupported=[])
     assert_no_diff("reading project errors must not touch the project on disk")
 
 
 @e2e_test(tool="get_project_errors", kind="read")
 def test_exact_address_with_unknown_head_or_kind_is_reported_missing():
-    """An unknown TYPE token and a misspelt KIND token are both plain misses.
+    """An unknown TYPE token and a misspelt KIND token are both named in the refusal.
 
     `Catalog.<real>.Fom.ItemForm` has a real head, so a build that judged the address by its
     head would call it found while the filter matched nothing - the exact failure mode the
@@ -710,8 +763,9 @@ def test_exact_address_with_unknown_head_or_kind_is_reported_missing():
     bad_head = "NoSuchType_e2e_xyz.Whatever"
     r = call("get_project_errors",
              {"projectName": PROJECT, "objectFqns": [bad_kind, bad_head]})
-    assert_ok(r, "exact addresses with an unknown kind / head")
-    _assert_verdicts(r, resolved=[], not_found=[bad_kind, bad_head], unsupported=[])
+    error = assert_error(r, "exact addresses with an unknown kind / head")
+    assert_error_quality(error, names=[bad_kind, bad_head],
+                         suggests=["objects", "get_metadata_objects"])
     assert_no_diff("reading project errors must not touch the project on disk")
 
 
@@ -724,23 +778,38 @@ def test_xdto_member_address_is_unsupported_not_missing():
     model that this tool never verified. The package level stays supported: it is an ordinary
     resolution, so a non-existent package is an ordinary miss.
     """
+    good = "Catalog.%s" % FIXTURE_CATALOG
     for member in ("XDTOPackage.P.ObjectType.T",
                    "XDTOPackage.P.Property.N",
                    "XDTOPackage.P.ObjectType.T.Property.N"):
-        r = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [member]})
+        r = call("get_project_errors", {"projectName": PROJECT,
+                                        "objectFqns": [good, member]})
         assert_ok(r, "XDTO member address %s" % member)
-        _assert_verdicts(r, resolved=[], not_found=[], unsupported=[member])
+        _assert_verdicts(r, resolved=[good], not_found=[], unsupported=[member])
         assert_contains(_report(r), "objectsUnsupported",
                         "the human report must mirror the unsupported verdict")
         assert_not_contains(_report(r), "objectsNotFound",
                             "an unsupported address must never be called missing")
 
+    # A request made ONLY of unsupported addresses is still refused - nothing was scanned, so a
+    # clean heading would be invented - but the refusal must carry the address's OWN reason.
+    # The spelling advice belongs to a MISS: an unsupported family is not a wrong FQN.
+    only = call("get_project_errors", {"projectName": PROJECT,
+                                       "objectFqns": ["XDTOPackage.P.Property.N"]})
+    err = assert_error(only, "a request made only of unsupported addresses")
+    assert_contains(err, "XDTOPackage.P.Property.N",
+                    "the refusal must name the address it could not scan")
+    assert_contains(err, "validate_xdto_package",
+                    "the address's own remedy must survive the refusal")
+    assert_not_contains(err, "get_metadata_objects",
+                        "an unsupported family is not a misspelling to look up")
+
     # The PACKAGE level is supported: this fixture has no XDTO package, so the honest verdict
     # for a package address is an ordinary miss - NOT "unsupported".
     pkg = "XDTOPackage.NoSuchPackage_e2e_xyz"
-    r = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [pkg]})
+    r = call("get_project_errors", {"projectName": PROJECT, "objectFqns": [good, pkg]})
     assert_ok(r, "XDTO package-level address")
-    _assert_verdicts(r, resolved=[], not_found=[pkg], unsupported=[])
+    _assert_verdicts(r, resolved=[good], not_found=[pkg], unsupported=[])
     assert_no_diff("reading project errors must not touch the project on disk")
 
 
@@ -761,6 +830,154 @@ def test_exact_address_scopes_to_problems_inside_the_node():
                     "a problem INSIDE the resolved node must be reported")
     if (r.structured or {}).get("problemsFound", 0) < 1:
         _fail("problemsFound must count the seeded marker: %r" % (r.structured,))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# modulePaths - EXACT (normalised) module filter
+# ──────────────────────────────────────────────────────────────────────────────
+
+# A module path that cannot exist in the fixture, so the not-found note is deterministic.
+NO_SUCH_MODULE_PATH = "CommonModules/NoSuchModule_e2e_xyz/Module.bsl"
+
+
+@e2e_test(tool="get_project_errors", kind="write-metadata")
+def test_module_paths_keeps_only_the_seeded_module():
+    """modulePaths keeps ONLY the rows of the named module: every data row carries that
+    Module path. The marker is seeded, so an empty table cannot pass vacuously."""
+    _seed_bsl_error_and_wait()
+    # The src/ prefix and backslashes are normalised away: the key is the Module path column.
+    requested = "src\\" + SEEDED_MODULE_PATH.replace("/", "\\")
+    r = call("get_project_errors", {"projectName": PROJECT, "modulePaths": [requested]})
+    assert_ok(r, "modulePaths on the seeded module")
+    text = _report(r)
+    assert_contains(text, "# Configuration Problems", "the seeded marker must be listed")
+    data = _rows(text)[2:]
+    if not data:
+        _fail("modulePaths returned no rows for the seeded module:\n%s" % text[:600])
+    for row in data:
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        # Description | Location | Module path | Line | Check code | Fix registered
+        if len(cells) < 3 or cells[2] != SEEDED_MODULE_PATH:
+            _fail("a row of another module leaked through modulePaths: %r" % row)
+    assert_not_contains(text, "modulePaths not found",
+                        "an existing module must not be reported as missing")
+
+
+@e2e_test(tool="get_project_errors", kind="read")
+def test_module_paths_unknown_path_is_reported_not_silently_clean():
+    """A path that names no module must not read like a clean module: with projectName the
+    report says the path was not found."""
+    r = call("get_project_errors", {"projectName": PROJECT, "modulePaths": [NO_SUCH_MODULE_PATH]})
+    assert_ok(r, "modulePaths with an unknown path")
+    assert_contains(r.text, "# No Errors Found", "nothing can match an unknown module")
+    assert_contains(r.text, "Module paths filter: " + NO_SUCH_MODULE_PATH,
+                    "the banner echoes the filter")
+    assert_contains(r.text, "modulePaths not found in %s: %s" % (PROJECT, NO_SUCH_MODULE_PATH),
+                    "the unknown path is named, not silently clean")
+    assert_no_diff("reading project errors must not touch the project on disk")
+
+
+@e2e_test(tool="get_project_errors", kind="read")
+def test_module_paths_combines_with_check_id():
+    """modulePaths is AND-ed with the other filters: an existing module plus a checkId that
+    matches nothing gives the empty report, and the existing module is NOT called missing."""
+    r = call("get_project_errors", {"projectName": PROJECT, "checkId": NO_MATCH_CHECK,
+                                    "modulePaths": [SEEDED_MODULE_PATH]})
+    assert_ok(r, "modulePaths + no-match checkId")
+    assert_contains(r.text, "# No Errors Found", "the checkId filter still applies")
+    assert_contains(r.text, "Module paths filter: " + SEEDED_MODULE_PATH,
+                    "the banner echoes the module filter")
+    assert_not_contains(r.text, "modulePaths not found",
+                        "an existing module must not be reported as missing")
+    assert_no_diff("reading project errors must not touch the project on disk")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Paging (#917) and severity honesty (#918)
+# ──────────────────────────────────────────────────────────────────────────────
+
+FOUND_RE = re.compile(r"\*\*Found:\*\* (\d+)")
+
+
+def _found_total(text):
+    m = FOUND_RE.search(text or "")
+    if not m:
+        _fail("the report must carry a '**Found:** N' line:\n%s" % (text or "")[:600])
+    return int(m.group(1))
+
+
+@e2e_test(tool="get_project_errors", kind="write-metadata")
+def test_paging_states_the_total_and_walks_the_whole_list():
+    """A page names the TOTAL and the offset of the next page, and offset really walks the list.
+
+    #917: a long answer used to end at the limit (or at the 100k output cap) with no total and no way
+    to continue, so the problems of later modules read as absent. The seeded marker plus the fixture's
+    own broken module guarantee at least two problems, so the paging is never vacuous.
+    """
+    _seed_bsl_error_and_wait()
+    # Pages follow EDT's marker order, so compare them only once validation has settled: two equal
+    # full listings in a row.
+    full = call("get_project_errors", {"projectName": PROJECT, "limit": 1000})
+    deadline = time.time() + MARKER_POLL_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(3)
+        again = call("get_project_errors", {"projectName": PROJECT, "limit": 1000})
+        if again.text == full.text:
+            break
+        full = again
+    assert_ok(full, "the whole problem list")
+    total = _found_total(full.text)
+    all_rows = _rows(full.text)[2:]
+    if total < 2 or len(all_rows) != total:
+        _fail("need at least two problems listed in full (total=%d, rows=%d):\n%s"
+              % (total, len(all_rows), full.text[:600]))
+
+    first = call("get_project_errors", {"projectName": PROJECT, "limit": 1})
+    assert_ok(first, "page 1 of size 1")
+    assert_contains(first.text, "**Found:** %d (showing 1-1 of %d; next page: offset=1)" % (total, total),
+                    "the first page states the total and the next offset")
+    assert_contains(first.text, "get_problem_summary", "a partial page points to the overview tool")
+    if _rows(first.text)[2:] != all_rows[:1]:
+        _fail("page 1 must hold the first problem: %r vs %r" % (_rows(first.text)[2:], all_rows[:1]))
+
+    second = call("get_project_errors", {"projectName": PROJECT, "limit": 1, "offset": 1})
+    assert_ok(second, "page 2 of size 1")
+    assert_contains(second.text, "(showing 2-2 of %d" % total, "the second page names its window")
+    if _rows(second.text)[2:] != all_rows[1:2]:
+        _fail("offset=1 must hold the second problem: %r vs %r" % (_rows(second.text)[2:], all_rows[1:2]))
+
+    last = call("get_project_errors", {"projectName": PROJECT, "limit": 1, "offset": total - 1})
+    assert_ok(last, "the last page")
+    assert_not_contains(last.text, "next page", "the last page names no next one")
+    if _rows(last.text)[2:] != all_rows[-1:]:
+        _fail("the last offset must hold the last problem")
+
+    past = call("get_project_errors", {"projectName": PROJECT, "offset": total})
+    assert_ok(past, "an offset past the end")
+    assert_not_contains(past.text, "No Errors Found", "problems exist: an empty page is not a clean project")
+    assert_contains(past.text, "**Found:** %d (offset %d is past the last problem" % (total, total),
+                    "an offset past the end keeps the total")
+
+
+@e2e_test(tool="get_project_errors", kind="write-metadata")
+def test_severity_that_leaves_nothing_names_the_other_levels():
+    """severity=NONE on a module WITH problems must not read like a clean module (#918).
+
+    NONE is the platform's level for a marker without a severity, not "all levels": the seeded syntax
+    error is not at that level, so the page is empty - and must say how many problems the same filters
+    hold at the other levels, and that omitting severity lists them.
+    """
+    _seed_bsl_error_and_wait()
+    unfiltered = call("get_project_errors", {"projectName": PROJECT, "modulePaths": [SEEDED_MODULE_PATH]})
+    assert_ok(unfiltered, "the seeded module without a severity filter")
+    count = _found_total(unfiltered.text)
+
+    r = call("get_project_errors", {"projectName": PROJECT, "modulePaths": [SEEDED_MODULE_PATH],
+                                    "severity": "NONE"})
+    assert_ok(r, "the seeded module at severity NONE")
+    assert_contains(r.text, "Nothing has severity NONE, but %d problem(s)" % count,
+                    "the empty answer names the problems at the other levels")
+    assert_contains(r.text, "omit severity", "the remedy is named")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

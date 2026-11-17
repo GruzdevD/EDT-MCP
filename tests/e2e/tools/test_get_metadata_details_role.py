@@ -8,10 +8,10 @@ to RoleRightsReader, which renders one document - `# Role Rights: <fqn>`, then `
 `Role.getRights()` is not a concrete RoleDescription renders the single note
 `_(this role has no editable rights model)_` instead, and nothing else.
 
-This file covers the five things only the wire can prove about that reader:
+This file covers the six things only the wire can prove about that reader:
 
-  * the empty state - a role created by create_metadata carries no editable rights model, and the
-    note is what a caller sees (the stable read-side pin the #452 fix is measured against);
+  * the created empty state - a role created by create_metadata already carries a concrete rights
+    model, so the caller sees the full document with an empty matrix and the default properties;
   * the VALUE labels - `allowed` (RightValue.SET) and `denied` (RightValue.UNSET) for two
     authored objects;
   * the TRI-STATE - `provided` is a third value, NOT a synonym for "denied": it is dropped from
@@ -24,7 +24,10 @@ This file covers the five things only the wire can prove about that reader:
     (RoleRightsReader.rightNameOf reads Right.getNameRu() for "ru", Right.getName() otherwise).
     Both fixtures declare a single Language.English with code `en`, so this bilingual read is the
     only assertion in the whole suite that can observe that wiring at all. The language is always
-    chosen by CODE (`en` / `ru`), never by a language display name (CLAUDE.md don't #2).
+    chosen by CODE (`en` / `ru`), never by a language display name (CLAUDE.md don't #2);
+  * the Object cell of a SUBORDINATE target (#685) - a right on `Catalog.<C>.Attribute.<A>` is
+    listed under that full address, the form modify_metadata accepts in `rights[].object`, and the
+    cell as read is written back to remove the right.
 
 The whole-call negative matrix for this tool (missing projectName, missing/empty objectFqns, a
 non-existent project, the per-object `## Errors` channel) lives in test_get_metadata_details.py and
@@ -58,6 +61,13 @@ and the test flips `setForNewObjects` BETWEEN its two writes - which is why it s
 modify_metadata calls instead of one. Ordering inside a single call cannot substitute:
 RoleRightsWriter.apply runs rights[] BEFORE roleProperties, so a flag sent alongside the cells
 arrives too late to change their default.
+
+For a SUBORDINATE target (an attribute / tabular section / dimension / resource) the same default
+comes from `RoleDescription.isSetForAttributesByDefault()` instead, and a role created by
+create_metadata has that flag false too - so on a fresh role `unset` on an attribute IS the default
+and is pruned. test_role_rights_read_attribute_row_carries_its_full_address relies on exactly
+that; the measurement is recorded in test_modify_metadata_role_rights.py's module docstring
+(WHAT THE PLATFORM DOES WITH A RIGHT VALUE).
 """
 
 import os
@@ -68,6 +78,7 @@ from harness import (
     assert_contains,
     assert_not_contains,
     poll_disk_contains,
+    poll_disk_lacks,
     split_markdown_row,
     wait_for_project_ready,
     e2e_test,
@@ -76,8 +87,8 @@ from harness import (
 )
 
 
-# The note RoleRightsReader.render emits INSTEAD of the whole document when Role.getRights() is not
-# a concrete RoleDescription. Asserted literally: it is what a caller reads.
+# The note RoleRightsReader.render reserves for a genuinely missing RoleDescription. A role created
+# through the tools must never render it.
 _NO_MATRIX_NOTE = "_(this role has no editable rights model)_"
 
 _MATRIX_HEADING = "## Rights matrix"
@@ -104,13 +115,8 @@ def _rights_file_text(role_name):
     """The role's Rights.rights exactly as it is on disk right now, or None when the file does not
     exist at all.
 
-    Deliberately a plain read rather than one of the export-ordered disk helpers: the "no rights
-    model yet" assertion is made after a READ call that touched no file and submitted no export,
-    so assert_disk_path_gone's precondition (the same call removed the path or queued the export
-    that removes it) does not hold and its failure text would blame an export race that is not the
-    defect. poll_disk_lacks / assert_disk_lacks are wrong for the opposite reasons - one would only
-    burn the polling budget on a file nothing is going to create, the other requires the file to
-    exist. The sibling write-side file keeps the same helper for the same reason."""
+    The created-role test polls for the resource first, then uses this plain read to pin every
+    default property in that one file rather than accepting a match from another changed file."""
     full = os.path.join(PROJECT_DIR, *_rights_file(role_name).split("/"))
     if not os.path.isfile(full):
         return None
@@ -123,7 +129,7 @@ def _rights_file_text(role_name):
 # ---------------------------------------------------------------------------
 
 def _seed_role(name):
-    """Creates Role.<name> and returns its FQN. A role created this way has NO rights model."""
+    """Creates Role.<name> and returns its FQN. The role already has an empty rights model."""
     r = call("create_metadata", {"projectName": PROJECT, "fqn": "Role." + name})
     assert_ok(r, "seed Role.%s" % name)
     wait_for_project_ready()
@@ -222,40 +228,44 @@ def _cell(rows, obj, right):
 
 
 # ---------------------------------------------------------------------------
-# The empty state
+# The created empty model
 # ---------------------------------------------------------------------------
 
 @e2e_test(tool="get_metadata_details", kind="write-metadata")
-def test_role_rights_read_note_when_role_has_no_rights_model():
-    """A role created through create_metadata has no rights model, and the reader says exactly
-    that - it does not fabricate an empty matrix and it does not fail the object.
+def test_role_rights_read_created_role_already_has_its_rights_model():
+    """A role created through create_metadata has a concrete, empty rights model immediately, so
+    the reader renders the full document and the three default properties exist on disk.
 
-    This is the read-side pin the #452 flip is measured against: the same call renders this note
-    before the first rights write and the full document after it (see
-    test_role_rights_read_matrix_renders_allowed_and_denied). Both halves are asserted - the MODEL
-    (the note, and the absence of every section the note replaces) and the DISK (no Rights.rights
-    resource exists yet) - so a build that quietly created a rights model at object-creation time,
-    or a reader that rendered the note over a model that does have one, both fail here."""
-    name = "E2ERoleNoMatrix"
+    RoleRightsReader still has a note path for a legacy role whose rights model is genuinely absent.
+    No tool can produce that state now, so the note path is covered by unit tests only. This e2e pins
+    both reachable halves of the new contract: the MODEL renders an empty matrix, and the DISK carries
+    the separate Rights.rights resource that makes the role valid for the configurator."""
+    name = "E2ERoleEmptyMatrix"
     role_fqn = _seed_role(name)
+
+    poll_disk_contains(_rights_file(name), "<setForNewObjects>",
+                       ctx="create_metadata must export the role's own rights resource")
+    rights_text = _rights_file_text(name)
+    assert rights_text is not None, "%s must exist after role creation" % _rights_file(name)
+    for prop in ("setForNewObjects", "setForAttributesByDefault",
+                 "independentRightsOfChildObjects"):
+        assert_contains(rights_text, "<%s>" % prop,
+                        "the empty rights resource must carry its %s default" % prop)
 
     text = _read_role(role_fqn)
     assert_contains(text, "# Role Rights: " + role_fqn,
                     "a Role FQN renders the rights document, headed by the normalized FQN")
-    assert_contains(text, _NO_MATRIX_NOTE,
-                    "a role with no editable rights model renders the note verbatim")
-    assert_not_contains(text, "## Properties",
-                        "the note REPLACES the document: no role-property table may be rendered")
-    assert_not_contains(text, _MATRIX_HEADING,
-                        "the note REPLACES the document: no matrix section may be rendered")
+    assert_contains(text, "## Properties",
+                    "the fresh role's concrete rights model renders its properties")
+    assert_contains(text, _MATRIX_HEADING,
+                    "the fresh role's concrete rights model renders an empty matrix section")
+    assert _matrix_rows(text) == [], "a fresh role must have no authored rights rows:\n%s" % text
+    assert_not_contains(text, _NO_MATRIX_NOTE,
+                        "the missing-model note must not replace a concrete empty rights model")
     assert_contains(text, "**Origin:** core",
                     "the role still resolved as a base object, so the origin footer is rendered")
     assert_not_contains(text, "## Errors",
-                        "a role without a rights model is NOT a per-object resolution failure")
-
-    assert _rights_file_text(name) is None, (
-        "a role created with no rights write must carry no Rights.rights resource - that absence "
-        "is the on-disk half of the note above; %s exists" % _rights_file(name))
+                        "the created rights model must not produce a per-object resolution failure")
 
 
 # ---------------------------------------------------------------------------
@@ -437,3 +447,69 @@ def test_role_rights_read_language_code_selects_right_names():
         "the language='ru' read must name the same right by its Russian platform name; it named "
         "%r (a fallback to the English %r means the code never reached the reader)"
         % (ru_names, _RIGHT_READ))
+
+
+# ---------------------------------------------------------------------------
+# The Object cell of a subordinate target (#685)
+# ---------------------------------------------------------------------------
+
+@e2e_test(tool="get_metadata_details", kind="write-metadata")
+def test_role_rights_read_attribute_row_carries_its_full_address():
+    """A right on an ATTRIBUTE is listed under the attribute's full address, not the catalog's.
+
+    The issue's reproduction (#685): a role grants Read on a catalog and View on one of its
+    attributes. On disk Rights.rights holds two distinct `<object>` nodes, but the reader used to
+    name a non-top target by its TOP object's FQN, so both rows read `Catalog.<C>` and the attribute
+    row could not be told from a right on the catalog itself. The Object cell is now the address
+    modify_metadata accepts in `rights[].object`, and the test proves that symmetry by feeding the
+    cell it READ back into a write: `unset` on the attribute equals its default on a fresh role
+    (setForAttributesByDefault is false - see this module's PLATFORM TRUTH, last paragraph), so the platform
+    prunes the cell and drops the emptied object node, and the second read no longer lists it while
+    the catalog's row stays.
+
+    Cells are pinned whole (object + right + value), never as substrings: the catalog's FQN is a
+    prefix of the attribute's address, so a substring check could not tell the two rows apart.
+    Everything this test creates (catalog, attribute, role) is reverted by the write-metadata reset."""
+    role_name = "E2ERoleSubordinateAddress"
+    role_fqn = _seed_role(role_name)
+    catalog_fqn = _seed_catalog("E2ERightsAddrCatalog")
+    attribute_fqn = catalog_fqn + ".Attribute.Kod2"
+    r = call("create_metadata", {"projectName": PROJECT, "fqn": attribute_fqn})
+    assert_ok(r, "seed " + attribute_fqn)
+    wait_for_project_ready()
+
+    _write_rights(role_fqn, [
+        {"object": catalog_fqn, "right": _RIGHT_READ, "value": "set"},
+        {"object": attribute_fqn, "right": "View", "value": "set"},
+    ])
+    poll_disk_contains(_rights_file(role_name), "<name>%s</name>" % attribute_fqn,
+                       ctx="the attribute's own object node must reach the role's rights resource")
+    poll_disk_contains(_rights_file(role_name), "<name>%s</name>" % catalog_fqn,
+                       ctx="the catalog's object node must reach the role's rights resource")
+
+    rows = _matrix_rows(_read_role(role_fqn, full=True))
+    assert _cell(rows, catalog_fqn, _RIGHT_READ) == _ALLOWED, (
+        "the catalog's right must stay under the catalog's FQN; rows were %r" % (rows,))
+    assert _cell(rows, attribute_fqn, "View") == _ALLOWED, (
+        "the attribute's right must be listed under its full address %r; rows were %r"
+        % (attribute_fqn, rows))
+    assert _cell(rows, catalog_fqn, "View") is None, (
+        "the attribute's View right must not be filed under the catalog's FQN; rows were %r" % (rows,))
+    assert attribute_fqn in _matrix_objects(rows) and catalog_fqn in _matrix_objects(rows), (
+        "the two targets must render two DISTINCT Object cells; objects were %r"
+        % (_matrix_objects(rows),))
+
+    # Read -> write symmetry: the Object cell exactly as it was READ is a valid rights[].object.
+    read_address = [obj for obj, right, _v in rows if right == "View"]
+    assert read_address == [attribute_fqn], (
+        "exactly one View row, named by the attribute's address, was expected; got %r" % (read_address,))
+    _write_rights(role_fqn, [{"object": read_address[0], "right": "View", "value": "unset"}])
+    poll_disk_lacks(_rights_file(role_name), "<name>%s</name>" % attribute_fqn,
+                    ctx="unset equals the attribute's default on a fresh role, so the platform must "
+                        "prune the cell and drop the emptied object node")
+
+    after = _matrix_rows(_read_role(role_fqn, full=True))
+    assert _cell(after, attribute_fqn, "View") is None, (
+        "the right removed through the address the reader printed must be gone; rows were %r" % (after,))
+    assert _cell(after, catalog_fqn, _RIGHT_READ) == _ALLOWED, (
+        "removing the attribute's right must leave the catalog's right in place; rows were %r" % (after,))

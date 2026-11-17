@@ -6,6 +6,8 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import com.ditrix.edt.mcp.server.utils.MarkerCheckIds;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -54,6 +56,7 @@ import com._1c.g5.v8.dt.metadata.mdclass.Catalog;
 import com._1c.g5.v8.dt.metadata.mdclass.CatalogAttribute;
 import com._1c.g5.v8.dt.metadata.mdclass.CatalogForm;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.ExternalDataProcessor;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassFactory;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.Subsystem;
@@ -65,8 +68,13 @@ import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetProjectErrorsTool.ErrorInfo;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter;
 import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
+import com.ditrix.edt.mcp.server.utils.MetadataScope;
+import com.ditrix.edt.mcp.server.utils.MetadataScopeTestFixtures;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 import com.ditrix.edt.mcp.server.utils.PredefinedWriter;
 
@@ -90,32 +98,32 @@ public class GetProjectErrorsToolTest
     @Test
     public void testCheckIdMatchesByShortUid()
     {
-        assertTrue(GetProjectErrorsTool.checkIdMatches("SU23", null, "su2")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(MarkerCheckIds.checkIdMatches("SU23", null, "su2")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     @Test
     public void testCheckIdMatchesBySymbolicId()
     {
-        assertTrue(GetProjectErrorsTool.checkIdMatches("SU23", "ql-temp-table-index", "temp")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue(MarkerCheckIds.checkIdMatches("SU23", "ql-temp-table-index", "temp")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     @Test
     public void testCheckIdMatchesCaseInsensitive()
     {
-        assertTrue(GetProjectErrorsTool.checkIdMatches("Su23", null, "SU23")); //$NON-NLS-1$ //$NON-NLS-2$
-        assertTrue(GetProjectErrorsTool.checkIdMatches(null, "QL-Temp-Table", "ql-temp")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(MarkerCheckIds.checkIdMatches("Su23", null, "SU23")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(MarkerCheckIds.checkIdMatches(null, "QL-Temp-Table", "ql-temp")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     @Test
     public void testCheckIdMatchesNoMatch()
     {
-        assertFalse(GetProjectErrorsTool.checkIdMatches("SU23", "ql-temp-table-index", "zzz")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertFalse(MarkerCheckIds.checkIdMatches("SU23", "ql-temp-table-index", "zzz")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     @Test
     public void testCheckIdMatchesBothNull()
     {
-        assertFalse(GetProjectErrorsTool.checkIdMatches(null, null, "anything")); //$NON-NLS-1$
+        assertFalse(MarkerCheckIds.checkIdMatches(null, null, "anything")); //$NON-NLS-1$
     }
 
     // ========== checkIdMatchesExact (pure) ==========
@@ -125,20 +133,20 @@ public class GetProjectErrorsToolTest
     @Test
     public void testCheckIdMatchesExactBySymbolicId()
     {
-        assertTrue(GetProjectErrorsTool.checkIdMatchesExact("SU23", "ql-temp-table-index", "ql-temp-table-index")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue(MarkerCheckIds.checkIdMatchesExact("SU23", "ql-temp-table-index", "ql-temp-table-index")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     @Test
     public void testCheckIdMatchesExactByShortUid()
     {
-        assertTrue(GetProjectErrorsTool.checkIdMatchesExact("SU23", "ql-temp-table-index", "SU23")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue(MarkerCheckIds.checkIdMatchesExact("SU23", "ql-temp-table-index", "SU23")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     @Test
     public void testCheckIdMatchesExactCaseInsensitive()
     {
-        assertTrue(GetProjectErrorsTool.checkIdMatchesExact("Su23", null, "su23")); //$NON-NLS-1$ //$NON-NLS-2$
-        assertTrue(GetProjectErrorsTool.checkIdMatchesExact(null, "QL-Temp-Table", "ql-temp-table")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(MarkerCheckIds.checkIdMatchesExact("Su23", null, "su23")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(MarkerCheckIds.checkIdMatchesExact(null, "QL-Temp-Table", "ql-temp-table")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     @Test
@@ -146,20 +154,20 @@ public class GetProjectErrorsToolTest
     {
         // The exact bug this guards: "doc" must NOT match "doc-comment-parameter-section" here,
         // even though the loose checkIdMatches used by get_project_errors would allow it.
-        assertFalse(GetProjectErrorsTool.checkIdMatchesExact("SU1", "doc-comment-parameter-section", "doc")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        assertFalse(GetProjectErrorsTool.checkIdMatchesExact("SU23", null, "su2")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse(MarkerCheckIds.checkIdMatchesExact("SU1", "doc-comment-parameter-section", "doc")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertFalse(MarkerCheckIds.checkIdMatchesExact("SU23", null, "su2")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     @Test
     public void testCheckIdMatchesExactNoMatch()
     {
-        assertFalse(GetProjectErrorsTool.checkIdMatchesExact("SU23", "ql-temp-table-index", "zzz")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertFalse(MarkerCheckIds.checkIdMatchesExact("SU23", "ql-temp-table-index", "zzz")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     @Test
     public void testCheckIdMatchesExactBothNull()
     {
-        assertFalse(GetProjectErrorsTool.checkIdMatchesExact(null, null, "anything")); //$NON-NLS-1$
+        assertFalse(MarkerCheckIds.checkIdMatchesExact(null, null, "anything")); //$NON-NLS-1$
     }
 
     // ========== unresolvedPlaceholder ==========
@@ -187,7 +195,7 @@ public class GetProjectErrorsToolTest
     public void testResolveSymbolicCheckIdNullRepository()
     {
         Marker marker = mock(Marker.class);
-        assertNull(GetProjectErrorsTool.resolveSymbolicCheckId(marker, "SU23", null)); //$NON-NLS-1$
+        assertNull(MarkerCheckIds.resolveSymbolicCheckId(marker, "SU23", null)); //$NON-NLS-1$
     }
 
     @Test
@@ -195,7 +203,7 @@ public class GetProjectErrorsToolTest
     {
         Marker marker = mock(Marker.class);
         ICheckRepository repo = mock(ICheckRepository.class);
-        assertNull(GetProjectErrorsTool.resolveSymbolicCheckId(marker, "", repo)); //$NON-NLS-1$
+        assertNull(MarkerCheckIds.resolveSymbolicCheckId(marker, "", repo)); //$NON-NLS-1$
     }
 
     @Test
@@ -204,7 +212,7 @@ public class GetProjectErrorsToolTest
         Marker marker = mock(Marker.class);
         when(marker.getProject()).thenReturn(null);
         ICheckRepository repo = mock(ICheckRepository.class);
-        assertNull(GetProjectErrorsTool.resolveSymbolicCheckId(marker, "SU23", repo)); //$NON-NLS-1$
+        assertNull(MarkerCheckIds.resolveSymbolicCheckId(marker, "SU23", repo)); //$NON-NLS-1$
     }
 
     @Test
@@ -218,7 +226,7 @@ public class GetProjectErrorsToolTest
         when(repo.getUidForShortUid(eq("SU23"), any(IProject.class))).thenReturn(uid); //$NON-NLS-1$
 
         assertEquals("ql-temp-table-index", //$NON-NLS-1$
-            GetProjectErrorsTool.resolveSymbolicCheckId(marker, "SU23", repo)); //$NON-NLS-1$
+            MarkerCheckIds.resolveSymbolicCheckId(marker, "SU23", repo)); //$NON-NLS-1$
     }
 
     // ========== buildIfMatches: review point 1 counters ==========
@@ -863,6 +871,162 @@ public class GetProjectErrorsToolTest
             exact.toString().contains("objectFqns filter: Catalog.Products")); //$NON-NLS-1$
     }
 
+    // ========== modulePaths: exact (normalised) module filter ==========
+
+    @Test
+    public void testSchemaDeclaresModulePaths()
+    {
+        JsonObject props = JsonParser.parseString(new GetProjectErrorsTool().getInputSchema())
+            .getAsJsonObject().getAsJsonObject("properties"); //$NON-NLS-1$
+        JsonObject modulePaths = props.getAsJsonObject("modulePaths"); //$NON-NLS-1$
+        assertNotNull("modulePaths must be declared", modulePaths); //$NON-NLS-1$
+        assertEquals("array", modulePaths.get("type").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testModulePathsProseSurvivesCompaction()
+    {
+        // The value shape (a src-relative path, as in the Module path column) is the one fact the
+        // array schema cannot state, so it must reach tools/list.
+        JsonObject wire = com.ditrix.edt.mcp.server.protocol.InputSchemaCompactor.compact(GetProjectErrorsTool.NAME,
+            JsonParser.parseString(new GetProjectErrorsTool().getInputSchema())).getAsJsonObject()
+            .getAsJsonObject("properties").getAsJsonObject("modulePaths"); //$NON-NLS-1$ //$NON-NLS-2$
+        assertNotNull("modulePaths must keep its description on the wire", wire.get("description")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(wire.get("description").getAsString().contains("CommonModules/")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testModulePathsKeepsOnlyRowsOfThosePaths()
+    {
+        List<ErrorInfo> errors = collect(100, Arrays.asList(MODULE_B),
+            moduleMarker("SU1", MODULE_A), moduleMarker("SU2", MODULE_B), moduleMarker("SU3", MODULE_A)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertEquals(1, errors.size());
+        assertEquals("SU2", errors.get(0).checkCode); //$NON-NLS-1$
+        assertEquals(MODULE_B, errors.get(0).modulePath);
+    }
+
+    @Test
+    public void testModulePathsNormalizesSrcPrefixSlashesAndCase()
+    {
+        List<ErrorInfo> errors = collect(100, Arrays.asList("src\\commonmodules\\b\\MODULE.bsl"), //$NON-NLS-1$
+            moduleMarker("SU1", MODULE_A), moduleMarker("SU2", MODULE_B)); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(1, errors.size());
+        assertEquals("SU2", errors.get(0).checkCode); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testModulePathsExcludesRowsWithoutAModule()
+    {
+        List<ErrorInfo> errors = collect(100, Arrays.asList(MODULE_A),
+            moduleMarker("SU1", null), moduleMarker("SU2", MODULE_A)); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(1, errors.size());
+        assertEquals("SU2", errors.get(0).checkCode); //$NON-NLS-1$
+
+        // Without the filter the metadata-only marker is reported as before.
+        assertEquals(2, collect(100, Collections.<String> emptyList(),
+            moduleMarker("SU1", null), moduleMarker("SU2", MODULE_A)).size()); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testModulePathsIsAppliedBeforeTheLimit()
+    {
+        // limit 1 and the only matching marker is the THIRD: a filter applied after the limit
+        // would return nothing.
+        List<ErrorInfo> errors = collect(1, Arrays.asList(MODULE_B),
+            moduleMarker("SU1", MODULE_A), moduleMarker("SU2", MODULE_A), moduleMarker("SU3", MODULE_B)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertEquals(1, errors.size());
+        assertEquals("SU3", errors.get(0).checkCode); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testNoErrorsBannerEchoesModulePaths()
+    {
+        StringBuilder md = new StringBuilder();
+        GetProjectErrorsTool.appendNoErrorsSection(md, "P", null, null, GetProjectErrorsTool.PARAM_OBJECTS, //$NON-NLS-1$
+            Arrays.asList(MODULE_A, MODULE_B));
+        assertTrue(md.toString(), md.toString().contains("Module paths filter: " + MODULE_A + ", " + MODULE_B)); //$NON-NLS-1$ //$NON-NLS-2$
+
+        StringBuilder none = new StringBuilder();
+        GetProjectErrorsTool.appendNoErrorsSection(none, "P", null, null, GetProjectErrorsTool.PARAM_OBJECTS, //$NON-NLS-1$
+            Collections.<String> emptyList());
+        assertFalse(none.toString(), none.toString().contains("Module paths")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testModulePathsEntryThatNormalisesToNothingIsRefusedNotDropped()
+    {
+        // "src/" and "/" name no module; dropping them silently turned the call into "no filter" (every
+        // module). The refusal names the value and the expected form. Validation runs before any
+        // project/BM access, so this is headless-safe.
+        for (String entry : Arrays.asList("src/", "/", "\\", "src\\")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        {
+            JsonArray array = new JsonArray();
+            array.add(entry);
+            Map<String, String> params = new HashMap<>();
+            params.put(GetProjectErrorsTool.PARAM_MODULE_PATHS, array.toString());
+            String error = refusalOf(new GetProjectErrorsTool().execute(params));
+            assertTrue(entry + " must be named: " + error, error.contains("'" + entry + "'")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            assertTrue("the expected form is named: " + error, //$NON-NLS-1$
+                error.contains("CommonModules/X/Module.bsl")); //$NON-NLS-1$
+        }
+    }
+
+    @Test
+    public void testModulePathsRefusalNamesOnlyTheUnusableEntry()
+    {
+        Map<String, String> params = new HashMap<>();
+        params.put(GetProjectErrorsTool.PARAM_MODULE_PATHS, "[\"" + MODULE_A + "\", \"src/\"]"); //$NON-NLS-1$ //$NON-NLS-2$
+        String error = refusalOf(new GetProjectErrorsTool().execute(params));
+        assertTrue(error, error.contains("'src/'")); //$NON-NLS-1$
+        assertFalse("a usable entry is not reported: " + error, error.contains("'" + MODULE_A + "'")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    @Test
+    public void testBlankModulePathsEntriesStayIgnored()
+    {
+        // Blank entries and an empty array keep their meaning: ignored / no module filter.
+        Map<String, String> blank = new HashMap<>();
+        blank.put(GetProjectErrorsTool.PARAM_MODULE_PATHS, "[\"\", \"  \"]"); //$NON-NLS-1$
+        assertTrue(GetProjectErrorsTool.modulePathsOf(blank).isEmpty());
+        assertNull(com.ditrix.edt.mcp.server.utils.MarkerRows.unusableModulePathsError(
+            com.ditrix.edt.mcp.server.protocol.JsonUtils.extractArrayArgument(blank,
+                GetProjectErrorsTool.PARAM_MODULE_PATHS)));
+        Map<String, String> empty = new HashMap<>();
+        empty.put(GetProjectErrorsTool.PARAM_MODULE_PATHS, "[]"); //$NON-NLS-1$
+        assertTrue(GetProjectErrorsTool.modulePathsOf(empty).isEmpty());
+    }
+
+    /** The error text of a refusal; fails when the result is not a refusal. */
+    private static String refusalOf(String result)
+    {
+        JsonObject json = JsonParser.parseString(result).getAsJsonObject();
+        assertFalse("expected a refusal: " + result, json.get("success").getAsBoolean()); //$NON-NLS-1$ //$NON-NLS-2$
+        return json.get("error").getAsString(); //$NON-NLS-1$
+    }
+
+    private static final String MODULE_A = "CommonModules/A/Module.bsl"; //$NON-NLS-1$
+    private static final String MODULE_B = "CommonModules/B/Module.bsl"; //$NON-NLS-1$
+
+    /** Runs the real collector (no BM model: the best-effort branch) over one project's markers. */
+    private static List<ErrorInfo> collect(int limit, List<String> modulePaths, Marker... markers)
+    {
+        Map<IProject, List<Marker>> byProject = new LinkedHashMap<>();
+        byProject.put(project("P"), Arrays.asList(markers)); //$NON-NLS-1$
+        GetProjectErrorsTool.CollectContext context = new GetProjectErrorsTool.CollectContext(null, null,
+            Collections.<String> emptySet(), null, null, limit, new int[1], new int[1], false, null,
+            com.ditrix.edt.mcp.server.utils.MarkerRows.modulePathKeys(modulePaths));
+        return GetProjectErrorsTool.collectErrors(byProject, null, context);
+    }
+
+    private static Marker moduleMarker(String checkCode, String modulePath)
+    {
+        Marker marker = marker(MarkerSeverity.MAJOR, checkCode, "msg", "P"); //$NON-NLS-1$ //$NON-NLS-2$
+        when(marker.getObjectPresentation()).thenReturn("CommonModule.X.Module"); //$NON-NLS-1$
+        when(marker.getExtraInfo()).thenReturn(modulePath == null ? extraInfo(null, null)
+            : extraInfo("platform:/resource/P/src/" + modulePath + "#/0", "2")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return marker;
+    }
+
     // ========== objectFqns: address classification ==========
 
     @Test
@@ -955,7 +1119,7 @@ public class GetProjectErrorsToolTest
         when(model.executeReadonlyTask(any())).thenThrow(new IllegalStateException("model busy")); //$NON-NLS-1$
 
         GetProjectErrorsTool.ProjectResolution decided = GetProjectErrorsTool.resolveInProject(
-            project("P"), model, MdClassFactory.eINSTANCE.createConfiguration(), //$NON-NLS-1$
+            project("P"), model, scope(MdClassFactory.eINSTANCE.createConfiguration()), //$NON-NLS-1$
             Collections.singletonList("Catalog.Products")); //$NON-NLS-1$
 
         assertFalse("a pass that threw decided nothing and is not an inspection", //$NON-NLS-1$
@@ -973,7 +1137,7 @@ public class GetProjectErrorsToolTest
         Configuration config = MdClassFactory.eINSTANCE.createConfiguration();
 
         GetProjectErrorsTool.ProjectResolution decided = GetProjectErrorsTool.resolveInProject(
-            project("P"), readModel(), config, Collections.singletonList("Catalog.Nope")); //$NON-NLS-1$ //$NON-NLS-2$
+            project("P"), readModel(), scope(config), Collections.singletonList("Catalog.Nope")); //$NON-NLS-1$ //$NON-NLS-2$
 
         assertTrue("a completed pass is an inspection", decided.passCompleted); //$NON-NLS-1$
         assertTrue("nothing resolved in an empty configuration", decided.resolved.isEmpty()); //$NON-NLS-1$
@@ -1037,7 +1201,8 @@ public class GetProjectErrorsToolTest
         resolution.notFound.add("Catalog.Nope"); //$NON-NLS-1$
         resolution.unsupported.add(unsupportedEntry("XDTOPackage.P.Property.N", "why")); //$NON-NLS-1$ //$NON-NLS-2$
 
-        String json = GetProjectErrorsTool.addressPayload("# Configuration Problems", 2, resolution); //$NON-NLS-1$
+        String json = GetProjectErrorsTool.addressPayload("# Configuration Problems", //$NON-NLS-1$
+            Arrays.asList(new ErrorInfo(), new ErrorInfo()), resolution);
 
         assertTrue("must be a success envelope", json.contains("\"success\":true")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("must carry the human report", //$NON-NLS-1$
@@ -1057,13 +1222,88 @@ public class GetProjectErrorsToolTest
     {
         // Consistent emission across branches: a consumer must never have to tell "absent" from
         // "none" (the response-contract rule the project pins for every output field).
-        String json = GetProjectErrorsTool.addressPayload("# No Errors Found", 0, //$NON-NLS-1$
+        String json = GetProjectErrorsTool.addressPayload("# No Errors Found", Collections.emptyList(), //$NON-NLS-1$
             new GetProjectErrorsTool.AddressResolution());
 
         assertTrue(json.contains("\"objectsResolved\":[]")); //$NON-NLS-1$
         assertTrue(json.contains("\"objectsNotFound\":[]")); //$NON-NLS-1$
         assertTrue(json.contains("\"objectsUnsupported\":[]")); //$NON-NLS-1$
         assertTrue(json.contains("\"problemsFound\":0")); //$NON-NLS-1$
+        assertTrue(json.contains("\"problems\":[]")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testProblemPayloadPreservesProjectIdentityAndOptionalCoordinates()
+    {
+        ErrorInfo first = new ErrorInfo();
+        first.project = "First";
+        first.modulePath = "CommonModules/Probe/Module.bsl";
+        first.line = 2;
+        first.offset = 18;
+        first.length = 0;
+        first.checkId = "probe-check";
+        first.checkCode = "SU23";
+        first.contributorId = "probe.contributor";
+        first.message = "pipe|and\nnewline";
+        ErrorInfo second = new ErrorInfo();
+        second.project = "Second";
+        second.length = 7;
+        ErrorInfo metadata = new ErrorInfo();
+        metadata.project = "Third";
+        JsonObject payload = JsonParser.parseString(GetProjectErrorsTool.addressPayload("report",
+            Arrays.asList(first, second, metadata), new GetProjectErrorsTool.AddressResolution())).getAsJsonObject();
+        JsonArray rows = payload.getAsJsonArray("problems");
+        assertEquals(3, payload.get("problemsFound").getAsInt());
+        JsonObject row = rows.get(0).getAsJsonObject();
+        assertEquals("First", row.get("project").getAsString());
+        assertEquals(first.modulePath, row.get("modulePath").getAsString());
+        assertEquals(2, row.get("line").getAsInt());
+        assertEquals(18, row.get("offset").getAsInt());
+        assertEquals(0, row.get("length").getAsInt());
+        assertEquals(first.checkId, row.get("checkId").getAsString());
+        assertEquals(first.checkCode, row.get("checkCode").getAsString());
+        assertEquals(first.contributorId, row.get("contributorId").getAsString());
+        assertEquals(first.message, row.get("message").getAsString());
+        JsonObject partial = rows.get(1).getAsJsonObject();
+        assertEquals("Second", partial.get("project").getAsString());
+        assertFalse(partial.has("offset"));
+        assertEquals(7, partial.get("length").getAsInt());
+        JsonObject missing = rows.get(2).getAsJsonObject();
+        assertFalse(missing.has("offset"));
+        assertFalse(missing.has("length"));
+        assertFalse(missing.has("modulePath"));
+    }
+
+    @Test
+    public void testDetailedRangeCellsAndConciseCompatibility()
+    {
+        ErrorInfo row = new ErrorInfo();
+        row.message = "pipe|and\nnewline";
+        row.objectPresentation = "CommonModule.Probe";
+        row.modulePath = "CommonModules/Probe/Module.bsl";
+        row.line = 3;
+        row.offset = 27;
+        row.length = 0;
+        row.checkCode = "SU23";
+        GetProjectErrorsTool.AddressResolution resolution = new GetProjectErrorsTool.AddressResolution();
+        resolution.resolved.add("CommonModule.Probe");
+        List<ErrorInfo> rows = Arrays.asList(row, new ErrorInfo());
+        String detailed = GetProjectErrorsTool.assembleAddressReport(rows, "P", null,
+            resolution.resolved, 2, true, resolution, new int[] {1}, new int[] {1});
+        assertTrue(detailed.contains("| Offset | Length |"));
+        assertTrue(detailed.contains("| 3 | 27 | 0 | `SU23` |"));
+        assertTrue(detailed.contains("pipe\\|and newline"));
+        // The page states the total (#917) instead of the old "limit reached" notice, which had none.
+        assertTrue(detailed.contains("**Found:** 2\n")); //$NON-NLS-1$
+        assertTrue(detailed.contains("1 marker(s) could not be resolved"));
+        assertTrue(detailed.contains("1 marker(s) were excluded from the object filter"));
+        assertTrue(detailed.contains("|  |  |  |  |  |  | `` |  | false |"));
+        String concise = GetProjectErrorsTool.assembleAddressReport(Collections.singletonList(row),
+            "P", null, resolution.resolved, 100, false, resolution, new int[] {0}, new int[] {0});
+        assertTrue(concise.contains("| Description | Location | Module path | Line | Check code | Fix registered |"));
+        assertFalse(concise.contains("Offset"));
+        assertFalse(concise.contains("Length"));
+        assertTrue(concise.contains("| 3 | `SU23` |"));
     }
 
     /** A single {@code objectsUnsupported} entry in the wire shape the tool emits. */
@@ -1221,7 +1461,7 @@ public class GetProjectErrorsToolTest
         config.getCatalogs().add(catalog);
 
         GetProjectErrorsTool.ProjectResolution decided = GetProjectErrorsTool.resolveInProject(
-            project("P"), readModel(), config, //$NON-NLS-1$
+            project("P"), readModel(), scope(config), //$NON-NLS-1$
             Collections.singletonList("Catalog.C.Form.ItemForm.Field.Code")); //$NON-NLS-1$
 
         assertTrue("and it must not decide the address", decided.resolved.isEmpty()); //$NON-NLS-1$
@@ -1231,7 +1471,7 @@ public class GetProjectErrorsToolTest
         // The counterpart: a form that is simply ABSENT is a decided miss - the undecided verdict
         // must not swallow the ordinary not-found one.
         GetProjectErrorsTool.ProjectResolution absent = GetProjectErrorsTool.resolveInProject(
-            project("P"), readModel(), config, //$NON-NLS-1$
+            project("P"), readModel(), scope(config), //$NON-NLS-1$
             Collections.singletonList("Catalog.C.Form.NoSuchForm.Field.Code")); //$NON-NLS-1$
         assertTrue(absent.resolved.isEmpty());
         assertTrue("an absent form is a decided miss, never undecided", //$NON-NLS-1$
@@ -1256,9 +1496,9 @@ public class GetProjectErrorsToolTest
 
         String member = "Catalog.C.Form.ItemForm.Field.Code"; //$NON-NLS-1$
         GetProjectErrorsTool.ProjectResolution undecided = GetProjectErrorsTool.resolveInProject(
-            project("A"), readModel(), withForm, Collections.singletonList(member)); //$NON-NLS-1$
+            project("A"), readModel(), scope(withForm), Collections.singletonList(member)); //$NON-NLS-1$
         GetProjectErrorsTool.ProjectResolution complete = GetProjectErrorsTool.resolveInProject(
-            project("B"), readModel(), MdClassFactory.eINSTANCE.createConfiguration(), //$NON-NLS-1$
+            project("B"), readModel(), scope(MdClassFactory.eINSTANCE.createConfiguration()), //$NON-NLS-1$
             Collections.singletonList(member));
 
         // The premise: A left it undecided while B ran to the end and resolved nothing.
@@ -1319,7 +1559,7 @@ public class GetProjectErrorsToolTest
         // End to end, both halves of the author's requirement in one fold:
         // a readable EDT project + a non-EDT one must still report the address missing...
         GetProjectErrorsTool.ProjectResolution readable = GetProjectErrorsTool.resolveInProject(
-            project("edt-ok"), readModel(), MdClassFactory.eINSTANCE.createConfiguration(), //$NON-NLS-1$
+            project("edt-ok"), readModel(), scope(MdClassFactory.eINSTANCE.createConfiguration()), //$NON-NLS-1$
             candidates);
         GetProjectErrorsTool.AddressResolution withNonEdt =
             new GetProjectErrorsTool.AddressResolution();
@@ -1366,7 +1606,7 @@ public class GetProjectErrorsToolTest
 
         // With a readable project alongside, the address must NOT be called missing.
         GetProjectErrorsTool.ProjectResolution readable = GetProjectErrorsTool.resolveInProject(
-            project("open"), readModel(), MdClassFactory.eINSTANCE.createConfiguration(), //$NON-NLS-1$
+            project("open"), readModel(), scope(MdClassFactory.eINSTANCE.createConfiguration()), //$NON-NLS-1$
             candidates);
         GetProjectErrorsTool.AddressResolution r = new GetProjectErrorsTool.AddressResolution();
         GetProjectErrorsTool.foldProjectDecisions(r, candidates, candidates, Arrays.asList(readable, closed));
@@ -1387,7 +1627,7 @@ public class GetProjectErrorsToolTest
         List<String> candidates = Collections.singletonList(fqn);
 
         GetProjectErrorsTool.ProjectResolution owner = GetProjectErrorsTool.resolveInProject(
-            project("A"), readModel(), configWithCatalog("C"), candidates); //$NON-NLS-1$ //$NON-NLS-2$
+            project("A"), readModel(), scope(configWithCatalog("C")), candidates); //$NON-NLS-1$ //$NON-NLS-2$
         GetProjectErrorsTool.ProjectResolution unreadable = GetProjectErrorsTool.projectDecision(
             project("B", true), null, null, candidates); //$NON-NLS-1$
 
@@ -1412,7 +1652,7 @@ public class GetProjectErrorsToolTest
 
         // The counterpart: with every project consulted there is nothing to warn about.
         GetProjectErrorsTool.ProjectResolution absentHere = GetProjectErrorsTool.resolveInProject(
-            project("B"), readModel(), MdClassFactory.eINSTANCE.createConfiguration(), candidates); //$NON-NLS-1$
+            project("B"), readModel(), scope(MdClassFactory.eINSTANCE.createConfiguration()), candidates); //$NON-NLS-1$
         GetProjectErrorsTool.AddressResolution complete =
             new GetProjectErrorsTool.AddressResolution();
         GetProjectErrorsTool.foldProjectDecisions(complete, candidates, candidates,
@@ -1433,13 +1673,13 @@ public class GetProjectErrorsToolTest
         String requested = "Catalog." + yo; //$NON-NLS-1$
 
         GetProjectErrorsTool.ProjectResolution a = GetProjectErrorsTool.resolveInProject(
-            project("A"), readModel(), configWithCatalog(ye), //$NON-NLS-1$
+            project("A"), readModel(), scope(configWithCatalog(ye)), //$NON-NLS-1$
             Collections.singletonList(requested));
         GetProjectErrorsTool.ProjectResolution b = GetProjectErrorsTool.resolveInProject(
-            project("B"), readModel(), configWithCatalog(yo), //$NON-NLS-1$
+            project("B"), readModel(), scope(configWithCatalog(yo)), //$NON-NLS-1$
             Collections.singletonList(requested));
         GetProjectErrorsTool.ProjectResolution c = GetProjectErrorsTool.resolveInProject(
-            project("C"), readModel(), MdClassFactory.eINSTANCE.createConfiguration(), //$NON-NLS-1$
+            project("C"), readModel(), scope(MdClassFactory.eINSTANCE.createConfiguration()), //$NON-NLS-1$
             Collections.singletonList(requested));
 
         GetProjectErrorsTool.AddressResolution resolution =
@@ -1504,10 +1744,10 @@ public class GetProjectErrorsToolTest
         String requested = "Catalog." + yo; //$NON-NLS-1$
 
         GetProjectErrorsTool.ProjectResolution a = GetProjectErrorsTool.resolveInProject(
-            project("A"), readModel(), configWithCatalog(ye), //$NON-NLS-1$
+            project("A"), readModel(), scope(configWithCatalog(ye)), //$NON-NLS-1$
             Collections.singletonList(requested));
         GetProjectErrorsTool.ProjectResolution b = GetProjectErrorsTool.resolveInProject(
-            project("B"), readModel(), configWithCatalog(yo), //$NON-NLS-1$
+            project("B"), readModel(), scope(configWithCatalog(yo)), //$NON-NLS-1$
             Collections.singletonList(requested));
 
         assertEquals("project A must report the spelling IT stores", //$NON-NLS-1$
@@ -1594,7 +1834,7 @@ public class GetProjectErrorsToolTest
     }
 
     @Test
-    public void testEveryValidFirstStepIsAContainmentAndStaysPossible()
+    public void testEveryValidFirstStepIsACollectionAndStaysPossible()
     {
         // Walks THE grammar the gate resolves against - MetadataNodeResolver's own token -> feature
         // map - not a catalogue that mirrors it. Pinning the mirror was vacuous: a token added to
@@ -1622,11 +1862,13 @@ public class GetProjectErrorsToolTest
                     continue;
                 }
                 String type = classifier.getName();
-                assertTrue("a valid first step must be a CONTAINMENT reference: " //$NON-NLS-1$
+                boolean referencedTop = f == MdClassPackage.Literals.EXTERNAL_DATA_SOURCE__TABLES
+                    || f == MdClassPackage.Literals.EXTERNAL_DATA_SOURCE__CUBES;
+                assertTrue("a valid first step must be containment or a registered EDS top: " //$NON-NLS-1$
                     + type + "." + feature, //$NON-NLS-1$
-                    f instanceof EReference && ((EReference)f).isContainment());
-                assertTrue("the owner question must accept it: " + type + "." + feature, //$NON-NLS-1$ //$NON-NLS-2$
-                    MetadataTypeUtils.typeCanContain(type, feature));
+                    f instanceof EReference && (((EReference)f).isContainment() || referencedTop));
+                assertEquals("the containment-only owner question keeps its contract: " + type + "." + feature, //$NON-NLS-1$ //$NON-NLS-2$
+                    !referencedTop, MetadataTypeUtils.typeCanContain(type, feature));
                 String address = type + ".X." + token + ".Y"; //$NON-NLS-1$ //$NON-NLS-2$
                 assertTrue("a valid first step must stay POSSIBLE: " + address, //$NON-NLS-1$
                     GetProjectErrorsTool.possibleAddressShape(address));
@@ -1652,12 +1894,13 @@ public class GetProjectErrorsToolTest
 
     /**
      * Features whose kinds are legal only DEEPER in an address: {@code methods} hangs off an
-     * HTTPService URLTemplate and {@code parameters} off a WebService Operation, so neither may have
+     * HTTPService URLTemplate, {@code parameters} off a WebService Operation, {@code tableFields}
+     * off an EDS Table and {@code dimensionTables} off an EDS Cube, so none may have
      * a first-step owner. Named explicitly so a new kind that resolves to nothing is a failure
      * rather than another silent zero.
      */
     private static final Set<String> DEEPER_ONLY_FEATURES =
-        new HashSet<>(Arrays.asList("methods", "parameters")); //$NON-NLS-1$ //$NON-NLS-2$
+        new HashSet<>(Arrays.asList("methods", "parameters", "tableFields", "dimensionTables")); //$NON-NLS-1$ //$NON-NLS-2$
 
 
     @Test
@@ -1668,7 +1911,8 @@ public class GetProjectErrorsToolTest
         // the catalogue publishes their tokens.
         for (String address : new String[] {
             "HTTPService.Service.Method.Get",        // Method belongs to a URLTemplate //$NON-NLS-1$
-            "WebService.Service.Parameter.Value"})   // Parameter belongs to an Operation //$NON-NLS-1$
+            "WebService.Service.Parameter.Value",   // Parameter belongs to an Operation //$NON-NLS-1$
+            "ExternalDataSource.Source.DimensionTable.T"}) // DimensionTable belongs to a Cube //$NON-NLS-1$
         {
             assertFalse("legal only deeper, so not a valid first step: " + address, //$NON-NLS-1$
                 GetProjectErrorsTool.possibleAddressShape(address));
@@ -1678,6 +1922,10 @@ public class GetProjectErrorsToolTest
             "HTTPService.Service.URLTemplate.Root.Method.Get")); //$NON-NLS-1$
         assertTrue(GetProjectErrorsTool.possibleAddressShape(
             "WebService.Service.Operation.Calc.Parameter.Value")); //$NON-NLS-1$
+        assertTrue(GetProjectErrorsTool.possibleAddressShape(
+            "ExternalDataSource.Source.Cube.C.DimensionTable.T")); //$NON-NLS-1$
+        assertTrue(GetProjectErrorsTool.possibleAddressShape(
+            "ExternalDataSource.Source.Cube.C.DimensionTable.T.Field.F")); //$NON-NLS-1$
     }
 
 
@@ -1872,11 +2120,8 @@ public class GetProjectErrorsToolTest
     @Test
     public void testAnExternalObjectsProjectIsAbsentNotUndecided()
     {
-        // A project of external objects (reports / data processors) carries a V8 nature but has NO
-        // Configuration BY DESIGN - not "not yet". Classifying it as an unreadable EDT project (its
-        // nature IS a V8 one) turned every ordinary miss into a refusal on a workspace-wide scan,
-        // and made a projectName pointing at one unable to resolve anything ever. Its lack of a
-        // configuration is KNOWLEDGE: it cannot own an mdclass address, so it answers ABSENT.
+        // An external-objects project cannot hold a Catalog, so this family is absent even when its
+        // own external roots are unavailable; calling it undecided would mute a proven miss.
         List<String> candidates = Collections.singletonList("Catalog.Nope"); //$NON-NLS-1$
 
         GetProjectErrorsTool.ProjectResolution external = GetProjectErrorsTool.projectDecision(
@@ -1890,7 +2135,7 @@ public class GetProjectErrorsToolTest
 
         // So a workspace-wide scan next to a readable project reports an ordinary MISS...
         GetProjectErrorsTool.ProjectResolution readable = GetProjectErrorsTool.resolveInProject(
-            project("cfg"), readModel(), MdClassFactory.eINSTANCE.createConfiguration(), //$NON-NLS-1$
+            project("cfg"), readModel(), scope(MdClassFactory.eINSTANCE.createConfiguration()), //$NON-NLS-1$
             candidates);
         GetProjectErrorsTool.AddressResolution r = new GetProjectErrorsTool.AddressResolution();
         GetProjectErrorsTool.foldProjectDecisions(r, candidates, candidates, Arrays.asList(readable, external));
@@ -1925,6 +2170,143 @@ public class GetProjectErrorsToolTest
             closedProject("gone"), null, null, candidates); //$NON-NLS-1$
         assertEquals("unknowable natures are never proof that a project holds nothing", //$NON-NLS-1$
             singleton("Catalog.Nope"), unknowable.undecided); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testAReadConfigurationOutranksAnUnrecognisedNature()
+    {
+        // Its BM model is not up, but the project already handed over its Configuration - so it IS
+        // a 1C:EDT project. Judged by the nature allowlist alone it would leave the universe, and a
+        // workspace scan next to one readable project would then call the address a proven MISS
+        // although the configuration that may own it was never looked at.
+        List<String> candidates = Collections.singletonList("Catalog.Nope"); //$NON-NLS-1$
+
+        GetProjectErrorsTool.ProjectResolution decided = GetProjectErrorsTool.projectDecision(
+            natureProject("cfg-odd-nature", "org.example.SomeOtherNature"), null, //$NON-NLS-1$ //$NON-NLS-2$
+            scope(MdClassFactory.eINSTANCE.createConfiguration()), candidates);
+        assertNotNull("a project that handed over a configuration is not a non-EDT project", //$NON-NLS-1$
+            decided);
+        assertEquals(singleton("Catalog.Nope"), decided.undecided); //$NON-NLS-1$
+        assertFalse("its pass did NOT complete - nothing was looked at", decided.passCompleted); //$NON-NLS-1$
+
+        // The other edge: WITHOUT that evidence the same descriptor still leaves the universe, or
+        // one ordinary Eclipse project would mute the missing-address report for the workspace.
+        assertNull("an unrecognised nature and no readable root is still not an EDT project", //$NON-NLS-1$
+            GetProjectErrorsTool.projectDecision(
+                natureProject("plain-odd-nature", "org.example.SomeOtherNature"), null, null, //$NON-NLS-1$ //$NON-NLS-2$
+                candidates));
+    }
+
+    @Test
+    public void testExternalDataProcessorResolvesAgainstAnExternalObjectsScope()
+    {
+        ExternalDataProcessor processor = MdClassFactory.eINSTANCE.createExternalDataProcessor();
+        processor.setName("X"); //$NON-NLS-1$
+        MetadataScope external = MetadataScopeTestFixtures.externalObjects(processor);
+        String english = "ExternalDataProcessor.X"; //$NON-NLS-1$
+        String russian = fromCp(0x0412, 0x043d, 0x0435, 0x0448, 0x043d, 0x044f, 0x044f,
+            0x041e, 0x0431, 0x0440, 0x0430, 0x0431, 0x043e, 0x0442, 0x043a, 0x0430) + ".X"; //$NON-NLS-1$
+
+        GetProjectErrorsTool.ProjectResolution decided = GetProjectErrorsTool.resolveInProject(
+            project("ext"), readModel(), external, Arrays.asList(english, russian)); //$NON-NLS-1$
+
+        assertTrue("the external-root resolve pass must complete", decided.passCompleted); //$NON-NLS-1$
+        assertEquals(singleton(english), decided.resolved.get(english));
+        assertEquals("the Russian type token must scope the same stored object", //$NON-NLS-1$
+            singleton(english), decided.resolved.get(russian));
+        assertTrue(decided.undecided.isEmpty());
+    }
+
+    @Test
+    public void testUnavailableExternalRootOnlyLeavesExternalFamiliesUndecided()
+    {
+        String catalog = "Catalog.Nope"; //$NON-NLS-1$
+        String externalFqn = "ExternalDataProcessor.X"; //$NON-NLS-1$
+        List<String> candidates = Arrays.asList(catalog, externalFqn);
+
+        GetProjectErrorsTool.ProjectResolution decided = GetProjectErrorsTool.projectDecision(
+            natureProject("ext", "com._1c.g5.v8.dt.core.V8ExternalObjectsNature"), //$NON-NLS-1$ //$NON-NLS-2$
+            null, MetadataScopeTestFixtures.unavailableExternalObjects(), candidates);
+
+        assertTrue("the project still decides configuration-only families", decided.passCompleted); //$NON-NLS-1$
+        assertFalse("a Catalog is structurally absent here, not unknown", //$NON-NLS-1$
+            decided.undecided.contains(catalog));
+        assertEquals("an unreadable external root cannot prove its own object absent", //$NON-NLS-1$
+            singleton(externalFqn), decided.undecided);
+    }
+
+    @Test
+    public void testConfigurationOnlyFamiliesAreAbsentWithoutABaseConfiguration()
+    {
+        MetadataScope external = MetadataScopeTestFixtures.externalObjects();
+
+        assertTrue("a subsystem cannot exist in an external-object root", //$NON-NLS-1$
+            GetProjectErrorsTool.resolvedSpellings(external,
+                "Subsystem.Sales.Subsystem.Orders").isEmpty()); //$NON-NLS-1$
+        assertTrue("a predefined item cannot exist there and must not dereference a null base", //$NON-NLS-1$
+            GetProjectErrorsTool.resolvedSpellings(external,
+                "Catalog.Products.Predefined.Sample").isEmpty()); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testConfigurationOnlyFamiliesCannotResolveThroughAnExternalProjectsBase()
+    {
+        Configuration base = MdClassFactory.eINSTANCE.createConfiguration();
+        Subsystem subsystem = MdClassFactory.eINSTANCE.createSubsystem();
+        subsystem.setName("X"); //$NON-NLS-1$
+        base.getSubsystems().add(subsystem);
+        Catalog catalog = MdClassFactory.eINSTANCE.createCatalog();
+        catalog.setName("Products"); //$NON-NLS-1$
+        assertFalse(PredefinedWriter.create(catalog, "Sample", //$NON-NLS-1$
+            new PredefinedWriter.ItemProps(), false).isError());
+        base.getCatalogs().add(catalog);
+
+        List<String> candidates = Arrays.asList("Subsystem.X", //$NON-NLS-1$
+            "Catalog.Products.Predefined.Sample"); //$NON-NLS-1$
+        GetProjectErrorsTool.ProjectResolution decided = GetProjectErrorsTool.resolveInProject(
+            project("external"), readModel(), //$NON-NLS-1$
+            MetadataScopeTestFixtures.externalObjectsWithBase(base), candidates);
+
+        assertTrue("the structural absence is a completed decision", decided.passCompleted); //$NON-NLS-1$
+        assertTrue("a linked base must never resolve objects for the external project", //$NON-NLS-1$
+            decided.resolved.isEmpty());
+        assertTrue("configuration families are absent here, not unknown", //$NON-NLS-1$
+            decided.undecided.isEmpty());
+    }
+
+    @Test
+    public void testUnreadableConfigurationProjectDecidesStandaloneFamiliesAbsent()
+    {
+        String standalone = "ExternalDataProcessor.X"; //$NON-NLS-1$
+
+        GetProjectErrorsTool.ProjectResolution decided = GetProjectErrorsTool.projectDecision(
+            natureProject("loading", "com._1c.g5.v8.dt.core.V8ConfigurationNature"), //$NON-NLS-1$ //$NON-NLS-2$
+            null, null, Collections.singletonList(standalone));
+
+        assertTrue("the incompatible family is decided without reading the model", //$NON-NLS-1$
+            decided.passCompleted);
+        assertTrue("a configuration project can never own a standalone root", //$NON-NLS-1$
+            decided.resolved.isEmpty());
+        assertTrue("structural absence must not become undecided", decided.undecided.isEmpty()); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testFailingExternalRootPreservesConfigurationFamilyAbsence()
+    {
+        String catalog = "Catalog.Nope"; //$NON-NLS-1$
+        String standalone = "ExternalDataProcessor.X"; //$NON-NLS-1$
+
+        GetProjectErrorsTool.ProjectResolution decided = GetProjectErrorsTool.resolveInProject(
+            project("external"), readModel(), MetadataScopeTestFixtures.failingExternalObjects(), //$NON-NLS-1$
+            Arrays.asList(catalog, standalone));
+
+        assertTrue("the configuration-family absence survives the failed root read", //$NON-NLS-1$
+            decided.passCompleted);
+        assertTrue(decided.resolved.isEmpty());
+        assertEquals("only the family owned by this project becomes undecided", //$NON-NLS-1$
+            singleton(standalone), decided.undecided);
+        assertFalse("the external failure cannot erase a structural absence", //$NON-NLS-1$
+            decided.undecided.contains(catalog));
     }
 
 
@@ -2453,6 +2835,59 @@ public class GetProjectErrorsToolTest
     }
 
     @Test
+    public void testAllMissAddressReportIsARefusalInsteadOfACleanHeading()
+    {
+        String missing = "Catalog.Nope"; //$NON-NLS-1$
+        String unsupported = "XDTOPackage.P.Property.N"; //$NON-NLS-1$
+        GetProjectErrorsTool.AddressResolution resolution =
+            new GetProjectErrorsTool.AddressResolution();
+        resolution.notFound.add(missing);
+        resolution.unsupported.add(unsupportedEntry(unsupported, "why")); //$NON-NLS-1$
+
+        String report = GetProjectErrorsTool.assembleAddressReport(
+            Collections.<ErrorInfo> emptyList(), "P", null, Arrays.asList(missing, unsupported), //$NON-NLS-1$
+            100, false, resolution, new int[] {0}, new int[] {0});
+
+        assertEquals("the refusal must be propagated as the resolution error", //$NON-NLS-1$
+            resolution.error, report);
+        assertTrue("the response must be a ToolResult refusal", //$NON-NLS-1$
+            report.contains("\"success\":false")); //$NON-NLS-1$
+        assertTrue("every unresolved address must be named", //$NON-NLS-1$
+            report.contains(missing) && report.contains(unsupported));
+        assertTrue("the refusal must give both supported recovery paths", //$NON-NLS-1$
+            report.contains("'objects'") && report.contains("get_metadata_objects")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("an unrun scan must never carry the clean heading", //$NON-NLS-1$
+            report.contains("# No Errors Found")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testAnAllUnsupportedRequestKeepsItsOwnReason()
+    {
+        // Nothing was scanned, so it stays a refusal - but an UNSUPPORTED family is not a typo:
+        // its reason already names the tool that owns it, and the FQN-lookup advice would send
+        // the caller to fix an address that was never wrong.
+        String unsupported = "XDTOPackage.P.Property.N"; //$NON-NLS-1$
+        GetProjectErrorsTool.AddressResolution resolution =
+            new GetProjectErrorsTool.AddressResolution();
+        resolution.unsupported.add(
+            unsupportedEntry(unsupported, "call validate_xdto_package instead")); //$NON-NLS-1$
+
+        String report = GetProjectErrorsTool.assembleAddressReport(
+            Collections.<ErrorInfo> emptyList(), "P", null, //$NON-NLS-1$
+            Collections.singletonList(unsupported), 100, false, resolution,
+            new int[] {0}, new int[] {0});
+
+        assertTrue("the response must be a ToolResult refusal", //$NON-NLS-1$
+            report.contains("\"success\":false")); //$NON-NLS-1$
+        assertTrue("the address's OWN reason must survive the refusal: " + report, //$NON-NLS-1$
+            report.contains(unsupported) && report.contains("validate_xdto_package")); //$NON-NLS-1$
+        assertFalse("an unsupported family is not a misspelling to look up: " + report, //$NON-NLS-1$
+            report.contains("get_metadata_objects")); //$NON-NLS-1$
+        assertFalse("an unrun scan must never carry the clean heading", //$NON-NLS-1$
+            report.contains("# No Errors Found")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testEveryResolvingYoReadingOfADeferredMemberAccumulates()
     {
         // The guard that lets the deferred path ACCUMULATE was not covered: with only one yo reading
@@ -2626,7 +3061,7 @@ public class GetProjectErrorsToolTest
 
         // A readable project that holds neither, plus one that cannot be consulted at all.
         GetProjectErrorsTool.ProjectResolution readable = GetProjectErrorsTool.resolveInProject(
-            project("open"), readModel(), MdClassFactory.eINSTANCE.createConfiguration(), //$NON-NLS-1$
+            project("open"), readModel(), scope(MdClassFactory.eINSTANCE.createConfiguration()), //$NON-NLS-1$
             Collections.singletonList(possible));
         GetProjectErrorsTool.ProjectResolution unreadable = GetProjectErrorsTool.projectDecision(
             closedProject("archived"), null, null, Collections.singletonList(possible)); //$NON-NLS-1$
@@ -2758,7 +3193,7 @@ public class GetProjectErrorsToolTest
     private static Map<String, Set<String>> resolvedIn(Configuration config, String... fqns)
     {
         GetProjectErrorsTool.ProjectResolution decided = GetProjectErrorsTool.resolveInProject(
-            project("P"), readModel(), config, Arrays.asList(fqns)); //$NON-NLS-1$
+            project("P"), readModel(), scope(config), Arrays.asList(fqns)); //$NON-NLS-1$
         assertTrue("the resolve pass must complete", decided.passCompleted); //$NON-NLS-1$
         return decided.resolved;
     }
@@ -2793,6 +3228,12 @@ public class GetProjectErrorsToolTest
         catalog.setName(storedName);
         config.getCatalogs().add(catalog);
         return config;
+    }
+
+    /** Wraps in-memory configurations in the same scope used by production resolution. */
+    private static MetadataScope scope(Configuration config)
+    {
+        return MetadataScope.ofConfiguration(config);
     }
 
     /** The owning form of the synthetic form model, as an FQN prefix. */

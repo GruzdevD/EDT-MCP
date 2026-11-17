@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       checks: write
@@ -25,6 +25,9 @@ jobs:
 
       - name: Validate business-project skills
         run: python3 docs/validate_agent_skills.py
+
+      - name: Tool documentation generator tests
+        run: python3 -m unittest discover -s docs/tests -p "test_*.py" -v
 
       # The e2e RUNNER's own contracts - isolation bookkeeping, the reset decision, fixture
       # hygiene. They need no EDT and no server, so they run here rather than inside the
@@ -46,14 +49,26 @@ jobs:
           java-version: 25
           cache: maven
 
+      # Maven is pinned, not the runner image's: see the action for why 3.10 breaks Tycho.
+      - name: Set up Maven
+        uses: ./.github/actions/setup-maven
+
+      # Before Maven: an inconsistent or drifted EDT channel must fail with its real reason, not
+      # with Tycho's opaque "bundleLocation can't be null". The served build also keys the cache,
+      # so a new EDT build saves a fresh cache instead of re-downloading its jars on every run.
+      - name: EDT channel guard
+        id: edt-channel
+        uses: ./.github/actions/edt-channel-guard
+
       - name: Cache Tycho P2 repositories
         uses: actions/cache@v6
         with:
           path: |
             ~/.m2/repository/.cache/tycho
             ~/.m2/repository/p2
-          key: ${{ runner.os }}-tycho-p2-${{ hashFiles('**/*.target') }}
+          key: ${{ runner.os }}-tycho-p2-${{ hashFiles('**/*.target') }}-${{ steps.edt-channel.outputs.edt-build }}
           restore-keys: |
+            ${{ runner.os }}-tycho-p2-${{ hashFiles('**/*.target') }}-
             ${{ runner.os }}-tycho-p2-
 
       - name: Cache SonarQube packages

@@ -18,6 +18,74 @@ HARNESS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HARNESS)
 
 
+class ClusterProbeCleanupTest(unittest.TestCase):
+    probe = "McpRegistrationProbe_0123456789abcdef"
+    name = "McpServerRegistration_" + probe
+    registration_id = "01234567-89ab-4cde-8fab-0123456789ab"
+
+    def test_invisible_probe_is_removed_without_changing_unrelated_bytes(self):
+        for ending in (b"\n", b"\r\n"):
+            for probe_first in (True, False):
+                with self.subTest(ending=ending, probe_first=probe_first), tempfile.TemporaryDirectory() as directory:
+                    path = os.path.join(directory, "ibases.v8i")
+                    other = ending.join([b"[Personal base]", b'Connect=File="C:/personal";', b"ID=keep", b""])
+                    probe = ending.join([("[" + self.name + "]").encode(),
+                        ('Connect=Srvr="localhost:1541";Ref="%s";' % self.probe).encode(),
+                        ("ID=" + self.registration_id).encode(), b""])
+                    original = b"\xef\xbb\xbf" + (probe + other if probe_first else other + probe)
+                    with open(path, "wb") as stream:
+                        stream.write(original)
+                    def delete_probe(tool, params):
+                        self.assertEqual("delete_infobase", tool)
+                        self.assertEqual(self.name, params["infobaseName"])
+                        self.assertEqual(self.registration_id, params["registrationId"])
+                        self.assertTrue(params["deleteRegistration"])
+                        self.assertFalse(params["deleteDatabaseFiles"])
+                        with open(path, "wb") as stream:
+                            stream.write(b"\xef\xbb\xbf" + other)
+                        return object()
+                    with mock.patch.dict(os.environ, {"EDT_MCP_INFOBASE_LIST": path}), \
+                            mock.patch.object(HARNESS, "call", side_effect=delete_probe) as called, \
+                            mock.patch.object(HARNESS, "assert_ok"):
+                        self.assertEqual(1, HARNESS.cleanup_cluster_registration_probe(
+                            self.name, "localhost:1541", self.probe, self.registration_id))
+                        self.assertEqual(0, HARNESS.cleanup_cluster_registration_probe(
+                            self.name, "localhost:1541", self.probe, self.registration_id))
+                        self.assertEqual(1, called.call_count)
+                    with open(path, "rb") as stream:
+                        self.assertEqual(b"\xef\xbb\xbf" + other, stream.read())
+
+    def test_cleanup_refuses_an_unrelated_name_or_a_mismatched_address(self):
+        with self.assertRaises(ValueError):
+            HARNESS.cleanup_cluster_registration_probe("Personal base", "localhost:1541", self.probe)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ibases.v8i")
+            original = ('[%s]\nConnect=Srvr="other-host";Ref="%s";\n' % (self.name, self.probe)).encode()
+            with open(path, "wb") as stream:
+                stream.write(original)
+            with mock.patch.dict(os.environ, {"EDT_MCP_INFOBASE_LIST": path}):
+                with self.assertRaises(AssertionError):
+                    HARNESS.cleanup_cluster_registration_probe(self.name, "localhost:1541", self.probe)
+            with open(path, "rb") as stream:
+                self.assertEqual(original, stream.read())
+
+    def test_cleanup_refuses_a_replacement_uuid_even_when_name_and_address_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ibases.v8i")
+            original = ('[%s]\nConnect=Srvr="localhost:1541";Ref="%s";\nID=%s\n' %
+                        (self.name, self.probe, self.registration_id)).encode()
+            with open(path, "wb") as stream:
+                stream.write(original)
+            with mock.patch.dict(os.environ, {"EDT_MCP_INFOBASE_LIST": path}), \
+                    mock.patch.object(HARNESS, "call") as called:
+                with self.assertRaises(AssertionError):
+                    HARNESS.cleanup_cluster_registration_probe(self.name, "localhost:1541", self.probe,
+                        "00000000-0000-0000-0000-000000000000")
+                called.assert_not_called()
+            with open(path, "rb") as stream:
+                self.assertEqual(original, stream.read())
+
+
 class MutationOutcomeTest(unittest.TestCase):
     def setUp(self):
         self.old_unresolved = HARNESS._MUTATIONS_UNRESOLVED
@@ -608,6 +676,39 @@ class FixtureResetTest(unittest.TestCase):
 
         reset_rel.assert_not_called()
 
+    @staticmethod
+    def _expected_cleanup_calls(reset_all):
+        """The mandatory projects ignore every optional one; each optional one ignores the rest."""
+        optional = set(HARNESS.OPTIONAL_FIXTURE_PROJECTS)
+        return [
+            mock.call(HARNESS.PROJECT, reset_all, ignore_projects=optional),
+            mock.call(HARNESS.TESTS_PROJECT, reset_all, ignore_projects=optional),
+        ] + [mock.call(project, reset_all, ignore_projects=optional - {project})
+             for project in HARNESS.OPTIONAL_FIXTURE_PROJECTS]
+
+    def test_the_vendor_support_fixture_is_an_optional_fixture(self):
+        self.assertEqual((HARNESS.EXT_OBJECTS_PROJECT, HARNESS.SUPPORTED_PROJECT),
+                         HARNESS.OPTIONAL_FIXTURE_PROJECTS)
+        self.assertEqual(HARNESS.SUPPORTED_REL,
+                         HARNESS.FIXTURE_REL_BY_PROJECT[HARNESS.SUPPORTED_PROJECT])
+        self.assertIn(HARNESS.SUPPORTED_REL, HARNESS.ALL_FIXTURE_RELS)
+        self.assertIn(HARNESS.SUPPORTED_PROJECT, HARNESS.NON_BASE_PROBE_FQNS)
+
+    def test_one_failed_optional_sync_does_not_cost_the_other_its_baseline(self):
+        def clean_result(project, _revert, ignore_projects=()):
+            if project == HARNESS.EXT_OBJECTS_PROJECT:
+                raise RuntimeError("fixture is not loaded")
+            return (True, 1, 0, None)
+
+        with mock.patch.object(HARNESS, "reset_all_fixtures"), \
+                mock.patch.object(HARNESS, "_revert_and_clean", side_effect=clean_result), \
+                mock.patch.object(HARNESS, "wait_for_project_ready", return_value=True), \
+                mock.patch("builtins.print"):
+            HARNESS.final_cleanup()
+
+        self.assertFalse(HARNESS.optional_model_synced(HARNESS.EXT_OBJECTS_PROJECT))
+        self.assertTrue(HARNESS.optional_model_synced(HARNESS.SUPPORTED_PROJECT))
+
     def test_final_cleanup_synchronizes_external_objects_on_the_happy_path(self):
         synced = (True, 1, 0, None)
         with mock.patch.object(HARNESS, "reset_all_fixtures") as reset_all, \
@@ -615,13 +716,7 @@ class FixtureResetTest(unittest.TestCase):
                 mock.patch.object(HARNESS, "wait_for_project_ready", return_value=True):
             HARNESS.final_cleanup()
 
-        self.assertEqual([
-            mock.call(HARNESS.PROJECT, reset_all,
-                      ignore_projects={HARNESS.EXT_OBJECTS_PROJECT}),
-            mock.call(HARNESS.TESTS_PROJECT, reset_all,
-                      ignore_projects={HARNESS.EXT_OBJECTS_PROJECT}),
-            mock.call(HARNESS.EXT_OBJECTS_PROJECT, reset_all),
-        ], clean.call_args_list)
+        self.assertEqual(self._expected_cleanup_calls(reset_all), clean.call_args_list)
 
     def test_final_cleanup_does_not_raise_when_external_objects_sync_fails(self):
         def clean_result(project, _revert, ignore_projects=()):
@@ -635,13 +730,7 @@ class FixtureResetTest(unittest.TestCase):
                 mock.patch("builtins.print") as output:
             HARNESS.final_cleanup()
 
-        self.assertEqual([
-            mock.call(HARNESS.PROJECT, reset_all,
-                      ignore_projects={HARNESS.EXT_OBJECTS_PROJECT}),
-            mock.call(HARNESS.TESTS_PROJECT, reset_all,
-                      ignore_projects={HARNESS.EXT_OBJECTS_PROJECT}),
-            mock.call(HARNESS.EXT_OBJECTS_PROJECT, reset_all),
-        ], clean.call_args_list)
+        self.assertEqual(self._expected_cleanup_calls(reset_all), clean.call_args_list)
         self.assertIn("skipped", output.call_args.args[0].lower())
         self.assertIn("fixture is not loaded", output.call_args.args[0])
 
@@ -702,7 +791,9 @@ class FixtureResetTest(unittest.TestCase):
 | %s | ready | Configuration | Yes | Yes |
 | %s | ready | Extension | Yes | Yes |
 | %s | building | External objects | Yes | Yes |
-""" % (HARNESS.PROJECT, HARNESS.TESTS_PROJECT, HARNESS.EXT_OBJECTS_PROJECT)
+| %s | ready | Configuration | Yes | Yes |
+""" % (HARNESS.PROJECT, HARNESS.TESTS_PROJECT, HARNESS.EXT_OBJECTS_PROJECT,
+       HARNESS.SUPPORTED_PROJECT)
 
         def ready(timeout=None, failure_details=None, progress=None, ignore_projects=()):
             blocking = []
@@ -720,11 +811,14 @@ class FixtureResetTest(unittest.TestCase):
                 mock.patch("builtins.print"):
             HARNESS.final_cleanup()
 
+        # The building ExternalObjects is never cleaned, and it does not block the other optional
+        # fixture's attempt either.
         self.assertEqual([
             mock.call("clean_project", {"projectName": HARNESS.PROJECT}),
             mock.call("clean_project", {"projectName": HARNESS.TESTS_PROJECT}),
+            mock.call("clean_project", {"projectName": HARNESS.SUPPORTED_PROJECT}),
         ], call.call_args_list)
-        self.assertEqual(4, reset_all.call_count)
+        self.assertEqual(5, reset_all.call_count)
 
     def test_baseline_skips_external_objects_after_its_sync_failed(self):
         def clean_result(project, _revert, ignore_projects=()):
@@ -734,6 +828,7 @@ class FixtureResetTest(unittest.TestCase):
             HARNESS.PROJECT: "base inventory",
             HARNESS.TESTS_PROJECT: "tests inventory",
             HARNESS.EXT_OBJECTS_PROJECT: "stale external inventory",
+            HARNESS.SUPPORTED_PROJECT: "supported inventory",
         }
 
         with mock.patch.object(HARNESS, "reset_all_fixtures"), \
@@ -743,29 +838,41 @@ class FixtureResetTest(unittest.TestCase):
                 mock.patch.object(HARNESS, "_top_object_inventory",
                                   side_effect=lambda project=HARNESS.PROJECT: inventories[project]), \
                 mock.patch.object(HARNESS, "_probe_details", return_value="base details"), \
+                mock.patch.object(HARNESS, "_root_fingerprint",
+                                  side_effect=lambda project=HARNESS.PROJECT: "root of " + project), \
                 mock.patch.object(HARNESS, "_BASELINE_INVENTORY", None), \
                 mock.patch.object(HARNESS, "_BASELINE_DETAILS", None), \
                 mock.patch.dict(HARNESS._BASELINE_INVENTORY_BY_PROJECT, {}, clear=True), \
-                mock.patch.dict(HARNESS._BASELINE_DETAILS_BY_PROJECT, {}, clear=True):
+                mock.patch.dict(HARNESS._BASELINE_DETAILS_BY_PROJECT, {}, clear=True), \
+                mock.patch.dict(HARNESS._BASELINE_ROOT_BY_PROJECT, {}, clear=True):
             HARNESS.final_cleanup()
             HARNESS.snapshot_model_baseline()
             captured = dict(HARNESS._BASELINE_INVENTORY_BY_PROJECT)
             captured_details = dict(HARNESS._BASELINE_DETAILS_BY_PROJECT)
+            captured_roots = dict(HARNESS._BASELINE_ROOT_BY_PROJECT)
 
         self.assertEqual({
             HARNESS.PROJECT: "base inventory",
             HARNESS.TESTS_PROJECT: "tests inventory",
+            HARNESS.SUPPORTED_PROJECT: "supported inventory",
         }, captured)
         self.assertEqual({
             HARNESS.PROJECT: "base details",
             HARNESS.TESTS_PROJECT: "base details",
+            HARNESS.SUPPORTED_PROJECT: "base details",
         }, captured_details)
+        self.assertEqual({
+            HARNESS.PROJECT: "root of " + HARNESS.PROJECT,
+            HARNESS.TESTS_PROJECT: "root of " + HARNESS.TESTS_PROJECT,
+            HARNESS.SUPPORTED_PROJECT: "root of " + HARNESS.SUPPORTED_PROJECT,
+        }, captured_roots)
 
     def test_baseline_records_external_objects_after_its_sync_succeeded(self):
         inventories = {
             HARNESS.PROJECT: "base inventory",
             HARNESS.TESTS_PROJECT: "tests inventory",
             HARNESS.EXT_OBJECTS_PROJECT: "external inventory",
+            HARNESS.SUPPORTED_PROJECT: "supported inventory",
         }
 
         with mock.patch.object(HARNESS, "reset_all_fixtures"), \
@@ -775,22 +882,35 @@ class FixtureResetTest(unittest.TestCase):
                 mock.patch.object(HARNESS, "_top_object_inventory",
                                   side_effect=lambda project=HARNESS.PROJECT: inventories[project]), \
                 mock.patch.object(HARNESS, "_probe_details", return_value="base details"), \
+                mock.patch.object(HARNESS, "_root_fingerprint",
+                                  side_effect=lambda project=HARNESS.PROJECT: "root of " + project) as root, \
                 mock.patch.object(HARNESS, "_BASELINE_INVENTORY", None), \
                 mock.patch.object(HARNESS, "_BASELINE_DETAILS", None), \
                 mock.patch.dict(HARNESS._BASELINE_INVENTORY_BY_PROJECT, {}, clear=True), \
-                mock.patch.dict(HARNESS._BASELINE_DETAILS_BY_PROJECT, {}, clear=True):
+                mock.patch.dict(HARNESS._BASELINE_DETAILS_BY_PROJECT, {}, clear=True), \
+                mock.patch.dict(HARNESS._BASELINE_ROOT_BY_PROJECT, {}, clear=True):
             HARNESS.final_cleanup()
             HARNESS.snapshot_model_baseline()
             captured = dict(HARNESS._BASELINE_INVENTORY_BY_PROJECT)
             captured_details = dict(HARNESS._BASELINE_DETAILS_BY_PROJECT)
+            captured_roots = dict(HARNESS._BASELINE_ROOT_BY_PROJECT)
 
-        self.assertIn(mock.call(HARNESS.EXT_OBJECTS_PROJECT, mock.ANY), clean.call_args_list)
+        self.assertIn(mock.call(HARNESS.EXT_OBJECTS_PROJECT, mock.ANY, ignore_projects=mock.ANY),
+                      clean.call_args_list)
         self.assertEqual(inventories, captured)
         self.assertEqual({
             HARNESS.PROJECT: "base details",
             HARNESS.TESTS_PROJECT: "base details",
             HARNESS.EXT_OBJECTS_PROJECT: "base details",
+            HARNESS.SUPPORTED_PROJECT: "base details",
         }, captured_details)
+        # An external-objects project has no configuration root of its own: never fingerprinted.
+        self.assertEqual({
+            HARNESS.PROJECT: "root of " + HARNESS.PROJECT,
+            HARNESS.TESTS_PROJECT: "root of " + HARNESS.TESTS_PROJECT,
+            HARNESS.SUPPORTED_PROJECT: "root of " + HARNESS.SUPPORTED_PROJECT,
+        }, captured_roots)
+        self.assertNotIn(mock.call(HARNESS.EXT_OBJECTS_PROJECT), root.call_args_list)
 
     def test_non_base_verify_fails_when_clean_disk_inventory_differs(self):
         with mock.patch.dict(
@@ -871,6 +991,89 @@ class FixtureResetTest(unittest.TestCase):
         self.assertIsNone(mismatch)
         inventory.assert_not_called()
         details.assert_not_called()
+
+    # -- the configuration-root brace (issue #741) --
+
+    def test_base_verify_fails_when_the_configuration_root_still_differs(self):
+        """A root write survives a reset with every name and every probe detail intact."""
+        with mock.patch.object(HARNESS, "_BASELINE_INVENTORY", "inventory"), \
+                mock.patch.object(HARNESS, "_BASELINE_DETAILS", "details"), \
+                mock.patch.dict(HARNESS._BASELINE_ROOT_BY_PROJECT,
+                                {HARNESS.PROJECT: "version: 1.0"}, clear=True), \
+                mock.patch.object(HARNESS, "_top_object_inventory", return_value="inventory"), \
+                mock.patch.object(HARNESS, "_probe_details", return_value="details"), \
+                mock.patch.object(HARNESS, "_root_fingerprint",
+                                  return_value="version: 7.4.1") as root:
+            mismatch = HARNESS._baseline_mismatch()
+
+        self.assertIsNotNone(mismatch)
+        self.assertIn("configuration root", mismatch)
+        root.assert_called_once_with(HARNESS.PROJECT)
+
+    def test_base_verify_passes_when_the_configuration_root_matches(self):
+        with mock.patch.object(HARNESS, "_BASELINE_INVENTORY", "inventory"), \
+                mock.patch.object(HARNESS, "_BASELINE_DETAILS", "details"), \
+                mock.patch.dict(HARNESS._BASELINE_ROOT_BY_PROJECT,
+                                {HARNESS.PROJECT: "version: 1.0"}, clear=True), \
+                mock.patch.object(HARNESS, "_top_object_inventory", return_value="inventory"), \
+                mock.patch.object(HARNESS, "_probe_details", return_value="details"), \
+                mock.patch.object(HARNESS, "_root_fingerprint", return_value="version: 1.0"):
+            self.assertIsNone(HARNESS._baseline_mismatch())
+
+    def test_an_unreadable_root_is_a_mismatch_once_its_baseline_exists(self):
+        with mock.patch.dict(HARNESS._BASELINE_ROOT_BY_PROJECT,
+                             {HARNESS.TESTS_PROJECT: "version: 1.0"}, clear=True), \
+                mock.patch.dict(HARNESS._BASELINE_INVENTORY_BY_PROJECT, {}, clear=True), \
+                mock.patch.dict(HARNESS._BASELINE_DETAILS_BY_PROJECT, {}, clear=True), \
+                mock.patch.object(HARNESS, "_disk_mismatch", return_value=None), \
+                mock.patch.object(HARNESS, "_root_fingerprint", return_value=None):
+            mismatch = HARNESS._non_base_mismatch(HARNESS.TESTS_PROJECT, HARNESS.TESTS_PROJECT_REL)
+
+        self.assertIsNotNone(mismatch)
+        self.assertIn("could not be read", mismatch)
+
+    def test_non_base_verify_fails_when_the_extension_root_still_differs(self):
+        with mock.patch.dict(HARNESS._BASELINE_ROOT_BY_PROJECT,
+                             {HARNESS.TESTS_PROJECT: "version: 1.0"}, clear=True), \
+                mock.patch.dict(HARNESS._BASELINE_INVENTORY_BY_PROJECT,
+                                {HARNESS.TESTS_PROJECT: "inventory"}, clear=True), \
+                mock.patch.dict(HARNESS._BASELINE_DETAILS_BY_PROJECT,
+                                {HARNESS.TESTS_PROJECT: "details"}, clear=True), \
+                mock.patch.object(HARNESS, "_disk_mismatch", return_value=None), \
+                mock.patch.object(HARNESS, "_top_object_inventory", return_value="inventory"), \
+                mock.patch.object(HARNESS, "_probe_details", return_value="details"), \
+                mock.patch.object(HARNESS, "_root_fingerprint", return_value="version: 7.4.1") as root:
+            mismatch = HARNESS._non_base_mismatch(HARNESS.TESTS_PROJECT, HARNESS.TESTS_PROJECT_REL)
+
+        self.assertIsNotNone(mismatch)
+        self.assertIn("configuration root of %s" % HARNESS.TESTS_PROJECT, mismatch)
+        root.assert_called_once_with(HARNESS.TESTS_PROJECT)
+
+    def test_the_root_brace_is_skipped_without_a_root_baseline(self):
+        with mock.patch.dict(HARNESS._BASELINE_ROOT_BY_PROJECT, {}, clear=True), \
+                mock.patch.dict(HARNESS._BASELINE_INVENTORY_BY_PROJECT, {}, clear=True), \
+                mock.patch.dict(HARNESS._BASELINE_DETAILS_BY_PROJECT, {}, clear=True), \
+                mock.patch.object(HARNESS, "_disk_mismatch", return_value=None), \
+                mock.patch.object(HARNESS, "_root_fingerprint") as root:
+            mismatch = HARNESS._non_base_mismatch(HARNESS.TESTS_PROJECT, HARNESS.TESTS_PROJECT_REL)
+
+        self.assertIsNone(mismatch)
+        root.assert_not_called()
+
+    def test_the_root_fingerprint_is_no_evidence_on_an_error_or_an_empty_body(self):
+        error = mock.Mock(is_error=True, text='{"success": false, "error": "Project not found: P"}')
+        empty = mock.Mock(is_error=False, text="   ")
+        good = mock.Mock(is_error=False, text="name: TestConfiguration\n")
+        with mock.patch.object(HARNESS, "call", side_effect=[error, empty, good]) as call:
+            self.assertIsNone(HARNESS._root_fingerprint("P"))
+            self.assertIsNone(HARNESS._root_fingerprint("P"))
+            self.assertEqual("name: TestConfiguration", HARNESS._root_fingerprint("P"))
+        call.assert_called_with("get_configuration_properties", {"projectName": "P"})
+
+    def test_a_root_fingerprint_timeout_propagates(self):
+        with mock.patch.object(HARNESS, "call", side_effect=HARNESS.E2ECallTimeout("hung")):
+            with self.assertRaises(HARNESS.E2ECallTimeout):
+                HARNESS._root_fingerprint("P")
 
 
 class SettleProgressNoteTest(unittest.TestCase):
@@ -2500,6 +2703,193 @@ class EvidenceLogTailTest(unittest.TestCase):
     def test_an_ordinary_read_failure_is_reported_as_itself(self):
         with self.assertRaises(OSError):
             HARNESS._read_log_tail(os.path.join("no", "such", "directory", ".log"))
+
+
+class FixtureFilePollTest(unittest.TestCase):
+    """poll_disk_contains_all polls a file of ANY fixture, the base project by default: one poll,
+    not a copy per fixture root (#708 review)."""
+
+    def _fixture_tree(self, tmp):
+        """A repo root holding a base-project file and an extension file that differ."""
+        base = os.path.join(tmp, "base")
+        extension = os.path.join(tmp, "tests", "tests", "src")
+        os.makedirs(os.path.join(base, "src"))
+        os.makedirs(extension)
+        with open(os.path.join(base, "src", "X.mdo"), "w", encoding="utf-8") as handle:
+            handle.write("<name>Base</name>")
+        with open(os.path.join(extension, "X.mdo"), "w", encoding="utf-8") as handle:
+            handle.write("<name>Ext</name><objectBelonging>Adopted</objectBelonging>")
+        return base
+
+    def test_a_named_fixture_root_is_where_the_file_is_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._fixture_tree(tmp)
+            with mock.patch.object(HARNESS, "REPO_ROOT", tmp), \
+                    mock.patch.object(HARNESS, "PROJECT_DIR", base):
+                text = HARNESS.poll_disk_contains_all(
+                    "src/X.mdo", ["<name>Ext</name>", "Adopted"], timeout=1,
+                    fixture_rel="tests/tests")
+
+        self.assertIn("<name>Ext</name>", text)
+
+    def test_the_base_project_stays_the_default_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._fixture_tree(tmp)
+            with mock.patch.object(HARNESS, "REPO_ROOT", tmp), \
+                    mock.patch.object(HARNESS, "PROJECT_DIR", base):
+                text = HARNESS.poll_disk_contains_all("src/X.mdo", ["<name>Base</name>"], timeout=1)
+                # The same relative path under the extension does not hold the base's text.
+                with self.assertRaises(HARNESS.E2EAssertion) as raised:
+                    HARNESS.poll_disk_contains_all("src/X.mdo", ["<name>Base</name>"], timeout=0.2,
+                                                   fixture_rel="tests/tests")
+
+        self.assertIn("<name>Base</name>", text)
+        self.assertIn("tests/tests/src/X.mdo", str(raised.exception),
+                      "a miss names the file with its fixture path")
+
+    def test_a_read_that_fails_while_the_file_is_replaced_keeps_polling(self):
+        # Every per-fixture copy this poll replaced tolerated ANY OSError, not only a missing file:
+        # a read that lands while the export replaces the file is no verdict.
+        reads = []
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._fixture_tree(tmp)
+
+            def flaky_open(path, *args, **kwargs):
+                reads.append(path)
+                if len(reads) == 1:
+                    raise PermissionError(13, "The process cannot access the file", path)
+                return open(path, *args, **kwargs)
+
+            with mock.patch.object(HARNESS, "REPO_ROOT", tmp), \
+                    mock.patch.object(HARNESS, "PROJECT_DIR", base), \
+                    mock.patch.object(HARNESS, "open", side_effect=flaky_open, create=True):
+                text = HARNESS.poll_disk_contains_all("src/X.mdo", ["<name>Base</name>"], timeout=5)
+
+        self.assertIn("<name>Base</name>", text)
+        self.assertEqual(2, len(reads), "the failed read is retried, not raised")
+
+    def test_a_file_that_never_reads_fails_at_the_deadline_naming_why(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._fixture_tree(tmp)
+
+            def denied(path, *args, **kwargs):
+                raise PermissionError(13, "Access is denied", path)
+
+            with mock.patch.object(HARNESS, "REPO_ROOT", tmp), \
+                    mock.patch.object(HARNESS, "PROJECT_DIR", base), \
+                    mock.patch.object(HARNESS, "open", side_effect=denied, create=True), \
+                    self.assertRaises(HARNESS.E2EAssertion) as raised:
+                HARNESS.poll_disk_contains_all("src/X.mdo", ["<name>Base</name>"], timeout=0.2)
+
+        self.assertIn("could not be read yet", str(raised.exception))
+        self.assertIn("Access is denied", str(raised.exception))
+
+
+class ExtensionFixtureRestoreTest(unittest.TestCase):
+    """restore_extension_fixture is the ONE restore every test that writes into the extension calls
+    (#708 review): revert, clean_project the extension, settle, revert again, settle again - and
+    every step checked, so a restore that did not happen fails the test that needed it."""
+
+    OK = HARNESS.Result({"result": {"isError": False}})
+    REFUSED = HARNESS.Result({"result": {"isError": True,
+                                         "content": [{"type": "text", "text": "clean refused"}]}})
+
+    def _run(self, clean_result, ready_answers):
+        """Run the restore with the server stubbed; return the ordered steps it took."""
+        steps = []
+        answers = list(ready_answers)
+
+        def ready(timeout=None, failure_details=None, progress=None, ignore_projects=()):
+            steps.append("ready")
+            answer = answers.pop(0)
+            if not answer and failure_details is not None:
+                failure_details[:] = ["projects did not become ready within 1s"]
+            return answer
+
+        def call(tool, arguments):
+            steps.append((tool, arguments.get("projectName")))
+            return clean_result
+
+        with mock.patch.object(HARNESS, "reset_all_fixtures", side_effect=lambda: steps.append("revert")), \
+                mock.patch.object(HARNESS, "call", side_effect=call), \
+                mock.patch.object(HARNESS, "wait_for_project_ready", side_effect=ready):
+            try:
+                HARNESS.restore_extension_fixture("an adoption")
+            finally:
+                self.steps = steps
+
+    def test_reverts_cleans_the_extension_and_settles_after_each_revert(self):
+        self._run(self.OK, [True, True])
+
+        self.assertEqual(["revert", ("clean_project", HARNESS.TESTS_PROJECT), "ready", "revert", "ready"],
+                         self.steps)
+
+    def test_a_refused_clean_project_fails_the_test_that_needed_the_restore(self):
+        with self.assertRaises(HARNESS.E2EAssertion) as raised:
+            self._run(self.REFUSED, [True, True])
+
+        self.assertIn("an adoption", str(raised.exception))
+        self.assertIn(HARNESS.TESTS_PROJECT, str(raised.exception))
+        self.assertNotIn("ready", self.steps, "nothing proceeds on a model that was not re-imported")
+
+    def test_an_extension_that_never_settles_fails_the_test_after_either_revert(self):
+        for answers in ([False, True], [True, False]):
+            with self.subTest(answers=answers):
+                with self.assertRaises(HARNESS.E2EAssertion) as raised:
+                    self._run(self.OK, answers)
+
+                self.assertIn("an adoption", str(raised.exception))
+                self.assertIn("did not become ready", str(raised.exception))
+
+
+class ReadinessRowSkipTest(unittest.TestCase):
+    """V8-natured No rows still own derived data; the Servers container does not."""
+
+    @staticmethod
+    def table(state, *, name="ExternalObjects", natures="xtextNature, V8ExternalObjectsNature",
+              is_open="Yes", legacy=False, reason=False):
+        header = "| Name | State | Path | Open | EDT Project"
+        row = "| %s | %s | /w/E | %s | No" % (name, state, is_open)
+        if not legacy:
+            header += " | Natures"
+            row += " | " + natures
+        if reason:
+            header += " | Reason"
+            row += " | context is starting"
+        return header + " |\n" + row + " |\n"
+
+    def test_external_objects_building_and_not_available_both_block(self):
+        for state in ("building", "not_available"):
+            for reason in (False, True):
+                with self.subTest(state=state, reason=reason):
+                    not_ready = []
+                    self.assertFalse(HARNESS._all_edt_projects_ready(
+                        self.table(state, reason=reason), not_ready=not_ready))
+                    self.assertEqual([("ExternalObjects", state)], not_ready)
+
+    def test_the_servers_container_with_no_v8_nature_does_not_block(self):
+        for reason in (False, True):
+            with self.subTest(reason=reason):
+                not_ready = [("stale", "building")]
+                self.assertTrue(HARNESS._all_edt_projects_ready(self.table(
+                    "not_available", name="Servers", natures="-", reason=reason), not_ready=not_ready))
+                self.assertEqual([], not_ready)
+
+    def test_a_legacy_five_column_no_row_keeps_being_skipped(self):
+        not_ready = []
+        self.assertTrue(HARNESS._all_edt_projects_ready(
+            self.table("building", legacy=True), not_ready=not_ready))
+        self.assertEqual([], not_ready)
+
+    def test_closed_and_explicitly_ignored_v8_projects_keep_being_skipped(self):
+        self.assertTrue(HARNESS._all_edt_projects_ready(self.table("not_available", is_open="No")))
+        self.assertTrue(HARNESS._all_edt_projects_ready(
+            self.table("building"), ignore=("ExternalObjects",)))
+
+    def test_a_ready_v8_project_does_not_block(self):
+        not_ready = []
+        self.assertTrue(HARNESS._all_edt_projects_ready(self.table("ready"), not_ready=not_ready))
+        self.assertEqual([], not_ready)
 
 
 if __name__ == "__main__":

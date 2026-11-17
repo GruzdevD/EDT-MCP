@@ -8,6 +8,8 @@ package com.ditrix.edt.mcp.server.transport;
 
 import com.ditrix.edt.mcp.server.ActiveToolCall;
 import com.ditrix.edt.mcp.server.McpServer;
+import com.ditrix.edt.mcp.server.history.McpCallHistory;
+import com.ditrix.edt.mcp.server.history.McpCallHistory.CallCapture;
 import com.ditrix.edt.mcp.server.protocol.ClientCapabilities;
 import com.ditrix.edt.mcp.server.protocol.McpProtocolHandler;
 import com.ditrix.edt.mcp.server.protocol.jsonrpc.JsonRpcRequest;
@@ -18,8 +20,8 @@ import com.sun.net.httpserver.HttpExchange;
  * for a user interrupt signal. If the user interrupts (via {@link McpServer#interruptToolCall}),
  * the signal response is sent on the active call and this returns {@code null}
  * (the caller must not send another response); otherwise it returns the tool's
- * normal JSON-RPC response. The EDT operation itself is not cancelled — it may
- * keep running in the background after an interrupt.
+ * normal JSON-RPC response. This executor does not cancel the EDT operation — it
+ * may keep running in the background, subject to EDT/platform cancellation.
  *
  * <p>Extracted from {@code McpServer} so the transport's interruption concern is
  * isolated from socket lifecycle. JSON id/name extraction reuses
@@ -71,12 +73,19 @@ public class InterruptibleToolExecutor
     public String execute(HttpExchange exchange, String requestBody, JsonRpcRequest request, long startNanos, // NOSONAR propagates checked exceptions across the reflective boundary by design
         ClientCapabilities sessionCapabilities)
         throws Exception
+    { return execute(new ToolCallResponder.Http(exchange), requestBody, request, startNanos, sessionCapabilities); }
+
+    /** Shares response selection, history and identity-based slot cleanup across transports. */
+    public String execute(ToolCallResponder responder, String requestBody, JsonRpcRequest request, long startNanos,
+        ClientCapabilities sessionCapabilities) throws Exception // NOSONAR shares the HTTP exception boundary
     {
         Object requestId = request != null ? McpProtocolHandler.normalizeId(request.getId()) : null;
         String toolName = request != null && request.getToolName() != null ? request.getToolName() : "unknown"; //$NON-NLS-1$
 
         // Create and register active tool call
-        ActiveToolCall activeCall = new ActiveToolCall(exchange, toolName, requestId);
+        CallCapture capture = McpCallHistory.getInstance().beginCall(
+            request != null ? request.getMethod() : null, toolName, requestBody, startNanos);
+        ActiveToolCall activeCall = new ActiveToolCall(responder, toolName, requestId, capture);
         server.setActiveToolCall(activeCall);
 
         // Use a container to hold the result from the background thread
@@ -86,10 +95,12 @@ public class InterruptibleToolExecutor
 
         // Run tool execution in background thread
         Thread executionThread = new Thread(() -> {
+            server.bindToolCall(activeCall);
             try
             {
                 resultContainer[0] =
-                    protocolHandler.processRequest(requestBody, request, startNanos, sessionCapabilities);
+                    protocolHandler.processRequest(requestBody, request, startNanos, sessionCapabilities,
+                        capture::completed);
             }
             catch (Exception e)
             {
@@ -97,6 +108,7 @@ public class InterruptibleToolExecutor
             }
             finally
             {
+                server.unbindToolCall();
                 synchronized (completedFlag)
                 {
                     completedFlag[0] = true;
@@ -124,23 +136,24 @@ public class InterruptibleToolExecutor
                     if (activeCall.hasResponded())
                     {
                         // User already sent a response, don't send another
-                        server.clearActiveToolCall();
+                        server.clearActiveToolCall(activeCall);
                         return null;
                     }
                 }
                 catch (InterruptedException e)
                 {
                     Thread.currentThread().interrupt();
-                    break;
+                    server.clearActiveToolCall(activeCall);
+                    return null;
                 }
             }
         }
 
         // Clear active tool call
-        server.clearActiveToolCall();
+        server.clearActiveToolCall(activeCall);
 
         // Check if response was already sent while we were waiting
-        if (activeCall.hasResponded())
+        if (!activeCall.selectNormalResponse(resultContainer[0]))
         {
             return null;
         }

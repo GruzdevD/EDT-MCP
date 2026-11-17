@@ -42,6 +42,7 @@ public final class DebugSessionRegistry // NOSONAR intentional singleton (Eclips
     private static final DebugSessionRegistry INSTANCE = new DebugSessionRegistry();
 
     private final AtomicBoolean listenerRegistered = new AtomicBoolean(false);
+    private Runnable listenerDisposable;
     private final AtomicLong idGenerator = new AtomicLong(1);
 
     /** applicationId → most recent suspend snapshot. */
@@ -82,19 +83,19 @@ public final class DebugSessionRegistry // NOSONAR intentional singleton (Eclips
     /**
      * Lazily installs the global debug event listener. Safe to call from any thread.
      */
-    public void ensureListenerRegistered()
+    public synchronized Runnable ensureListenerRegistered()
     {
         if (!listenerRegistered.compareAndSet(false, true))
         {
-            return;
+            return listenerDisposable;
         }
         DebugPlugin debugPlugin = DebugPlugin.getDefault();
         if (debugPlugin == null)
         {
             listenerRegistered.set(false);
-            return;
+            return listenerDisposable;
         }
-        debugPlugin.addDebugEventListener(new IDebugEventSetListener()
+        IDebugEventSetListener listener = new IDebugEventSetListener()
         {
             @Override
             public void handleDebugEvents(DebugEvent[] events)
@@ -104,8 +105,14 @@ public final class DebugSessionRegistry // NOSONAR intentional singleton (Eclips
                     handleEvent(ev);
                 }
             }
+        };
+        debugPlugin.addDebugEventListener(listener);
+        listenerDisposable = ListenerDisposables.register(() -> {
+            debugPlugin.removeDebugEventListener(listener);
+            listenerRegistered.set(false);
         });
         Activator.logInfo("DebugSessionRegistry: event listener registered"); //$NON-NLS-1$
+        return listenerDisposable;
     }
 
     /** Package-visible for headless unit testing (a {@link DebugEvent} is a plain DTO). */
@@ -135,6 +142,15 @@ public final class DebugSessionRegistry // NOSONAR intentional singleton (Eclips
                     {
                         purgeByEventSource(source, true);
                     }
+                }
+                else if (source instanceof IDebugTarget && ev.isStepStart())
+                {
+                    // A 1C step fires RESUME on the target and the thread only gets a CHANGE
+                    // event, so a step started outside the step tool (an EDT toolbar button)
+                    // shows up only here. A plain resume also fires a target RESUME with
+                    // detail 1 (STEP_INTO), so the event alone proves nothing: each registered
+                    // thread's own isStepping() decides.
+                    forgetSteppingThreads((IDebugTarget) source);
                 }
                 break;
             case DebugEvent.TERMINATE:
@@ -219,6 +235,109 @@ public final class DebugSessionRegistry // NOSONAR intentional singleton (Eclips
     }
 
     /**
+     * Forgets the state of every registered thread of the target that is stepping: its
+     * thread ids, the frames registered for it and the snapshot it owns. This is the
+     * cleanup for a step started outside the step tool, which EDT reports only as a
+     * step-detail RESUME on the target.
+     *
+     * <p>The cleanup is per thread, never per application. An application can hold
+     * several registered stops, and the event is dispatched asynchronously: a late
+     * RESUME arrives after the stepping thread (or another thread) already stopped
+     * again and produced a fresh snapshot, and that snapshot must survive. A thread
+     * that is not stepping keeps everything; so does one whose state cannot be read.
+     *
+     * <p>A plain resume also fires a target RESUME with detail 1, but it leaves its
+     * threads RESUMED, not STEPPING, so it is a no-op here; the thread RESUME it fires
+     * as well is handled by the thread branch of {@link #handleEvent}.
+     *
+     * <p>Package-visible for headless unit testing.
+     *
+     * @param target the debug target named by the RESUME event
+     */
+    synchronized void forgetSteppingThreads(IDebugTarget target)
+    {
+        if (target == null)
+        {
+            return;
+        }
+        List<IThread> stepping = new ArrayList<>();
+        for (IThread thread : threadsById.values())
+        {
+            if (thread != null && !containsIdentity(stepping, thread) && isSteppingOn(thread, target))
+            {
+                stepping.add(thread);
+            }
+        }
+        if (stepping.isEmpty())
+        {
+            return;
+        }
+        threadsById.entrySet().removeIf(entry -> {
+            if (containsIdentity(stepping, entry.getValue()))
+            {
+                threadAppId.remove(entry.getKey());
+                return true;
+            }
+            return false;
+        });
+        framesById.entrySet().removeIf(entry -> {
+            if (containsIdentity(stepping, threadOf(entry.getValue())))
+            {
+                frameAppId.remove(entry.getKey());
+                return true;
+            }
+            return false;
+        });
+        snapshots.values().removeIf(snapshot -> containsIdentity(stepping, snapshot.thread));
+        notifyAll();
+    }
+
+    /**
+     * @return {@code true} when the thread belongs to the target (identity) and reports
+     *     stepping. An unreadable state answers {@code false}: the thread is kept. Never throws.
+     */
+    private static boolean isSteppingOn(IThread thread, IDebugTarget target)
+    {
+        try
+        {
+            return thread.getDebugTarget() == target && thread.isStepping();
+        }
+        catch (Exception ex)
+        {
+            return false; // state unknown — keep the thread
+        }
+    }
+
+    /** @return the frame's thread, or {@code null} when it cannot be read. Never throws. */
+    private static IThread threadOf(IStackFrame frame)
+    {
+        try
+        {
+            return frame != null ? frame.getThread() : null;
+        }
+        catch (Exception ex)
+        {
+            return null; // unknown owner — keep the frame
+        }
+    }
+
+    private static boolean containsIdentity(List<IThread> threads, Object candidate)
+    {
+        if (candidate == null)
+        {
+            return false;
+        }
+        for (IThread thread : threads)
+        {
+            if (thread == candidate)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * @return {@code true} when the registered thread belongs to the debug-event
      *     source: it IS the source thread, or its debug target / launch is the
      *     source. Identity comparison only; best-effort, never throws.
@@ -254,6 +373,10 @@ public final class DebugSessionRegistry // NOSONAR intentional singleton (Eclips
         {
             return;
         }
+        // Always a new stop: a 1C step fires its RESUME on the target, so one thread can suspend
+        // twice with no thread RESUME between. Ids handed out earlier for this thread stop
+        // resolving when the target's step RESUME is dispatched while the thread is still
+        // stepping; a RESUME dispatched after the thread stopped again leaves them alive.
         long threadId = idGenerator.getAndIncrement();
         threadsById.put(threadId, thread);
         threadAppId.put(threadId, appId);
@@ -342,20 +465,34 @@ public final class DebugSessionRegistry // NOSONAR intentional singleton (Eclips
     /** Registers an IStackFrame and returns a stable id for later lookup. */
     public synchronized long registerFrame(IStackFrame frame)
     {
-        long id = idGenerator.getAndIncrement();
-        framesById.put(id, frame);
-        // Track owning appId so onResumeOrTerminate can clean up deterministically
+        String appId = null;
         try
         {
-            String appId = findApplicationIdFor(frame.getThread());
-            if (appId != null)
-            {
-                frameAppId.put(id, appId);
-            }
+            appId = findApplicationIdFor(frame.getThread());
         }
         catch (Exception ex)
         {
             // best effort
+        }
+        return registerFrame(frame, appId);
+    }
+
+    /**
+     * Registers an IStackFrame owned by the given session, so forgetting that session drops it.
+     * Pass the key the frame's snapshot lives under: a launchless server session's minted key is
+     * never derivable from the frame's own launch.
+     *
+     * @param frame the stack frame
+     * @param applicationId the owning session key, or {@code null} to leave it untracked
+     * @return the stable frame reference
+     */
+    public synchronized long registerFrame(IStackFrame frame, String applicationId)
+    {
+        long id = idGenerator.getAndIncrement();
+        framesById.put(id, frame);
+        if (applicationId != null)
+        {
+            frameAppId.put(id, applicationId);
         }
         return id;
     }
@@ -482,26 +619,68 @@ public final class DebugSessionRegistry // NOSONAR intentional singleton (Eclips
             return null;
         }
         ILaunchManager mgr = debugPlugin.getLaunchManager();
-        for (ILaunch launch : mgr.getLaunches()) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
+        for (boolean byDelegate : new boolean[] { false, true })
         {
-            if (launch.isTerminated())
+            for (ILaunch launch : mgr.getLaunches()) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
             {
-                continue;
-            }
-            String appId = findApplicationIdFor(launch);
-            if (!applicationId.equals(appId))
-            {
-                continue;
-            }
-            for (IDebugTarget target : launch.getDebugTargets())
-            {
-                if (target != null && !target.isTerminated())
+                if (launch.isTerminated() || !matches(launch, applicationId, byDelegate))
                 {
-                    return target;
+                    continue;
+                }
+                for (IDebugTarget target : launch.getDebugTargets())
+                {
+                    if (target != null && !target.isTerminated())
+                    {
+                        return target;
+                    }
                 }
             }
         }
         return null;
+    }
+
+    /**
+     * Exact pass: the launch's own id. Delegate pass: a config without a persisted
+     * {@code ATTR_APPLICATION_ID} (EDT clears it when its infobase is deleted or re-added)
+     * runs the project's default application, so the real id get_applications returns
+     * still names that session. The id is read from the launch's live debug targets, which
+     * keep the application they started against even if the project default changes later.
+     */
+    private static boolean matches(ILaunch launch, String applicationId, boolean byDelegate)
+    {
+        String own = findApplicationIdFor(launch);
+        if (!byDelegate)
+        {
+            return applicationId.equals(own);
+        }
+        return matchesDelegate(applicationId, own, () -> liveApplicationIds(launch));
+    }
+
+    /** Applications the launch's live debug targets were started against. */
+    private static List<String> liveApplicationIds(ILaunch launch)
+    {
+        List<String> ids = new ArrayList<>();
+        for (IDebugTarget target : launch.getDebugTargets())
+        {
+            String id = target == null || target.isTerminated() ? null : DebugServerTargetSupport.applicationIdOf(target);
+            if (id != null)
+            {
+                ids.add(id);
+            }
+        }
+        return ids;
+    }
+
+    /** Pure delegate-pass rule; live application ids are read only for an unbound EDT launch. */
+    static boolean matchesDelegate(String requested, String ownId,
+        java.util.function.Supplier<? extends java.util.Collection<String>> liveIds)
+    {
+        if (requested == null || ownId == null || LaunchConfigUtils.isSyntheticApplicationId(requested)
+            || !ownId.startsWith(LaunchConfigUtils.LAUNCH_APP_ID_PREFIX))
+        {
+            return false;
+        }
+        return liveIds.get().contains(requested);
     }
 
     /**
@@ -586,13 +765,41 @@ public final class DebugSessionRegistry // NOSONAR intentional singleton (Eclips
             return null;
         }
         ILaunchManager mgr = debugPlugin.getLaunchManager();
-        for (ILaunch launch : mgr.getLaunches())
+        for (boolean byDelegate : new boolean[] { false, true })
         {
-            if (launch.isTerminated())
+            for (ILaunch launch : mgr.getLaunches())
             {
-                continue;
+                if (!launch.isTerminated() && matches(launch, applicationId, byDelegate))
+                {
+                    return launch;
+                }
             }
-            if (applicationId.equals(findApplicationIdFor(launch)))
+        }
+        return null;
+    }
+
+    /**
+     * Returns a TERMINATED launch still registered in the launch manager whose launch
+     * resolves to the given applicationId, or {@code null}. Lets a debug tool report
+     * "that session ended" instead of "no such session" when the evidence is still there.
+     *
+     * @param applicationId the application id (real or synthetic)
+     * @return a terminated launch for that id, or {@code null}
+     */
+    public static ILaunch findTerminatedLaunch(String applicationId)
+    {
+        if (applicationId == null)
+        {
+            return null;
+        }
+        DebugPlugin debugPlugin = DebugPlugin.getDefault();
+        if (debugPlugin == null)
+        {
+            return null;
+        }
+        for (ILaunch launch : debugPlugin.getLaunchManager().getLaunches())
+        {
+            if (launch.isTerminated() && applicationId.equals(findApplicationIdFor(launch)))
             {
                 return launch;
             }

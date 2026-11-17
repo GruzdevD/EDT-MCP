@@ -41,7 +41,7 @@ So a call targeting by `projectName` + `applicationId` configures the agent **on
 Identify the application the same way as `update_database`:
 
 - **`launchConfigurationName`** (preferred) — the exact runtime-client config name from `list_configurations`; the project + applicationId are derived from it. **This is the only shape that also configures the launched client** (see the table above).
-- or **`projectName` + `applicationId`** — `applicationId` comes from `get_applications`. Configures the **agent only**; no launch configuration is touched, so the client's own settings stay whatever they were.
+- or **`projectName` + `applicationId`** — `applicationId` comes from `get_applications`. Configures **agent credentials only**; client credentials stay unchanged. Application bindings cleared by EDT can still be restored.
 
 ## What the client half writes
 
@@ -63,7 +63,9 @@ Targeting by `launchConfigurationName` sets the launch dialog's **"Client applic
 
 ## Result
 
-JSON with `success`, `clientConfigured`, `project`, `applicationId`, `applicationName`, the stored `user`, `access`, and `passwordSet` (whether a non-empty password was stored — the password itself is never returned). `applicationName` falls back to the `applicationId` when the friendly display name cannot be read back (e.g. the read-back is skipped after a timeout, or the application name is empty).
+JSON with `success`, `clientConfigured`, `project`, `applicationId`, `applicationName`, the stored `user`, `access`, `passwordSet`, `passwordMatched`, `storedFor`, and `verification`. The password itself, or any part of it, is never returned. `storedFor` names the infobase and UUID key used by EDT secure preferences, so it can be compared with the infobase an update connects to.
+
+`verification` has three outcomes: `verified` when access, user, and password all match through EDT's consumer-facing read path; `mismatched` when they differ (returned as `success: false` with the requested and read-back access/user plus password booleans); and `not_verifiable` when read-back cannot prove storage. In particular, OS access with an empty user and password is identical to EDT's default fallback when no entry exists, so that shape is never reported as verified. A matching read-back confirms what consumers can retrieve, but a wrong credential value is known only when EDT connects to the infobase.
 
 `clientConfigured` reports what **this call** did to the client half — not what a launch will do:
 
@@ -94,6 +96,8 @@ You do not have to use this tool. When the **MCP server is idle**, you can open 
 
 While an MCP tool is in flight (plus a short grace window for the asynchronous read-back that follows a tool), the server **auto-cancels** the "Configure Infobase access Settings" login dialog so an unattended call never blocks on it — the operation instead fails fast with a hint back to this tool. This auto-cancel is **on by default** and **activity-scoped** — it is NOT always-on, so an idle server leaves the GUI dialog usable (see above). To turn it off — e.g. to debug the login flow interactively — set **`EDT_MCP_SUPPRESS_AUTH_DIALOG=false`** (also `0` / `no`) on the EDT process before launch; any other value, or leaving it unset, keeps auto-cancel enabled.
 
+If a bounded call returns `mutationPending=true`, a native credential or launch-configuration write was already admitted and may still complete. Wait for that operation and inspect its result before retrying. Cancellation prevents admission of any further writes; it cannot undo a native write already in progress.
+
 ## Gotchas
 
 - **The user must exist in the infobase.** Storing credentials for a user that does not exist makes the next connect fail authentication (while a tool is running the MCP server auto-cancels the resulting dialog — see the auto-cancel note above — and the operation fails fast with a hint back to this tool). Add the user first, then set credentials.
@@ -102,6 +106,12 @@ While an MCP tool is in flight (plus a short grace window for the asynchronous r
 - **`success: true` does NOT mean the launch will stop asking** — check `clientConfigured`. Storing the agent's credentials and then hitting the client's "Infobase access" dialog on the next `run_yaxunit_tests` is issue #359; the fix is to target by `launchConfigurationName`, not to retry.
 - **The client half is per launch configuration.** Several configurations against the same infobase each need their own call (or their own edit in the launch dialog) — the agent-side settings are shared, the client-side attributes are not.
 - These are connection credentials, not a permission grant: the user's rights inside the infobase are unchanged.
+
+## Application bindings
+
+The operation verifies existing project defaults and RuntimeClient application selections and restores values EDT cleared. This applies to both addressing forms, including writes that fail. Differing non-null choices are kept; manual clears during the call are restored too. Client credential edits do not prevent restoring its application selection.
+
+`preservedBindings`, `restoredBindings`, `removedBindings`, and `unrestoredBindings` report binding recovery separately from credential storage and `clientConfigured`. A non-empty `unrestoredBindings` makes the response an error even if credentials were stored. Inspect EDT's Applications/Run Configurations, `get_applications`, and `list_configurations` before retrying; wait for any pending native write before completing recovery.
 
 ## Which side gets configured
 

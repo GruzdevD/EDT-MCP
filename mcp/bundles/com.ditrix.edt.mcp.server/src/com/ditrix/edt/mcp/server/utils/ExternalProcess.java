@@ -1,6 +1,6 @@
 /**
  * MCP Server for EDT
- * Copyright (C) 2025 DitriX (https://github.com/DitriXNew)
+ * Copyright (C) 2025-2026 DitriX (https://github.com/DitriXNew)
  * Licensed under AGPL-3.0-or-later
  */
 
@@ -9,11 +9,13 @@ package com.ditrix.edt.mcp.server.utils;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 
 import com.ditrix.edt.mcp.server.Activator;
@@ -31,6 +33,12 @@ import com.ditrix.edt.mcp.server.Activator;
  *
  * <p>Headless-testable: the method has no EDT dependency on its happy path; {@link Activator} is
  * only used for logging, guarded against a {@code null} activator (a standalone JUnit run).
+ *
+ * <p>Two entry points coexist here: {@link #await} completes an ALREADY-STARTED {@link Process}
+ * (launched by the caller, which may need to write to its stdin first, or may not even be a
+ * {@link Process} but a bare {@link ProcessHandle}) with concurrent draining of both pipes and tree
+ * cleanup; {@link #run(List, File, long)} starts the process itself from an argv with a combined,
+ * capped transcript.
  */
 public final class ExternalProcess
 {
@@ -43,13 +51,19 @@ public final class ExternalProcess
     /** Grace period for killing a process tree, also used after the process ended. */
     private static final long KILL_GRACE_MILLIS = 5_000L;
 
-    private ExternalProcess()
+    /** Grace period for awaiting a destroyed process / drained pipes after cleanup. */
+    private static final long CLEANUP_MS = 2000;
+
+    private ExternalProcess() { }
+
+    @FunctionalInterface
+    public interface InputWriter
     {
-        // Utility class
+        void write(Process process) throws IOException;
     }
 
     /**
-     * The bounded outcome of a {@link ExternalProcess#run} call.
+     * The bounded outcome of a {@link ExternalProcess#run} or {@link ExternalProcess#await} call.
      *
      * <p>The fields are deliberately low-level: the caller decides which combination (a non-zero
      * exit, a time-out, a failed start) means what for its own operation.
@@ -71,6 +85,11 @@ public final class ExternalProcess
         /** A human description of a start failure, or {@code null}. */
         public final String error;
 
+        /** The separate stdout pipe bytes, or {@code null} when the result came from {@link #run}. */
+        private final byte[] stdoutBytes;
+        /** The separate stderr pipe bytes, or {@code null} when the result came from {@link #run}. */
+        private final byte[] stderrBytes;
+
         Result(int exitCode, boolean timedOut, boolean interrupted, boolean failedToStart,
             boolean truncated, String output, String error)
         {
@@ -81,12 +100,57 @@ public final class ExternalProcess
             this.truncated = truncated;
             this.output = output;
             this.error = error;
+            this.stdoutBytes = null;
+            this.stderrBytes = null;
+        }
+
+        Result(int exitCode, byte[] stdout, byte[] stderr, boolean timedOut)
+        {
+            this.exitCode = exitCode;
+            this.timedOut = timedOut;
+            this.interrupted = false;
+            this.failedToStart = false;
+            this.truncated = false;
+            this.stdoutBytes = stdout == null ? new byte[0] : stdout;
+            this.stderrBytes = stderr == null ? new byte[0] : stderr;
+            String out = new String(this.stdoutBytes, StandardCharsets.UTF_8);
+            String err = new String(this.stderrBytes, StandardCharsets.UTF_8);
+            this.output = err.isEmpty() ? out : out + err;
+            this.error = null;
         }
 
         /** @return {@code true} when the process ran and exited {@code 0} before the deadline. */
         public boolean succeeded()
         {
             return !timedOut && !interrupted && !failedToStart && exitCode == 0;
+        }
+
+        /** @return the captured stdout bytes (empty for a combined {@link #run} transcript). */
+        public byte[] stdout()
+        {
+            if (stdoutBytes != null)
+            {
+                return stdoutBytes;
+            }
+            return output == null ? new byte[0] : output.getBytes(StandardCharsets.UTF_8);
+        }
+
+        /** @return the captured stderr bytes (empty for a combined {@link #run} transcript). */
+        public byte[] stderr()
+        {
+            return stderrBytes != null ? stderrBytes : new byte[0];
+        }
+
+        /** @return the process exit code (record-style accessor). */
+        public int exitCode()
+        {
+            return exitCode;
+        }
+
+        /** @return whether the process exceeded the deadline (record-style accessor). */
+        public boolean timedOut()
+        {
+            return timedOut;
         }
     }
 
@@ -169,6 +233,97 @@ public final class ExternalProcess
                     // Something still holds the write end; closing our read end ends the drain.
                     closeQuietly(process.getInputStream());
                 }
+            }
+        }
+    }
+
+    /**
+     * Completes an already-started {@code process} within {@code timeoutMs}, draining BOTH pipes
+     * concurrently (so a full pipe can never deadlock the wait), handing {@code input} the process
+     * to write to its stdin, and destroying the whole process tree on timeout or interruption.
+     *
+     * @param process the running process (never {@code null})
+     * @param timeoutMs the deadline before which the process must exit
+     * @param input a callback that writes to the process (e.g. closes its stdin), or does nothing
+     * @return the bounded result with the separate stdout and stderr pipe contents
+     * @throws Exception when the waiting thread is interrupted (with the tree already destroyed)
+     */
+    public static Result await(Process process, long timeoutMs, InputWriter input) throws Exception
+    {
+        FutureTask<byte[]> stdout = drain(process.getInputStream());
+        FutureTask<byte[]> stderr = drain(process.getErrorStream());
+        try
+        {
+            input.write(process);
+            boolean finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
+            if (!finished) { destroyTree(process); }
+            return new Result(finished ? process.exitValue() : -1,
+                stdout.get(CLEANUP_MS, TimeUnit.MILLISECONDS),
+                stderr.get(CLEANUP_MS, TimeUnit.MILLISECONDS), !finished);
+        }
+        catch (InterruptedException e)
+        {
+            destroyTree(process);
+            Thread.currentThread().interrupt();
+            throw e;
+        }
+        finally
+        {
+            if (process.isAlive()) { destroyTree(process); }
+            stdout.cancel(true);
+            stderr.cancel(true);
+            process.getInputStream().close();
+            process.getErrorStream().close();
+        }
+    }
+
+    private static FutureTask<byte[]> drain(InputStream stream)
+    {
+        FutureTask<byte[]> task = new FutureTask<>(stream::readAllBytes);
+        Thread thread = new Thread(task, "EDT-MCP process output reader");
+        thread.setDaemon(true);
+        thread.start();
+        return task;
+    }
+
+    public static void destroyTree(Process process)
+    {
+        destroyDescendants(process::descendants);
+        process.destroyForcibly();
+        try { process.waitFor(CLEANUP_MS, TimeUnit.MILLISECONDS); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+    }
+
+    /** Launch Services exposes a ProcessHandle rather than a Java Process. */
+    public static void destroyTree(ProcessHandle process)
+    {
+        destroyDescendants(process::descendants);
+        process.destroyForcibly();
+        try { process.onExit().get(CLEANUP_MS, TimeUnit.MILLISECONDS); }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for the external process to terminate.", e);
+        }
+        catch (Exception e) { throw new IllegalStateException("The external process did not terminate; retry terminate_launch.", e); }
+    }
+
+    private static void destroyDescendants(java.util.function.Supplier<java.util.stream.Stream<ProcessHandle>> children)
+    {
+        List<ProcessHandle> descendants;
+        try (var stream = children.get()) { descendants = stream.toList(); }
+        catch (UnsupportedOperationException e) { descendants = List.of(); }
+        catch (RuntimeException e)
+        {
+            Activator.logWarning("Could not enumerate external process descendants: " + e);
+            descendants = List.of();
+        }
+        for (int i = descendants.size() - 1; i >= 0; i--)
+        {
+            try { descendants.get(i).destroyForcibly(); }
+            catch (RuntimeException e)
+            {
+                Activator.logWarning("Could not terminate an external process descendant: " + e);
             }
         }
     }

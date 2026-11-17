@@ -45,11 +45,16 @@ import org.w3c.dom.Element;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import com._1c.g5.v8.bm.core.IBmEngine;
 import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.dt.core.model.EditingMode;
+import com._1c.g5.v8.dt.core.model.IModelEditingSupport;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.md.refactoring.core.IMdRefactoringService;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.PredefinedItem;
+import com._1c.g5.v8.dt.refactoring.core.DeletionForbiddenProblem;
+import com._1c.g5.v8.dt.refactoring.core.EditingForbiddenProblem;
 import com._1c.g5.v8.dt.refactoring.core.IRefactoring;
 import com._1c.g5.v8.dt.refactoring.core.IRefactoringProblem;
 import com._1c.g5.v8.dt.refactoring.core.RefactoringStatus;
@@ -64,6 +69,7 @@ import com.ditrix.edt.mcp.server.utils.FormElementWriter;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter.FormObjectRef;
 import com.ditrix.edt.mcp.server.utils.MetadataLanguageUtils;
 import com.ditrix.edt.mcp.server.utils.PredefinedWriter;
+import com.ditrix.edt.mcp.server.utils.VendorSupportGuard;
 import com.ditrix.edt.mcp.server.utils.XdtoWriter;
 
 /**
@@ -378,13 +384,24 @@ public class DeleteMetadataToolTest
     public void testForceIsOptionalAndDistinctFromConfirm()
     {
         String schema = new DeleteMetadataTool().getInputSchema();
-        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
-        assertTrue(requiredIdx >= 0);
-        String tail = schema.substring(requiredIdx);
+        String tail = JsonParser.parseString(schema).getAsJsonObject().getAsJsonArray("required").toString();
         assertFalse("force must not be required", tail.contains("\"force\"")); //$NON-NLS-1$ //$NON-NLS-2$
         // force is the reference-override; confirm is the preview gate — both are declared and distinct.
         assertTrue(schema.contains("\"force\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"confirm\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testExpectedHashIsOptionalAndExplainsItsScopeAtTheWireBoundary()
+    {
+        DeleteMetadataTool tool = new DeleteMetadataTool();
+        JsonObject schema = JsonParser.parseString(tool.getInputSchema()).getAsJsonObject();
+        assertFalse(schema.getAsJsonArray("required").toString().contains("expectedHash")); //$NON-NLS-1$ //$NON-NLS-2$
+        String compacted = com.ditrix.edt.mcp.server.protocol.InputSchemaCompactor.compact(
+            tool.getName(), schema).toString();
+        assertTrue(compacted, compacted.contains("preview's contentHash")); //$NON-NLS-1$
+        assertTrue(compacted, compacted.contains("Omit to use the current scope")); //$NON-NLS-1$
+        assertTrue(tool.getOutputSchema().contains("\"contentHash\"")); //$NON-NLS-1$
     }
 
     @Test
@@ -470,21 +487,115 @@ public class DeleteMetadataToolTest
     @Test
     public void testRequiredParameters()
     {
-        String schema = new DeleteMetadataTool().getInputSchema();
-        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
-        assertTrue("schema must declare a required array", requiredIdx >= 0); //$NON-NLS-1$
-        String tail = schema.substring(requiredIdx);
+        JsonObject schema = JsonParser.parseString(new DeleteMetadataTool().getInputSchema()).getAsJsonObject();
+        String tail = schema.getAsJsonArray("required").toString();
         assertTrue("projectName must be required", tail.contains("\"projectName\"")); //$NON-NLS-1$ //$NON-NLS-2$
-        assertTrue("fqn must be required", tail.contains("\"fqn\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("fqn is conditional on operations being absent", tail.contains("\"fqn\""));
+        assertFalse("a root oneOf makes Claude's API reject the whole tool list", schema.has("oneOf")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("a root anyOf makes Claude's API reject the whole tool list", schema.has("anyOf")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("a root allOf makes Claude's API reject the whole tool list", schema.has("allOf")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals("object", schema.get("type").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$
+        JsonObject properties = schema.getAsJsonObject("properties"); //$NON-NLS-1$
+        assertTrue("fqn must stay a declared property", properties.has("fqn")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("operations must stay a declared property", properties.has("operations")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    // ---- the exactly-one contract the schema cannot carry ------------------------------------------
+
+    /** Runs a call the request validation must refuse and returns its error text. */
+    private static String refusalOf(Map<String, String> args)
+    {
+        JsonObject result = JsonParser.parseString(new DeleteMetadataTool().execute(args)).getAsJsonObject();
+        assertFalse(result.get("success").getAsBoolean()); //$NON-NLS-1$
+        return result.get("error").getAsString(); //$NON-NLS-1$
+    }
+
+    private static void assertExactlyOneRefusal(String error)
+    {
+        assertTrue(error, error.contains("fqn")); //$NON-NLS-1$
+        assertTrue(error, error.contains("operations")); //$NON-NLS-1$
+        assertTrue(error, error.contains("required")); //$NON-NLS-1$
+        assertTrue(error, error.contains("exactly one")); //$NON-NLS-1$
+        assertFalse("the refusal must come before the project is looked up: " + error, //$NON-NLS-1$
+            error.contains("not found")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testNeitherFqnNorOperationsIsRefusedNamingBoth()
+    {
+        assertExactlyOneRefusal(refusalOf(Map.of("projectName", "NoProject"))); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testNeitherFqnNorOperationsIsRefusedEvenWhenConfirmed()
+    {
+        assertExactlyOneRefusal(refusalOf(Map.of("projectName", "NoProject", "confirm", "true"))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    @Test
+    public void testEmptyFqnGetsTheExactlyOneRefusal()
+    {
+        assertExactlyOneRefusal(refusalOf(Map.of("projectName", "NoProject", "fqn", ""))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    @Test
+    public void testBlankFqnGetsTheExactlyOneRefusal()
+    {
+        assertExactlyOneRefusal(refusalOf(Map.of("projectName", "NoProject", "fqn", "   "))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    @Test
+    public void testMissingFqnIsReportedBeforeTheAtomicMisuse()
+    {
+        String error = refusalOf(Map.of("projectName", "NoProject", "atomic", "true")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        assertExactlyOneRefusal(error);
+        assertFalse(error, error.contains("Omit atomic")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testAtomicWithASingleFqnKeepsItsOwnRefusal()
+    {
+        assertEquals("atomic is only supported with operations. Omit atomic for a single fqn.", //$NON-NLS-1$
+            refusalOf(Map.of("projectName", "NoProject", "fqn", "Catalog.X", "atomic", "true"))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+    }
+
+    @Test
+    public void testPassingBothKeepsTheStructuredBatchRefusal()
+    {
+        JsonObject result = JsonParser.parseString(new DeleteMetadataTool().execute(Map.of(
+            "projectName", "NoProject", //$NON-NLS-1$ //$NON-NLS-2$
+            "fqn", "Catalog.X", //$NON-NLS-1$ //$NON-NLS-2$
+            "operations", "[{\"action\":\"delete\",\"fqn\":\"Catalog.Catalog.Form.ItemForm.Command.A\"}]"))) //$NON-NLS-1$ //$NON-NLS-2$
+            .getAsJsonObject();
+
+        assertFalse(result.get("success").getAsBoolean()); //$NON-NLS-1$
+        assertEquals("invalidBatch", result.get("reason").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(1, result.getAsJsonArray("errors").size()); //$NON-NLS-1$
+        String error = result.getAsJsonArray("errors").get(0).getAsJsonObject().get("error").getAsString(); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(error, error.contains("Parameter 'fqn' is not supported in a batch")); //$NON-NLS-1$
+        assertTrue(error, error.contains("Pass operations")); //$NON-NLS-1$
+        assertEquals(0, result.getAsJsonArray("applied").size()); //$NON-NLS-1$
+        assertFalse(result.get("committed").getAsBoolean()); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testASingleFqnPassesRequestValidation()
+    {
+        assertNull(new DeleteMetadataTool().validateRequest(Map.of("projectName", "P", "fqn", "Catalog.X"))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    @Test
+    public void testDescriptionStatesTheExactlyOneContract()
+    {
+        String description = new DeleteMetadataTool().getDescription();
+        assertTrue(description, description.contains("exactly one of fqn or operations")); //$NON-NLS-1$
     }
 
     @Test
     public void testConfirmIsOptional()
     {
         String schema = new DeleteMetadataTool().getInputSchema();
-        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
-        assertTrue(requiredIdx >= 0);
-        String tail = schema.substring(requiredIdx);
+        String tail = JsonParser.parseString(schema).getAsJsonObject().getAsJsonArray("required").toString();
         assertFalse("confirm must not be required", tail.contains("\"confirm\"")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
@@ -1287,7 +1398,7 @@ public class DeleteMetadataToolTest
             RecordingWrite write = new RecordingWrite();
             String result = toolAnswering(refused).gateFormMemberDelete(
                 "Catalog.Products.Form.ItemForm.Attribute.Rows.Column.Price", //$NON-NLS-1$
-                columnRef(), false, previewWithDescendants(0), write);
+                columnRef(), false, previewWithDescendants(0), null, write);
             assertEquals("a refused member delete must not run its write (" + refused + ")", //$NON-NLS-1$ //$NON-NLS-2$
                 0, write.calls);
             assertTrue(result.contains("error")); //$NON-NLS-1$
@@ -1296,7 +1407,7 @@ public class DeleteMetadataToolTest
         RecordingWrite allowed = new RecordingWrite();
         String ok = toolAnswering(DestructiveConsentGate.ConsentDecision.ALLOW).gateFormMemberDelete(
             "Catalog.Products.Form.ItemForm.Attribute.Rows.Column.Price", //$NON-NLS-1$
-            columnRef(), false, previewWithDescendants(2), allowed);
+            columnRef(), false, previewWithDescendants(2), null, allowed);
         assertEquals("an allowed member delete runs its write exactly once", 1, allowed.calls); //$NON-NLS-1$
         assertEquals("{\"written\":true}", ok); //$NON-NLS-1$
     }
@@ -1584,7 +1695,7 @@ public class DeleteMetadataToolTest
             seenSubtitle[0] = preview.getSubtitle();
             return DestructiveConsentGate.ConsentDecision.REJECT;
         }).gateFormMemberDelete("Catalog.Products.Form.ItemForm.Field.Price", //$NON-NLS-1$
-            columnRef(), false, data, new RecordingWrite());
+            columnRef(), false, data, null, new RecordingWrite());
 
         assertTrue("the prompt must name what it actually found: " + seenSubtitle[0], //$NON-NLS-1$
             seenSubtitle[0].contains("1 FormGroup") && seenSubtitle[0].contains("1 EventHandler")); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1803,7 +1914,7 @@ public class DeleteMetadataToolTest
             seen[0] = preview.getTotalCount();
             return DestructiveConsentGate.ConsentDecision.REJECT;
         }).gateFormMemberDelete("Catalog.Products.Form.ItemForm.Attribute.Rows", //$NON-NLS-1$
-            columnRef(), false, previewWithDescendants(3), new RecordingWrite());
+            columnRef(), false, previewWithDescendants(3), null, new RecordingWrite());
         assertEquals("the prompt counts the member plus its contained elements", 4, seen[0]); //$NON-NLS-1$
     }
 
@@ -1955,6 +2066,133 @@ public class DeleteMetadataToolTest
             message.contains("referenced by")); //$NON-NLS-1$
     }
 
+    // ==================== vendor support: force never overrides a support lock (#642) ====================
+
+    /** An EditingForbidden / DeletionForbidden problem whose object is a mocked BM object. */
+    private static IRefactoringProblem forbiddenProblem(boolean deletion, EObject[] objectHolder)
+    {
+        IBmObject object = mock(IBmObject.class);
+        IBmEngine engine = mock(IBmEngine.class);
+        when(object.bmGetEngine()).thenReturn(engine);
+        when(object.bmGetId()).thenReturn(Long.valueOf(42L));
+        when(engine.getObjectById(42L)).thenReturn(object);
+        objectHolder[0] = object;
+        return deletion ? new DeletionForbiddenProblem(object) : new EditingForbiddenProblem(object);
+    }
+
+    private static GenericDeleteFixture forbiddenDelete(ExportOrderRecorder recorder, boolean deletion,
+        boolean locked)
+    {
+        GenericDeleteFixture fixture =
+            genericDelete(recorder, DestructiveConsentGate.ConsentDecision.ALLOW, null);
+        EObject[] object = new EObject[1];
+        RefactoringStatus status = new RefactoringStatus();
+        status.addProblem(forbiddenProblem(deletion, object));
+        when(fixture.refactoring.getStatus()).thenReturn(status);
+        when(fixture.refactoring.getTitle()).thenReturn("Delete metadata node"); //$NON-NLS-1$
+        IModelEditingSupport support = mock(IModelEditingSupport.class);
+        when(support.canEdit(object[0], EditingMode.DIRECT)).thenReturn(Boolean.valueOf(!locked));
+        when(support.canDelete(object[0], EditingMode.DIRECT)).thenReturn(Boolean.valueOf(!locked));
+        VendorSupportGuard.setServiceForTests(() -> support);
+        return fixture;
+    }
+
+    @Test
+    public void testForceDoesNotOverrideAVendorSupportLock()
+    {
+        for (boolean deletion : new boolean[] {false, true})
+        {
+            ExportOrderRecorder recorder = new ExportOrderRecorder();
+            try
+            {
+                GenericDeleteFixture fixture = forbiddenDelete(recorder, deletion, true);
+
+                JsonObject result = JsonParser.parseString(fixture.run("Configuration", true, true)) //$NON-NLS-1$
+                    .getAsJsonObject();
+
+                assertFalse(result.get("success").getAsBoolean()); //$NON-NLS-1$
+                assertEquals("blocked", result.get("action").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$
+                assertTrue(result.get("platformProhibitions").getAsJsonArray().get(0) //$NON-NLS-1$
+                    .getAsJsonObject().get("supportLock").getAsBoolean()); //$NON-NLS-1$
+                String error = result.get("error").getAsString(); //$NON-NLS-1$
+                assertTrue(error, error.contains("force=true does not override vendor support")); //$NON-NLS-1$
+                assertTrue(error, error.contains("Nothing was deleted")); //$NON-NLS-1$
+                assertFalse("a forced delete past a support lock must never perform: " + recorder.calls, //$NON-NLS-1$
+                    recorder.calls.contains("perform")); //$NON-NLS-1$
+                assertTrue("nothing may be exported either: " + recorder.calls, recorder.calls.isEmpty()); //$NON-NLS-1$
+            }
+            finally
+            {
+                VendorSupportGuard.setServiceForTests(null);
+            }
+        }
+    }
+
+    @Test
+    public void testAForbiddenProblemOnAnEditableObjectIsStillForceable()
+    {
+        // EDT also raises EditingForbiddenProblem from a file-read failure (WSDefinitions); when the
+        // editing-support check says the object IS editable, it is not a support lock.
+        ExportOrderRecorder recorder = new ExportOrderRecorder();
+        try
+        {
+            GenericDeleteFixture fixture = forbiddenDelete(recorder, false, false);
+
+            JsonObject preview = JsonParser.parseString(fixture.run("Configuration", false)).getAsJsonObject(); //$NON-NLS-1$
+            assertFalse(preview.get("platformProhibitions").getAsJsonArray().get(0) //$NON-NLS-1$
+                .getAsJsonObject().has("supportLock")); //$NON-NLS-1$
+
+            JsonObject result = JsonParser.parseString(fixture.run("Configuration", true, true)) //$NON-NLS-1$
+                .getAsJsonObject();
+            assertTrue(result.get("success").getAsBoolean()); //$NON-NLS-1$
+            assertEquals("executed", result.get("action").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$
+            assertTrue(recorder.calls.contains("perform")); //$NON-NLS-1$
+        }
+        finally
+        {
+            VendorSupportGuard.setServiceForTests(null);
+        }
+    }
+
+    @Test
+    public void testThePreviewSaysForceWillNotHelpAgainstASupportLock()
+    {
+        ExportOrderRecorder recorder = new ExportOrderRecorder();
+        try
+        {
+            GenericDeleteFixture fixture = forbiddenDelete(recorder, true, true);
+
+            JsonObject result = JsonParser.parseString(fixture.run("Configuration", false)).getAsJsonObject(); //$NON-NLS-1$
+
+            assertTrue(result.get("blocking").getAsBoolean()); //$NON-NLS-1$
+            String message = result.get("message").getAsString(); //$NON-NLS-1$
+            assertTrue(message, message.contains("force=true does not override vendor support")); //$NON-NLS-1$
+            assertFalse("the preview must not advise force for a support lock: " + message, //$NON-NLS-1$
+                message.contains("unless force=true")); //$NON-NLS-1$
+        }
+        finally
+        {
+            VendorSupportGuard.setServiceForTests(null);
+        }
+    }
+
+    @Test
+    public void testAnUnanswerableSupportCheckCountsAsALock()
+    {
+        // Fail closed: without the service, a forbidden problem cannot be proved to be something else.
+        VendorSupportGuard.setServiceForTests(() -> null);
+        try
+        {
+            assertTrue(DeleteMetadataTool.isSupportLock(forbiddenProblem(false, new EObject[1])));
+            assertFalse("any other problem type is never a support lock", //$NON-NLS-1$
+                DeleteMetadataTool.isSupportLock(new TestPlatformProblem(mock(EObject.class))));
+        }
+        finally
+        {
+            VendorSupportGuard.setServiceForTests(null);
+        }
+    }
+
     @Test
     public void testForcedDeleteWithStaleRegisteringFileReportsStructuredPartialResult()
     {
@@ -1977,6 +2215,118 @@ public class DeleteMetadataToolTest
         assertEquals("src/Configuration/Configuration.mdo", //$NON-NLS-1$
             result.get("registeringFile").getAsString()); //$NON-NLS-1$
         assertEquals("Configuration", result.get("registeringContainer").getAsString()); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void headlessRegistrationRetryMustDrainBeforeReadingBytes() throws Exception
+    {
+        try (var fixture = new com.ditrix.edt.mcp.server.utils.HeadlessReadFixture())
+        {
+            for (var state : com.ditrix.edt.mcp.server.utils.BuildUtils.DiskExportState.values())
+            {
+                for (boolean absentOnSecondRead : new boolean[] {false, true})
+                {
+                    int[] verifications = {0};
+                    DeleteMetadataTool tool = new DeleteMetadataTool((name, preview) ->
+                        DestructiveConsentGate.ConsentDecision.ALLOW, (name, timeout) -> null,
+                        (project, fqn) -> true, project -> Collections.emptyList(),
+                        (project, file, container, fqn) -> ++verifications[0] > 1 && absentOnSecondRead
+                            ? DeleteMetadataTool.RegistrationState.ABSENT : DeleteMetadataTool.RegistrationState.PRESENT)
+                    {
+                        @Override protected com.ditrix.edt.mcp.server.utils.BuildUtils.DiskExportState
+                            waitForRegistrationRetry(IProject project) { return state; }
+                    };
+                    String raw = "{\"success\":true,\"action\":\"executed\",\"fqn\":\"Catalog.X\","
+                        + "\"registeringFile\":\"src/Configuration/Configuration.mdo\",\"registeringContainer\":\"Configuration\"}";
+                    JsonObject result = JsonParser.parseString(tool.refreshAfterExportAwait(
+                        Map.of("projectName", fixture.name()), raw, true)).getAsJsonObject();
+                    if (state != com.ditrix.edt.mcp.server.utils.BuildUtils.DiskExportState.DRAINED)
+                    {
+                        assertFalse(state + ": " + result, result.get("success").getAsBoolean());
+                        assertTrue(result.toString(), result.get("mutationCommitted").getAsBoolean());
+                        assertEquals("Bytes cannot be checked during a pending/unobservable export", 1, verifications[0]);
+                        assertTrue(result.toString(), result.get("error").getAsString().contains("export to disk was not confirmed"));
+                        assertEquals(state.name(), result.get("exportState").getAsString());
+                    }
+                    else
+                    {
+                        assertEquals(2, verifications[0]);
+                        assertEquals(result.toString(), absentOnSecondRead, result.get("success").getAsBoolean());
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void headlessUnobservableInitialExportCannotInspectRegistrationBytes() throws Exception
+    {
+        try (var fixture = new com.ditrix.edt.mcp.server.utils.HeadlessReadFixture())
+        {
+            int[] reads = {0};
+            var tool = new DeleteMetadataTool((name, preview) -> DestructiveConsentGate.ConsentDecision.ALLOW,
+                (name, timeout) -> null, (project, fqn) -> true, project -> Collections.emptyList(),
+                (project, file, container, fqn) -> { reads[0]++; return DeleteMetadataTool.RegistrationState.ABSENT; });
+            String raw = "{\"success\":true,\"action\":\"executed\",\"fqn\":\"Catalog.X\","
+                + "\"registeringFile\":\"src/Configuration/Configuration.mdo\",\"registeringContainer\":\"Configuration\"}";
+            JsonObject result = JsonParser.parseString(tool.refreshAfterExportAwait(
+                Map.of("projectName", fixture.name()), raw, false)).getAsJsonObject();
+            assertFalse(result.toString(), result.get("success").getAsBoolean());
+            assertTrue(result.toString(), result.get("mutationCommitted").getAsBoolean());
+            assertEquals("Do not interpret bytes while export is unobservable", 0, reads[0]);
+        }
+    }
+
+    @Test
+    public void headlessDrainedDeleteMustObserveTheObjectsDirectoryGone() throws Exception
+    {
+        try (var fixture = new com.ditrix.edt.mcp.server.utils.HeadlessReadFixture())
+        {
+            var tool = new DeleteMetadataTool((name, preview) -> DestructiveConsentGate.ConsentDecision.ALLOW,
+                (name, timeout) -> null, (project, fqn) -> true, project -> Collections.emptyList(),
+                (project, file, container, fqn) -> DeleteMetadataTool.RegistrationState.ABSENT);
+            for (String name : new String[] {"EnglishName", "Удаляемый"})
+            {
+                var directory = fixture.project().getLocation().toFile().toPath().resolve("src/Catalogs/" + name);
+                java.nio.file.Files.createDirectories(directory);
+                String raw = "{\"success\":true,\"action\":\"executed\",\"fqn\":\"Catalog." + name + "\","
+                    + "\"registeringFile\":\"src/Configuration/Configuration.mdo\",\"registeringContainer\":\"Configuration\"}";
+                var params = Map.of("projectName", fixture.name());
+                JsonObject result = JsonParser.parseString(tool.refreshAfterExportAwait(params, raw, true)).getAsJsonObject();
+                assertFalse(result.toString(), result.get("success").getAsBoolean());
+                assertTrue(result.toString(), result.get("mutationCommitted").getAsBoolean());
+                assertTrue(result.toString(), result.get("error").getAsString().contains("directory"));
+                java.nio.file.Files.delete(directory);
+                JsonObject clean = JsonParser.parseString(tool.refreshAfterExportAwait(params, raw, true)).getAsJsonObject();
+                assertTrue(clean.toString(), clean.get("success").getAsBoolean());
+                assertFalse(clean.toString(), clean.has("registeringFile"));
+            }
+        }
+    }
+
+    @Test
+    public void testHeadlessOrdinaryDeleteCannotSucceedOverAStaleConfigurationFile()
+    {
+        String previous = System.getProperty("eclipse.application");
+        try
+        {
+            System.setProperty("eclipse.application", com.ditrix.edt.mcp.server.HostKind.APPLICATION_ID);
+            GenericDeleteFixture fixture = genericDelete(new ExportOrderRecorder(),
+                DestructiveConsentGate.ConsentDecision.ALLOW, null,
+                (projectName, file, container, target) -> DeleteMetadataTool.RegistrationState.PRESENT);
+            String raw = fixture.run("Configuration", true, false);
+            JsonObject result = JsonParser.parseString(fixture.tool.refreshAfterExportAwait(
+                Map.of("projectName", "NoSuchHeadlessProject"), raw, true)).getAsJsonObject();
+            assertFalse(result.toString(), result.get("success").getAsBoolean());
+            assertTrue(result.toString(), result.get("mutationCommitted").getAsBoolean());
+            assertEquals("src/Configuration/Configuration.mdo", result.get("registeringFile").getAsString());
+            assertTrue(result.get("error").getAsString().contains("resync_to_disk"));
+        }
+        finally
+        {
+            if (previous == null) System.clearProperty("eclipse.application");
+            else System.setProperty("eclipse.application", previous);
+        }
     }
 
     @Test
@@ -2322,4 +2672,35 @@ public class DeleteMetadataToolTest
         assertNull("a container chain with no top object names no file", //$NON-NLS-1$
             DeleteMetadataTool.containerExportFqn((EObject)orphan));
     }
+    @Test
+    public void testDeletedDirectoryPathForEveryPreviouslyUnmappedType()
+    {
+        for (String type : new String[] {"StyleItem", "CommonAttribute", "EventSubscription", "ScheduledJob", "SessionParameter", "FunctionalOption", "FunctionalOptionsParameter", "CommonPicture", "DefinedType", "CommonTemplate", "CommandGroup", "DocumentNumerator", "WSReference", "XDTOPackage", "Style", "Interface", "IntegrationService", "Bot", "WebSocketClient", "Role", "Subsystem"})
+        {
+            String directory = com._1c.g5.v8.dt.metadata.mdclass.util.MdClassUtil
+                .getPluralFormOfModelObjectName(type);
+            assertEquals(type, "src/" + directory + "/Проба/Проба.mdo",
+                DeleteMetadataTool.registeringFilePath(type + ".Проба"));
+        }
+    }
+
+    @Test
+    public void testHeadlessContainedLanguageDeleteChecksRegistrationWithoutInventingADirectory() throws Exception
+    {
+        try (var fixture = new com.ditrix.edt.mcp.server.utils.HeadlessReadFixture())
+        {
+            int[] reads = {0};
+            var tool = new DeleteMetadataTool((name, preview) -> DestructiveConsentGate.ConsentDecision.ALLOW,
+                (name, timeout) -> null, (project, fqn) -> true, project -> Collections.emptyList(),
+                (project, file, container, fqn) -> { reads[0]++; return DeleteMetadataTool.RegistrationState.ABSENT; });
+            String raw = "{\"success\":true,\"action\":\"executed\",\"fqn\":\"Language.Удаляемый\","
+                + "\"registeringFile\":\"src/Configuration/Configuration.mdo\",\"registeringContainer\":\"Configuration\"}";
+            JsonObject result = JsonParser.parseString(tool.refreshAfterExportAwait(
+                Map.of("projectName", fixture.name()), raw, true)).getAsJsonObject();
+            assertTrue(result.toString(), result.get("success").getAsBoolean());
+            assertEquals(1, reads[0]);
+            assertFalse(result.toString(), result.has("registeringFile"));
+        }
+    }
+
 }

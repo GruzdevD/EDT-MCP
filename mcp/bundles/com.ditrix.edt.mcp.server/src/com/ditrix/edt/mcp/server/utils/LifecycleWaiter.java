@@ -9,9 +9,16 @@ package com.ditrix.edt.mcp.server.utils;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
+import java.util.function.BiPredicate;
+
+import org.eclipse.core.resources.IProject;
 
 import com._1c.g5.v8.dt.core.lifecycle.ProjectContext;
+import com._1c.g5.v8.dt.core.lifecycle.ProjectStopType;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
+import com._1c.g5.v8.dt.core.platform.IWorkspaceOrchestrator;
 import com._1c.g5.v8.dt.lifecycle.ILifecycleContext;
 import com._1c.g5.v8.dt.lifecycle.IServiceContextLifecycleListener;
 import com._1c.g5.v8.dt.lifecycle.IServicesOrchestrator;
@@ -33,6 +40,9 @@ import com.ditrix.edt.mcp.server.Activator;
  */
 public final class LifecycleWaiter
 {
+    /** How often {@link #waitForProjectStarted(IDtProject, long)} asks again whether the project started. */
+    private static final long REPROBE_MS = 1_000L;
+
     private LifecycleWaiter()
     {
         // Utility class
@@ -67,9 +77,18 @@ public final class LifecycleWaiter
     }
     
     /**
-     * Waits for project context to reach STARTED state.
-     * Use this when the project is already in the process of starting.
-     * 
+     * Waits for project context to reach STARTED state - or reports at once that it already has.
+     * <p>
+     * A project manager's {@code create()} starts the new project's context synchronously, so by the time a
+     * caller begins to wait the STARTED event has usually fired already. A wait that only listened therefore
+     * ran out its whole timeout after every create (issue #706). The listener is registered FIRST and EDT is
+     * asked SECOND ({@link IWorkspaceOrchestrator#isStarted(IDtProject)}): a start that completes between
+     * the two is seen by one or the other. The question is asked again every second while waiting, which
+     * also covers an event that fired before the state it announces was readable.
+     * <p>
+     * Not for a RESTART: a project that is still started before it stops is reported started at once. Wait
+     * for a restart with {@link #prepareForRestart(IDtProject)}.
+     *
      * @param dtProject the DT project to wait for
      * @param timeoutMs timeout in milliseconds
      * @return true if STARTED state was reached, false if timeout occurred
@@ -89,47 +108,87 @@ public final class LifecycleWaiter
             return false;
         }
         
-        String projectName = dtProject.getName();
-        Activator.logInfo("Waiting for project STARTED state: " + projectName); //$NON-NLS-1$
-        
-        CountDownLatch startedLatch = new CountDownLatch(1);
-        
-        IServiceContextLifecycleListener listener = new IServiceContextLifecycleListener()
+        IWorkspaceOrchestrator workspaceOrchestrator = Activator.getDefault().getWorkspaceOrchestrator();
+        BooleanSupplier alreadyStarted =
+            () -> workspaceOrchestrator != null && workspaceOrchestrator.isStarted(dtProject);
+        return waitForProjectStarted(orchestrator, alreadyStarted, dtProject.getName(), timeoutMs, REPROBE_MS);
+    }
+
+    /**
+     * {@link #waitForProjectStarted(IDtProject, long)} with its collaborators given; package-visible for tests.
+     *
+     * @param orchestrator the orchestrator whose lifecycle events are listened to
+     * @param alreadyStarted asks whether the project's context is started now; a throw counts as "not yet"
+     * @param projectName the project
+     * @param timeoutMs timeout in milliseconds
+     * @param reprobeMs how often {@code alreadyStarted} is asked again while waiting
+     * @return true if STARTED state was reached, false if timeout occurred
+     */
+    static boolean waitForProjectStarted(IServicesOrchestrator orchestrator, BooleanSupplier alreadyStarted,
+        String projectName, long timeoutMs, long reprobeMs)
+    {
+        StateWaiter waiter = new StateWaiter(orchestrator, projectName,
+            (context, state) -> state == ServiceState.STARTED, alreadyStarted);
+        return waiter.await(timeoutMs, reprobeMs);
+    }
+
+    /** Registers before deletion, including for a project whose DT context is already absent. */
+    public static ProjectReleaseWaiter prepareForRelease(IProject project, String projectName)
+    {
+        Activator activator = Activator.getDefault();
+        return activator == null ? null : prepareForRelease(project, projectName,
+            activator.getServicesOrchestrator(), activator.getDtProjectManager(),
+            activator.getWorkspaceOrchestrator());
+    }
+
+    /** The production release predicate, with platform services supplied for headless tests. */
+    static ProjectReleaseWaiter prepareForRelease(IProject project, String projectName,
+        IServicesOrchestrator services, IDtProjectManager manager, IWorkspaceOrchestrator workspace)
+    {
+        if (services == null || manager == null || workspace == null)
         {
-            @Override
-            public void contextStateChanged(ILifecycleContext context, ServiceState state)
-            {
-                if (context instanceof ProjectContext)
-                {
-                    ProjectContext projectContext = (ProjectContext) context;
-                    IDtProject contextProject = projectContext.getProject();
-                    
-                    if (contextProject != null && projectName.equals(contextProject.getName()))
-                    {
-                        Activator.logInfo("Lifecycle event for " + projectName + ": " + state); //$NON-NLS-1$ //$NON-NLS-2$
-                        
-                        if (state == ServiceState.STARTED)
-                        {
-                            startedLatch.countDown();
-                        }
-                    }
-                }
-            }
-        };
-        
+            return null;
+        }
+        return new ProjectReleaseWaiter(services, projectName,
+            () -> manager.getDtProject(project) == null && !workspace.isStarted(project), REPROBE_MS);
+    }
+
+    /** Waits within the caller's remaining restart allowance before it probes or recovers the scope. */
+    public static boolean waitForRestartJobs(RestartJobFailureSignal failureSignal, long timeoutMs)
+    {
+        return awaitState(new CountDownLatch(1), () -> !failureSignal.hasPendingRestartJobs(),
+            () -> false, "EDT restart jobs", timeoutMs, REPROBE_MS); //$NON-NLS-1$
+    }
+
+    /** One bounded, periodically re-probed wait for started, released, and restart states. */
+    private static boolean awaitState(CountDownLatch event, BooleanSupplier alreadyThere,
+        BooleanSupplier abort, String projectName, long timeoutMs, long reprobeMs)
+    {
         try
         {
-            orchestrator.addListener(listener);
-            
-            boolean started = startedLatch.await(timeoutMs, TimeUnit.MILLISECONDS);
-            if (!started)
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, timeoutMs));
+            while (true)
             {
-                Activator.logInfo("Timeout waiting for project STARTED: " + projectName); //$NON-NLS-1$
-                return false;
+                if (event.getCount() == 0 || probe(alreadyThere, projectName))
+                {
+                    return true;
+                }
+                if (abort.getAsBoolean())
+                {
+                    return false;
+                }
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0)
+                {
+                    Activator.logInfo("Timeout waiting for project lifecycle state: " + projectName); //$NON-NLS-1$
+                    return false;
+                }
+                long slice = Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(Math.max(1L, reprobeMs)));
+                if (event.await(slice, TimeUnit.NANOSECONDS))
+                {
+                    return true;
+                }
             }
-            
-            Activator.logInfo("Project reached STARTED state: " + projectName); //$NON-NLS-1$
-            return true;
         }
         catch (InterruptedException e)
         {
@@ -137,19 +196,109 @@ public final class LifecycleWaiter
             Activator.logInfo("Lifecycle wait interrupted for: " + projectName); //$NON-NLS-1$
             return false;
         }
-        finally
+    }
+
+    /** A throwing state probe means the state has not been verified yet. */
+    private static boolean probe(BooleanSupplier condition, String projectName)
+    {
+        try
+        {
+            return condition.getAsBoolean();
+        }
+        catch (RuntimeException e)
+        {
+            Activator.logInfo("Could not probe lifecycle state of " + projectName + " (" + e //$NON-NLS-1$ //$NON-NLS-2$
+                + "); waiting for its lifecycle event"); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    /** Registers the listener before any state probe or mutating operation can run. */
+    private static final class StateWaiter
+    {
+        private final IServicesOrchestrator orchestrator;
+        private final String projectName;
+        private final BooleanSupplier alreadyThere;
+        private final CountDownLatch event = new CountDownLatch(1);
+        private final AtomicBoolean cleaned = new AtomicBoolean();
+        private final IServiceContextLifecycleListener listener;
+
+        StateWaiter(IServicesOrchestrator orchestrator, String projectName,
+            BiPredicate<ProjectContext, ServiceState> matches, BooleanSupplier alreadyThere)
+        {
+            this.orchestrator = orchestrator;
+            this.projectName = projectName;
+            this.alreadyThere = alreadyThere;
+            listener = (context, state) -> {
+                if (context instanceof ProjectContext)
+                {
+                    ProjectContext projectContext = (ProjectContext)context;
+                    IDtProject project = projectContext.getProject();
+                    if (project != null && projectName.equals(project.getName())
+                        && matches.test(projectContext, state))
+                    {
+                        event.countDown();
+                    }
+                }
+            };
+            orchestrator.addListener(listener);
+        }
+
+        boolean await(long timeoutMs, long reprobeMs)
         {
             try
             {
-                orchestrator.removeListener(listener);
+                return awaitState(event, alreadyThere, () -> false, projectName, timeoutMs, reprobeMs);
             }
-            catch (Exception e)
+            finally
             {
-                Activator.logError("Error removing lifecycle listener", e); //$NON-NLS-1$
+                cleanup();
+            }
+        }
+
+        void cleanup()
+        {
+            if (cleaned.compareAndSet(false, true))
+            {
+                try
+                {
+                    orchestrator.removeListener(listener);
+                }
+                catch (RuntimeException e)
+                {
+                    cleaned.set(false);
+                    Activator.logError("Error removing lifecycle listener", e); //$NON-NLS-1$
+                }
             }
         }
     }
-    
+
+    /** A DELETE stop event or an absent DT registration and stopped workspace context proves release. */
+    public static final class ProjectReleaseWaiter
+    {
+        private final StateWaiter waiter;
+        private final long reprobeMs;
+
+        ProjectReleaseWaiter(IServicesOrchestrator orchestrator, String projectName,
+            BooleanSupplier released, long reprobeMs)
+        {
+            this.reprobeMs = reprobeMs;
+            waiter = new StateWaiter(orchestrator, projectName,
+                (context, state) -> state == ServiceState.STOPPED && context.getStopType() == ProjectStopType.DELETE,
+                released);
+        }
+
+        public boolean await(long timeoutMs)
+        {
+            return waiter.await(timeoutMs, reprobeMs);
+        }
+
+        public void cleanup()
+        {
+            waiter.cleanup();
+        }
+    }
+
     /**
      * Helper class for waiting on project restart with pre-registered listener.
      * This allows registering the listener BEFORE triggering the operation
@@ -216,47 +365,29 @@ public final class LifecycleWaiter
          */
         public boolean await(long timeoutMs)
         {
+            return await(timeoutMs, null);
+        }
+
+        /** Stops either phase when a platform restart job failed, including before STOPPED. */
+        public boolean await(long timeoutMs, RestartJobFailureSignal failureSignal)
+        {
             try
             {
-                // Calculate time already elapsed since listener registration
-                long elapsed = System.currentTimeMillis() - registrationTime;
-                long remainingForStopped = Math.max(0, timeoutMs - elapsed);
-                
-                // Wait for STOPPED state
-                boolean stopped = stoppedLatch.await(remainingForStopped, TimeUnit.MILLISECONDS);
-                if (!stopped)
+                long remaining = Math.max(0L, timeoutMs - (System.currentTimeMillis() - registrationTime));
+                BooleanSupplier failed = () -> failureSignal != null && failureSignal.hasFailed();
+                if (!awaitState(stoppedLatch, () -> false, failed, projectName, remaining, REPROBE_MS))
                 {
-                    Activator.logInfo("Timeout waiting for project STOPPED state: " + projectName); //$NON-NLS-1$
                     return false;
                 }
-                
-                // Calculate remaining time for STARTED
-                elapsed = System.currentTimeMillis() - registrationTime;
-                long remainingForStarted = Math.max(0, timeoutMs - elapsed);
-                
-                // Wait for STARTED state
-                boolean started = startedLatch.await(remainingForStarted, TimeUnit.MILLISECONDS);
-                if (!started)
-                {
-                    Activator.logInfo("Timeout waiting for project STARTED state: " + projectName); //$NON-NLS-1$
-                    return false;
-                }
-                
-                Activator.logInfo("Project lifecycle restart completed: " + projectName); //$NON-NLS-1$
-                return true;
-            }
-            catch (InterruptedException e)
-            {
-                Thread.currentThread().interrupt();
-                Activator.logInfo("Lifecycle wait interrupted for: " + projectName); //$NON-NLS-1$
-                return false;
+                remaining = Math.max(0L, timeoutMs - (System.currentTimeMillis() - registrationTime));
+                return awaitState(startedLatch, () -> false, failed, projectName, remaining, REPROBE_MS);
             }
             finally
             {
                 cleanup();
             }
         }
-        
+
         /**
          * Cleanup resources. Called automatically by await(), but can be called
          * manually if await() is not going to be called.

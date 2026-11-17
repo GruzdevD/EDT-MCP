@@ -6,11 +6,11 @@ Diagnose the EDT MCP server and its feature configuration. Parameters and exampl
 No parameters.
 
 ## Guide
-A self-diagnosis snapshot of the running MCP server. Reach for it when something behaves oddly and you want the facts instead of guessing - especially a blank form screenshot or a JSON tool that came back as plain text.
+Snapshot of the running server, transport listeners, preferences and form-render flags.
 
 ## When to use
 - `get_form_screenshot` / `get_form_layout_snapshot` returned blank - check the form-render modes here.
-- A JSON-response tool gave you plain text - check `plainTextMode`.
+- Unexpected text delivery: `plainTextMode` is the saved default; `/mcp/plaintext` or stdio `-resultMode` overrides it per client.
 - You want to confirm the port, protocol version, plugin/EDT version, or how many tools are enabled vs. registered (e.g. when progressive disclosure is hiding tools).
 - Quick "is the server actually up and reachable" check.
 
@@ -18,14 +18,20 @@ A self-diagnosis snapshot of the running MCP server. Reach for it when something
 None.
 
 ## What you get
-JSON with: `port`, `running`, `protocolVersion`, `pluginVersion`, `edtVersion`, `enabledTools` / `totalTools`, `plainTextMode`, `checksFolderConfigured`, `authEnabled`, and `formRenderFlags`. The latter contains `nativeFormLayoutRender` followed by `nativeFormBufferedLayoutRender`. Each flag always has `atStartup` (`on`, `off`, or `unknown`), the mode sampled when the MCP plugin activates - this bundle is lazily activated, so that is not literally JVM start, but the two flags are derived from system properties at class-init and nothing in EDT rewrites them afterwards, so in practice it is the launch state; it can also have `requested`, the raw system-property string currently set (omitted when unset), and `forcedAtRuntime: true` when the known live mode differs from the known startup snapshot. None of the three is named `effective`, and deliberately: EDT binds buffered render ONCE, when `HippoLayoutService` initialises its static singleton, and every later render branches on what that constructor decided rather than on the flag. A runtime force therefore reaches the renderer only if it preceded that moment, and no tool can report which happened without initialising the class and thereby deciding it. Set the flag in `1cedt.ini` if you need it to hold.
+
+`transports.http` and `transports.ipc` report whether the HTTP and local IPC listeners are up. `running` is true when either listener is up. `port` retains the configured or last bound HTTP port; it indicates an active listener only when `transports.http` is true. An EDT started by stdio normally reports HTTP false and IPC true. No socket path or handshake secret is returned.
+JSON with: `port`, `running`, `protocolVersion`, `pluginVersion`, `edtVersion`, `enabledTools` / `totalTools`, `plainTextMode`, `checksFolderConfigured`, `authEnabled`, and `formRenderFlags`. The latter contains `nativeFormLayoutRender` followed by `nativeFormBufferedLayoutRender`. Each flag always has `atStartup` (`on`, `off`, or `unknown`), sampled when the MCP plugin activates. The bundle is lazily activated, but EDT reads these modes once from system properties at class initialization. Each flag can also have `requested`, the raw system-property string currently set (omitted when unset). Changing a property later does not reconfigure EDT's renderer or its offscreen handler; changing the launch flag requires an EDT restart. On Windows, `get_form_screenshot` requires `-DnativeFormBufferedLayoutRender=true` after `-vmargs` in `1cedt.ini`; it is disabled by default because this flag makes EDT's own form designer show a grey rectangle instead of the form for the whole session (EDT behaviour). Linux and macOS already buffer native rendering. `get_form_layout_snapshot` does not require the buffered-render flag.
+
+`enabledTools` counts preference-enabled registrations; headless capability filtering and progressive disclosure can further narrow `tools/list`.
+
+`hostKind` is `WINDOWED` or `HEADLESS`, selected by the host application. A headless host has no workbench; its tool catalog excludes mandatory UI tools. Removing `-headless` from the client configuration changes the next cold start, not an already running host.
 
 ## Notes & gotchas
 - Secrets are never exposed: you get only the `authEnabled` boolean (never the token) and `checksFolderConfigured` (never the folder path).
 - `checksFolderConfigured: false` does **not** mean `get_check_description` is unavailable: the descriptions ship with the plugin. The flag reports only whether an operator configured a folder that overrides them.
-- Judge how EDT was launched by `atStartup`, which is sampled before this plugin's screenshot path can mutate a live flag - that path runs from a tool call, which cannot happen before the bundle it lives in has activated. `requested` is the system property now; this plugin can overwrite it after startup, so it may no longer reflect the line that EDT read from `1cedt.ini`.
-- `forcedAtRuntime` means only that the live flag was forced after startup; it does **not** mean buffered rendering works. `HippoLayoutService` creates its offscreen handler once, when the layout-service singleton is initialized, so changing the flag later does not create the missing handler.
-- If a form screenshot is blank, read `nativeFormBufferedLayoutRender.atStartup` as what it is - how EDT was LAUNCHED - and not as a diagnosis. `on` means the buffer was configured at launch, so look elsewhere for the blank image. `off` does NOT by itself explain it: the screenshot path forces the flag before opening a form, so if EDT's layout service had not initialised yet the render may well be buffered anyway, and the status looks identical in both cases (`atStartup: off`, `requested: true`, `forcedAtRuntime: true`). The way to remove the ambiguity rather than guess at it: put `-DnativeFormBufferedLayoutRender=true` in `1cedt.ini`, restart EDT, and confirm `atStartup: on`. `unknown` means the startup mode probe failed.
+- Judge how EDT was launched by `atStartup`: it is the launch state. `requested` is the raw system property as currently set; nothing in this plugin writes it.
+- For blank or gray screenshots, `nativeFormBufferedLayoutRender.atStartup: on` does not prove EDT could create its offscreen image. On Windows, buffered mode also switches the human designer to that image; an unusable buffer leaves the designer gray. Check the EDT log for `AccessDeniedException` on `dtgraphics-form.bin` (possibly followed by `NoClassDefFoundError: org/eclipse/core/runtime/Plugin`). EDT uses `<java.io.tmpdir>dtgraphics-form.bin` without inserting a separator: change `-Djava.io.tmpdir=C:\edt_tmp` to `-Djava.io.tmpdir=C:\edt_tmp\` and restart EDT. If nothing helps, remove the buffered-render flag and restart EDT.
+- On Windows, `nativeFormBufferedLayoutRender.atStartup: off` means EDT was launched without the flag: add `-DnativeFormBufferedLayoutRender=true` after `-vmargs` in `1cedt.ini` and restart EDT. Linux and macOS need no buffered-render flag. `unknown` means the startup mode probe failed.
 - `enabledTools` < `totalTools` is normal when progressive disclosure is on - use `list_toolsets` / `enable_toolset` to reveal more.
 
 ---

@@ -11,6 +11,7 @@ import java.util.List;
 
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.tools.impl.AdoptMetadataObjectTool;
+import com.ditrix.edt.mcp.server.tools.impl.CloneMetadataObjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.ApplyQuickFixTool;
 import com.ditrix.edt.mcp.server.tools.impl.AskWorkmateTool;
 import com.ditrix.edt.mcp.server.tools.impl.BuildExternalObjectsTool;
@@ -24,8 +25,10 @@ import com.ditrix.edt.mcp.server.tools.impl.SetInfobaseCredentialsTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateLaunchConfigTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateSpecterLaunchConfigTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateMetadataTool;
+import com.ditrix.edt.mcp.server.tools.impl.SortMetadataTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateProjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.ImportProjectTool;
+import com.ditrix.edt.mcp.server.tools.impl.DebugPauseTool;
 import com.ditrix.edt.mcp.server.tools.impl.DebugStatusTool;
 import com.ditrix.edt.mcp.server.tools.impl.DebugYaxunitTestsTool;
 import com.ditrix.edt.mcp.server.tools.impl.DeleteInfobaseTool;
@@ -34,9 +37,11 @@ import com.ditrix.edt.mcp.server.tools.impl.DeleteProjectApplicationTool;
 import com.ditrix.edt.mcp.server.tools.impl.DeleteMetadataTool;
 import com.ditrix.edt.mcp.server.tools.impl.DeleteProjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.DcsTool;
+import com.ditrix.edt.mcp.server.tools.impl.BusinessProcessRouteMapTool;
 import com.ditrix.edt.mcp.server.tools.impl.EnableToolsetTool;
 import com.ditrix.edt.mcp.server.tools.impl.EvaluateExpressionTool;
 import com.ditrix.edt.mcp.server.tools.impl.ExportCommonPictureTool;
+import com.ditrix.edt.mcp.server.tools.impl.ExportConfigurationToFileTool;
 import com.ditrix.edt.mcp.server.tools.impl.ExportConfigurationToXmlTool;
 import com.ditrix.edt.mcp.server.tools.impl.FindReferencesTool;
 import com.ditrix.edt.mcp.server.tools.impl.GenerateTranslationStringsTool;
@@ -47,6 +52,8 @@ import com.ditrix.edt.mcp.server.tools.impl.GetConfigurationPropertiesTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetContentAssistTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetEdtVersionTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetEventLogTool;
+import com.ditrix.edt.mcp.server.tools.impl.GetTechLogTool;
+import com.ditrix.edt.mcp.server.tools.impl.ManageTechLogTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetFormLayoutSnapshotTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetFormScreenshotTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetJobStatusTool;
@@ -62,6 +69,7 @@ import com.ditrix.edt.mcp.server.tools.impl.GetOutgoingStructuresTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetPlatformDocumentationTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetProblemSummaryTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetProfilingResultsTool;
+import com.ditrix.edt.mcp.server.tools.impl.ManageProfilingResultsTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetProjectErrorsTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetServerStatusTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetSubsystemContentTool;
@@ -73,7 +81,12 @@ import com.ditrix.edt.mcp.server.tools.impl.GetTranslationProjectInfoTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetVariablesTool;
 import com.ditrix.edt.mcp.server.tools.impl.GoToDefinitionTool;
 import com.ditrix.edt.mcp.server.tools.impl.ImportConfigurationFromXmlTool;
+import com.ditrix.edt.mcp.server.tools.impl.ImportProjectFromFileTool;
+import com.ditrix.edt.mcp.server.tools.impl.InfobaseSessionsTool;
+import com.ditrix.edt.mcp.server.tools.impl.InfobaseExtensionsTool;
+import com.ditrix.edt.mcp.server.tools.impl.StandaloneServerTool;
 import com.ditrix.edt.mcp.server.tools.impl.LaunchTool;
+import com.ditrix.edt.mcp.server.tools.impl.EdtDialogTool;
 import com.ditrix.edt.mcp.server.tools.impl.ListBreakpointsTool;
 import com.ditrix.edt.mcp.server.tools.impl.ListCommonPicturesTool;
 import com.ditrix.edt.mcp.server.tools.impl.GitTool;
@@ -86,8 +99,10 @@ import com.ditrix.edt.mcp.server.tools.impl.ListYaxunitTestsTool;
 import com.ditrix.edt.mcp.server.tools.impl.ListSubsystemsTool;
 import com.ditrix.edt.mcp.server.tools.impl.ListToolsetsTool;
 import com.ditrix.edt.mcp.server.tools.impl.MergeRulesTool;
+import com.ditrix.edt.mcp.server.tools.impl.ProjectChecksTool;
 import com.ditrix.edt.mcp.server.tools.impl.ReadMethodSourceTool;
 import com.ditrix.edt.mcp.server.tools.impl.ReadModuleSourceTool;
+import com.ditrix.edt.mcp.server.tools.impl.OpenEditorTool;
 import com.ditrix.edt.mcp.server.tools.impl.RemoveBreakpointTool;
 import com.ditrix.edt.mcp.server.tools.impl.RemoveStandaloneServerTool;
 import com.ditrix.edt.mcp.server.tools.impl.RenameMetadataObjectTool;
@@ -96,6 +111,7 @@ import com.ditrix.edt.mcp.server.tools.impl.ResyncToDiskTool;
 import com.ditrix.edt.mcp.server.tools.impl.RevalidateObjectsTool;
 import com.ditrix.edt.mcp.server.tools.impl.RunYaxunitTestsTool;
 import com.ditrix.edt.mcp.server.tools.impl.SearchInCodeTool;
+import com.ditrix.edt.mcp.server.tools.impl.SearchInDcsTool;
 import com.ditrix.edt.mcp.server.tools.impl.SetBranchInfobaseTool;
 import com.ditrix.edt.mcp.server.tools.impl.SetProjectChecksTool;
 import com.ditrix.edt.mcp.server.tools.impl.SetBreakpointTool;
@@ -109,6 +125,7 @@ import com.ditrix.edt.mcp.server.tools.impl.SwitchGitBranchTool;
 import com.ditrix.edt.mcp.server.tools.impl.TerminateLaunchTool;
 import com.ditrix.edt.mcp.server.tools.impl.TranslateConfigurationTool;
 import com.ditrix.edt.mcp.server.tools.impl.UpdateDatabaseTool;
+import com.ditrix.edt.mcp.server.tools.impl.ValidateFormModelTool;
 import com.ditrix.edt.mcp.server.tools.impl.ValidateQueryTool;
 import com.ditrix.edt.mcp.server.tools.impl.ValidateXdtoPackageTool;
 import com.ditrix.edt.mcp.server.tools.impl.WaitForBreakTool;
@@ -172,7 +189,9 @@ public final class BuiltInToolRegistrar
         catalogue.add(new ResyncToDiskTool());
         catalogue.add(new ExportConfigurationToXmlTool());
         catalogue.add(new ImportConfigurationFromXmlTool());
+        catalogue.add(new ImportProjectFromFileTool());
         catalogue.add(new BuildExternalObjectsTool());
+        catalogue.add(new ExportConfigurationToFileTool());
         catalogue.add(new DeleteProjectTool());
         catalogue.add(new CreateProjectTool());
         catalogue.add(new ImportProjectTool());
@@ -181,6 +200,8 @@ public final class BuiltInToolRegistrar
         catalogue.add(new GetProjectErrorsTool());
         catalogue.add(new GetMarkersTool());
         catalogue.add(new GetEventLogTool());
+        catalogue.add(new GetTechLogTool());
+        catalogue.add(new ManageTechLogTool());
         catalogue.add(new GetMcpHistoryTool());
         catalogue.add(new ListGitBranchesTool());
         catalogue.add(new SwitchGitBranchTool());
@@ -189,11 +210,13 @@ public final class BuiltInToolRegistrar
         catalogue.add(new GitTool());
         catalogue.add(new GetCheckDescriptionTool());
         catalogue.add(new SetProjectChecksTool());
+        catalogue.add(new ProjectChecksTool());
         catalogue.add(new GetContentAssistTool());
         catalogue.add(new GetPlatformDocumentationTool());
         catalogue.add(new GetMetadataObjectsTool());
         catalogue.add(new GetMetadataDetailsTool());
         catalogue.add(new DcsTool());
+        catalogue.add(new BusinessProcessRouteMapTool());
         catalogue.add(new ListCommonPicturesTool());
         catalogue.add(new ExportCommonPictureTool());
         catalogue.add(new ListSubsystemsTool());
@@ -213,8 +236,12 @@ public final class BuiltInToolRegistrar
         catalogue.add(new ListInfobasesTool());
         catalogue.add(new DeleteInfobaseTool());
         catalogue.add(new RemoveStandaloneServerTool());
+        catalogue.add(new InfobaseSessionsTool());
+        catalogue.add(new InfobaseExtensionsTool());
+        catalogue.add(new StandaloneServerTool());
         catalogue.add(new UpdateDatabaseTool());
         catalogue.add(new LaunchTool());
+        catalogue.add(new EdtDialogTool());
         catalogue.add(new ListConfigurationsTool());
         catalogue.add(new CreateLaunchConfigTool());
         catalogue.add(new DeleteLaunchConfigTool());
@@ -237,19 +264,23 @@ public final class BuiltInToolRegistrar
         catalogue.add(new SetVariableTool());
         catalogue.add(new StepTool());
         catalogue.add(new ResumeTool());
+        catalogue.add(new DebugPauseTool());
         catalogue.add(new EvaluateExpressionTool());
-        catalogue.add(new DebugYaxunitTestsTool()); // NOSONAR deprecated EDT API used intentionally (no non-deprecated equivalent here)
+        catalogue.add(new DebugYaxunitTestsTool()); // NOSONAR compatibility alias retained until release 2.27.0
         catalogue.add(new DebugStatusTool());
         catalogue.add(new StartProfilingTool());
         catalogue.add(new StopProfilingTool());
         catalogue.add(new GetProfilingResultsTool());
+        catalogue.add(new ManageProfilingResultsTool());
 
         // BSL code analysis tools
         catalogue.add(new ReadModuleSourceTool());
+        catalogue.add(new OpenEditorTool());
         catalogue.add(new WriteModuleSourceTool());
         catalogue.add(new GetModuleStructureTool());
         catalogue.add(new ListModulesTool());
         catalogue.add(new SearchInCodeTool());
+        catalogue.add(new SearchInDcsTool());
         catalogue.add(new ReadMethodSourceTool());
         catalogue.add(new GetMethodCallHierarchyTool());
         catalogue.add(new GetOutgoingStructuresTool());
@@ -259,6 +290,7 @@ public final class BuiltInToolRegistrar
         catalogue.add(new GetFormScreenshotTool());
         catalogue.add(new GetTemplateScreenshotTool());
         catalogue.add(new ValidateQueryTool());
+        catalogue.add(new ValidateFormModelTool());
 
         // Metadata refactoring tools (form members are created/edited/removed by their FQNs via
         // create/modify/delete_metadata; the former add_form_*/set_form_item_property/delete_form_item/
@@ -266,8 +298,10 @@ public final class BuiltInToolRegistrar
         catalogue.add(new RenameMetadataObjectTool());
         catalogue.add(new DeleteMetadataTool());
         catalogue.add(new CreateMetadataTool());
+        catalogue.add(new SortMetadataTool());
         catalogue.add(new ModifyMetadataTool());
         catalogue.add(new AdoptMetadataObjectTool());
+        catalogue.add(new CloneMetadataObjectTool());
         catalogue.add(new ValidateXdtoPackageTool());
 
         // Three-way configuration comparison (read-only: nothing is ever merged).

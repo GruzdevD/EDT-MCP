@@ -9,10 +9,13 @@ package com.ditrix.edt.mcp.server.tools.base;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.core.resources.IProject;
 
@@ -111,6 +114,9 @@ public final class WriteScope
     /** Projects the platform's cascade may have written in. */
     private final Set<String> cascadedInto = new LinkedHashSet<>();
 
+    /** Per project: the top-object FQNs this call submitted for export, in submission order. */
+    private final Map<String, Set<String>> exportedTopObjects = new LinkedHashMap<>();
+
     /** A mutation boundary returned successfully, even if its project is not known here. */
     // Volatile because a bounded UI-thread call can return while SWT is still finishing the work;
     // the caller must observe a commit that the UI thread recorded before the timeout response.
@@ -121,7 +127,7 @@ public final class WriteScope
     private String undeterminableReason;
 
     // Published to the waiting caller for the same bounded-call race as mutationCommitted.
-    private volatile List<String> undeterminableFallback;
+    private final AtomicReference<List<String>> undeterminableFallback = new AtomicReference<>();
 
     /**
      * Runs {@code work} with {@code scope} bound to the current thread, and gives the previous
@@ -170,13 +176,15 @@ public final class WriteScope
      * way, and dropping it is how the barrier used to end up waiting for the wrong project.
      *
      * @param project the project whose export was submitted; ignored when {@code null}
+     * @param topObjectFqns the top-object FQNs submitted; recorded as this call's written objects
      */
-    public static void recordExportSubmission(IProject project)
+    public static void recordExportSubmission(IProject project, Collection<String> topObjectFqns)
     {
         WriteScope scope = BOUND.get();
-        if (scope != null)
+        if (scope != null && project != null)
         {
             scope.wrote(project);
+            scope.exported(project.getName(), topObjectFqns);
         }
     }
 
@@ -205,7 +213,7 @@ public final class WriteScope
      * <p>{@code BmTransactions.write} calls this centrally after {@code IBmModel.execute} returns,
      * so an exception in response/export work cannot reopen the post-commit plain-error hole. It
      * deliberately records only the commit fact; export routing still comes from
-     * {@link #recordWrite(IProject)} or {@link #recordExportSubmission(IProject)}.</p>
+     * {@link #recordWrite(IProject)} or {@link #recordExportSubmission(IProject, Collection)}.</p>
      */
     public static void recordMutationCommitted()
     {
@@ -316,6 +324,39 @@ public final class WriteScope
     }
 
     /**
+     * Records the top objects an export was submitted for; name-taking so tests need no workspace.
+     *
+     * @param projectName the project; ignored when {@code null} or empty
+     * @param topObjectFqns the submitted top-object FQNs; {@code null}/blank entries are ignored
+     */
+    public void exported(String projectName, Collection<String> topObjectFqns)
+    {
+        if (projectName == null || projectName.isEmpty() || topObjectFqns == null)
+        {
+            return;
+        }
+        Set<String> fqns = exportedTopObjects.computeIfAbsent(projectName, k -> new LinkedHashSet<>());
+        for (String fqn : topObjectFqns)
+        {
+            if (fqn != null && !fqn.isEmpty())
+            {
+                fqns.add(fqn);
+            }
+        }
+    }
+
+    /**
+     * @param projectName the project
+     * @return the top-object FQNs this call submitted for export in that project, in order; empty
+     *     when none
+     */
+    public List<String> exportedTopObjects(String projectName)
+    {
+        Set<String> fqns = exportedTopObjects.get(projectName);
+        return fqns == null ? new ArrayList<>() : new ArrayList<>(fqns);
+    }
+
+    /**
      * States that the PLATFORM's cascade may have written in {@code project} - this call authorized
      * the work but did not perform it and cannot see what it touched.
      * <p>
@@ -369,7 +410,7 @@ public final class WriteScope
     public void undeterminable(String reason, Collection<String> fallbackProjects)
     {
         this.undeterminableReason = reason;
-        this.undeterminableFallback = new ArrayList<>(fallbackProjects);
+        this.undeterminableFallback.set(new ArrayList<>(fallbackProjects));
     }
 
     /**
@@ -411,7 +452,7 @@ public final class WriteScope
         // An opaque platform extension point may throw without saying whether it rolled back;
         // preserve that distinction on the wire while still forcing callers to reset before
         // trusting the model.
-        return undeterminableFallback != null
+        return undeterminableFallback.get() != null
             ? ToolResult.markErrorWithUnknownMutationOutcome(result) : result;
     }
 
@@ -463,13 +504,13 @@ public final class WriteScope
             // fact available - something really was written or authorized.
             return new Verdict(new ArrayList<>(written), removeAll(cascadedInto, written), true);
         }
-        if (undeterminableFallback != null)
+        if (undeterminableFallback.get() != null)
         {
             // Ahead of queuedNothing() on purpose. A call that states BOTH has contradicted itself,
             // and of the two the safe reading is the one that waits more and claims less: publishing
             // "[] - I queued nothing" while a fallback was named would drop that wait AND assert a
             // finding the same call has just said it cannot make. No tool states both today.
-            return new Verdict(new ArrayList<>(undeterminableFallback), Collections.emptyList(), false);
+            return new Verdict(new ArrayList<>(undeterminableFallback.get()), Collections.emptyList(), false);
         }
         if (queuedNothing)
         {

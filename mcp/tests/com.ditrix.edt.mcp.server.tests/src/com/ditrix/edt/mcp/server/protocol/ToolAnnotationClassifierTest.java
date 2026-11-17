@@ -33,6 +33,7 @@ public class ToolAnnotationClassifierTest
         for (String name : new String[] {
             "delete_metadata",
             "update_database",
+            "infobase_sessions",
             "rename_metadata_object",
             "delete_project",
             "cancel_job" })
@@ -97,6 +98,37 @@ public class ToolAnnotationClassifierTest
             ToolAnnotations a = ToolAnnotationClassifier.classify(name);
             assertEquals(name + " must be readOnlyHint=true", Boolean.TRUE, a.getReadOnlyHint());
             assertEquals(name + " must be idempotentHint=true", Boolean.TRUE, a.getIdempotentHint());
+        }
+    }
+
+    @Test
+    public void testReadsWithoutAReadPrefixAreReadOnly()
+    {
+        for (String name : new String[] {
+            "go_to_definition",
+            "debug_status",
+            "wait_for_break" })
+        {
+            ToolAnnotations a = ToolAnnotationClassifier.classify(name);
+            assertEquals(name + " must be readOnlyHint=true", Boolean.TRUE, a.getReadOnlyHint());
+            assertEquals(name + " must be idempotentHint=true", Boolean.TRUE, a.getIdempotentHint());
+            assertNull(name + " must not set destructiveHint", a.getDestructiveHint());
+        }
+    }
+
+    @Test
+    public void testDebuggeeMutatorsWithoutAWritePrefixStayWrites()
+    {
+        // the read list is by name, so the debug tools that DO change the debuggee must not ride it
+        for (String name : new String[] {
+            "evaluate_expression",
+            "step",
+            "resume",
+            "debug_pause",
+            "set_variable" })
+        {
+            assertEquals(name + " must stay readOnlyHint=false", Boolean.FALSE,
+                ToolAnnotationClassifier.classify(name).getReadOnlyHint());
         }
     }
 

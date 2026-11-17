@@ -6,6 +6,7 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -15,12 +16,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.ecore.EClass;
 import org.eclipse.emf.ecore.EObject;
-import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.integration.IBmModel;
-import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchema;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractRoleDescription;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
@@ -38,9 +36,9 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.PredefinedItem;
 import com._1c.g5.v8.dt.metadata.mdclass.Role;
 import com._1c.g5.v8.dt.metadata.mdclass.ScheduledJob;
+import com._1c.g5.v8.dt.metadata.mdclass.TemplateType;
 import com._1c.g5.v8.dt.metadata.mdclass.XDTOPackage;
 import com._1c.g5.v8.dt.xdto.model.Package;
-import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.McpKeys;
@@ -48,8 +46,15 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.metadata.MetadataFormatterRegistry;
 import com.ditrix.edt.mcp.server.utils.BmTransactions;
+import com.ditrix.edt.mcp.server.utils.ReadToolExecution;
+import com.ditrix.edt.mcp.server.utils.Refusals;
+import com.ditrix.edt.mcp.server.utils.CommandInterfaceAddress;
+import com.ditrix.edt.mcp.server.utils.CommandInterfaceSupport;
+import com.ditrix.edt.mcp.server.utils.ConfigurationRoot;
 import com.ditrix.edt.mcp.server.utils.DcsStructureReader;
 import com.ditrix.edt.mcp.server.utils.ExtensionOriginUtils;
+import com.ditrix.edt.mcp.server.utils.ExcludedCommandsSupport;
+import com.ditrix.edt.mcp.server.utils.FieldListSupport;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter;
 import com.ditrix.edt.mcp.server.utils.FormStructureReader;
 import com.ditrix.edt.mcp.server.utils.FormValidationException;
@@ -59,10 +64,16 @@ import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
 import com.ditrix.edt.mcp.server.utils.MetadataPropertyIntrospector;
 import com.ditrix.edt.mcp.server.utils.MetadataScope;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
+import com.ditrix.edt.mcp.server.utils.ReferencedTopObjects;
+import com.ditrix.edt.mcp.server.utils.Pagination;
 import com.ditrix.edt.mcp.server.utils.PredefinedWriter;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.RoleRightsReader;
+import com.ditrix.edt.mcp.server.utils.SubsystemUtils;
+import com.ditrix.edt.mcp.server.utils.TemplateContentSupport;
+import com.ditrix.edt.mcp.server.utils.VendorSupportGuard;
 import com.ditrix.edt.mcp.server.utils.XdtoStructureReader;
+import com.ditrix.edt.mcp.server.utils.XdtoWriter;
 
 /**
  * Tool to get detailed properties of metadata objects from 1C configuration.
@@ -78,6 +89,19 @@ public class GetMetadataDetailsTool implements IMcpTool
     /** Placeholder for an absent/empty value in the type-specific property tables below. */
     private static final String DASH = "-"; //$NON-NLS-1$
 
+    /** The failure reason of a nested-subsystem chain that addresses no existing subsystem. */
+    static final String NESTED_SUBSYSTEM_NOT_FOUND = "Subsystem not found - no subsystem exists at this " //$NON-NLS-1$
+        + "chain. " + SubsystemUtils.addressingHint(); //$NON-NLS-1$
+
+    /** The failure reason of a subsystem address that goes on past its name without being a chain. */
+    static final String MALFORMED_SUBSYSTEM_CHAIN = "Not a subsystem address. " //$NON-NLS-1$
+        + SubsystemUtils.addressingHint();
+
+    /** Which tool reads the configuration root, and what this tool renders of it (issue #741). */
+    static final String ROOT_DETAILS_ROUTE = "the configuration root is read with " //$NON-NLS-1$
+        + "get_configuration_properties; pass assignable:true for the properties modify_metadata sets on '" //$NON-NLS-1$
+        + ConfigurationRoot.FQN + "'"; //$NON-NLS-1$
+
     @Override
     public String getName()
     {
@@ -88,7 +112,8 @@ public class GetMetadataDetailsTool implements IMcpTool
     public String getDescription()
     {
         return "Inspect metadata objects and members, including managed-form root properties and " //$NON-NLS-1$
-            + "structure. Parameters and examples: get_tool_guide('get_metadata_details')."; //$NON-NLS-1$
+            + "structure, and a section's command interface. Parameters and examples: " //$NON-NLS-1$
+            + "get_tool_guide('get_metadata_details')."; //$NON-NLS-1$
     }
 
     @Override
@@ -98,7 +123,8 @@ public class GetMetadataDetailsTool implements IMcpTool
             .stringProperty(McpKeys.PROJECT_NAME,
                 "EDT project name (required)", true) //$NON-NLS-1$
             .stringArrayProperty("objectFqns", //$NON-NLS-1$
-                "Required. FQNs as Type.Name, e.g. ['Catalog.Products', 'Document.SalesOrder']; " + //$NON-NLS-1$
+                "Required. FQNs as Type.Name, e.g. ['Catalog.Products', 'Document.SalesOrder'], or " + //$NON-NLS-1$
+                "'Configuration' for the configuration root itself; " + //$NON-NLS-1$
                 "Russian type tokens also work (e.g. '\u0421\u043F\u0440\u0430\u0432\u043E\u0447\u043D\u0438\u043A.Products').", //$NON-NLS-1$
                 true)
             .booleanProperty("full", //$NON-NLS-1$
@@ -113,7 +139,8 @@ public class GetMetadataDetailsTool implements IMcpTool
                 "per property its value kind, current value and ALLOWED values (enum literals). This " + //$NON-NLS-1$
                 "is what modify_metadata can set; FQNs may address managed-form roots " + //$NON-NLS-1$
                 "('Catalog.Products.Form.ItemForm' / 'CommonForm.Main') and members (e.g. " + //$NON-NLS-1$
-                "'Catalog.Products.Attribute.Weight'). For CommonForm.Main the mdclass properties " + //$NON-NLS-1$
+                "'Catalog.Products.Attribute.Weight'), and 'Configuration' the configuration root (only the " + //$NON-NLS-1$
+                "properties modify_metadata sets on it). For CommonForm.Main the mdclass properties " + //$NON-NLS-1$
                 "remain first and content-root properties are added in a labeled second section. " + //$NON-NLS-1$
                 "This mode does NOT cover a predefined item " + //$NON-NLS-1$
                 "('...Predefined.<Item>' is not resolvable in this mode - its settable surface is " + //$NON-NLS-1$
@@ -142,7 +169,7 @@ public class GetMetadataDetailsTool implements IMcpTool
         String projectName = JsonUtils.extractStringArgument(params, McpKeys.PROJECT_NAME);
         if (projectName != null && !projectName.isEmpty())
         {
-            return "metadata-details-" + projectName.toLowerCase() + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
+            return "metadata-details-" + projectName.toLowerCase(Locale.ROOT) + ".md"; //$NON-NLS-1$ //$NON-NLS-2$
         }
         return "metadata-details.md"; //$NON-NLS-1$
     }
@@ -173,7 +200,7 @@ public class GetMetadataDetailsTool implements IMcpTool
 
         boolean full = "true".equalsIgnoreCase(fullStr); //$NON-NLS-1$
 
-        // Execute on UI thread
+        // Preserve windowed dispatch; headless reads stay on the calling thread.
         AtomicReference<String> resultRef = new AtomicReference<>();
         final List<String> fqns = objectFqns;
         final boolean fullMode = full;
@@ -181,8 +208,7 @@ public class GetMetadataDetailsTool implements IMcpTool
         final String lang = language;
         final int roleOffset = roleObjectOffset;
 
-        Display display = PlatformUI.getWorkbench().getDisplay();
-        display.syncExec(() -> {
+        ReadToolExecution.dispatch(() -> {
             try
             {
                 String result =
@@ -191,7 +217,7 @@ public class GetMetadataDetailsTool implements IMcpTool
             }
             catch (Exception e)
             {
-                Activator.logError("Error getting metadata details", e); //$NON-NLS-1$
+                Refusals.log("Error getting metadata details", e); //$NON-NLS-1$
                 resultRef.set(ToolResult.error(e.getMessage()).toJson());
             }
         });
@@ -200,52 +226,24 @@ public class GetMetadataDetailsTool implements IMcpTool
     }
     
     /**
-     * Internal implementation that runs on UI thread.
+     * Reads metadata under the caller's BM boundary.
      */
     private String getMetadataDetailsInternal(String projectName, List<String> objectFqns,
                                                boolean full, boolean assignable, String language,
                                                int roleObjectOffset)
     {
-        // Resolve the project and its configuration
-        ProjectContext.ConfigurationResult resolved = ProjectContext.resolveMetadataRoot(projectName);
-        if (!resolved.ok())
+        ProjectContext project = ProjectContext.of(projectName);
+        if (!project.exists())
         {
-            return resolved.errorJson();
+            return ToolResult.error(ProjectContext.notFoundMessage(projectName)).toJson();
         }
-        IProject project = resolved.project();
-        Configuration config = resolved.configuration();
-        
-        // Determine language CODE for synonyms (the synonym map is keyed by code,
-        // e.g. "ru"/"en", not by the Language object's name). Asked of the SCOPE, so an
-        // external-objects project with no base configuration still defaults to the language its
-        // own manifest declares instead of to nothing. May be null when the project declares no
-        // language at all; downstream synonym lookup tolerates that.
-        String effectiveLanguage = resolved.scope().resolveLanguageCode(language);
-
-        // The BM model is needed only to render a FORM's structure (a cross-model hop into the
-        // editable Form content); resolved best-effort (a form FQN with no model reports a failure).
-        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
-        IBmModel bmModel = bmModelManager != null ? bmModelManager.getModel(project) : null;
-
-        // An object's ORIGIN (core vs extension-adopted vs extension-own) is resolved
-        // against the project type, computed once for the whole request.
-        boolean isExtensionProject = ExtensionOriginUtils.isExtensionProject(project);
-
+        ReadSetup setup = ReadToolExecution.readModel(project.project(), NAME,
+            model -> prepareRead(projectName, full, assignable, language, roleObjectOffset, model));
+        if (setup.error() != null) { return setup.error(); }
+        RenderContext ctx = setup.context();
         StringBuilder sb = new StringBuilder();
         sb.append("# Metadata Details: ").append(projectName).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
-
-        // Per-object outcomes are split into two channels so a structural client
-        // can tell a failed object from data: successfully resolved objects render
-        // as data in the body, while failures are collected and emitted as a
-        // dedicated, clearly-delimited machine-readable table at the end. A
-        // per-object failure is NOT a whole-call failure, so it stays in this
-        // success body (the top-level ToolResult.error channel above is reserved
-        // for whole-call failures such as a missing project or configuration).
         List<String[]> failures = new ArrayList<>();
-
-        // Per-request render context, constant across every FQN in the loop.
-        RenderContext ctx = new RenderContext(project, resolved.scope(), bmModel, effectiveLanguage,
-            full, assignable, isExtensionProject, roleObjectOffset);
 
         // Process each FQN
         for (String fqn : objectFqns)
@@ -261,19 +259,103 @@ public class GetMetadataDetailsTool implements IMcpTool
         return sb.toString();
     }
 
-    /**
-     * Renders a single FQN of the request into {@code sb}, or records a {@code {fqn, reason}}
-     * row in {@code failures} when it cannot be resolved. Extracted verbatim from the
-     * {@link #getMetadataDetailsInternal} loop body; a per-object failure is not a whole-call
-     * failure, so this method never throws on a resolution miss.
-     */
-    private void processFqn(String fqn, StringBuilder sb, List<String[]> failures, RenderContext ctx)
+    private record ReadSetup(RenderContext context, String error) { }
+
+    private ReadSetup prepareRead(String projectName, boolean full, boolean assignable,
+        String language, int roleObjectOffset, IBmModel bmModel)
     {
+        ProjectContext.ConfigurationResult resolved = ProjectContext.resolveMetadataRoot(projectName);
+        if (!resolved.ok())
+        {
+            return new ReadSetup(null, resolved.errorJson());
+        }
+        IProject project = resolved.project();
+
+        // Synonyms use language codes; an external-object scope supplies its own default.
+        String effectiveLanguage = resolved.scope().resolveLanguageCode(language);
+
+        // An object's ORIGIN (core vs extension-adopted vs extension-own) is resolved
+        // against the project type, computed once for the whole request.
+        boolean isExtensionProject = ExtensionOriginUtils.isExtensionProject(project);
+
+        return new ReadSetup(new RenderContext(project, resolved.scope(), bmModel, effectiveLanguage,
+            full, assignable, isExtensionProject, roleObjectOffset), null);
+    }
+
+    private record LazyContent(String template, String xdto) { }
+    private record ContentIds(Long template, Long xdto) { }
+
+    private LazyContent prepareContent(String fqn, RenderContext ctx)
+    {
+        if (ctx.assignable) { return new LazyContent(null, null); }
+        ContentIds ids = BmTransactions.read(ctx.bmModel, "MetadataContentIds", (tx, monitor) -> {
+            var node = MetadataNodeResolver.resolveExisting(ctx.scope, fqn);
+            if (node == null || !(node.object instanceof IBmObject bm)) { return new ContentIds(null, null); }
+            return new ContentIds(node.object instanceof BasicTemplate ? bm.bmGetId() : null,
+                node.object instanceof XDTOPackage ? bm.bmGetId() : null);
+        });
+        String template = null;
+        if (ids.template() != null)
+        {
+            template = renderTemplateText(ctx.project, ctx.bmModel, ids.template(), fqn);
+            if (template == null)
+            {
+                template = renderTemplateDcs(ctx.bmModel, ids.template(), fqn, ctx.effectiveLanguage);
+            }
+        }
+        String xdto = ids.xdto() == null ? null : renderXdtoPackageStructure(ctx.bmModel, ids.xdto(), fqn);
+        return new LazyContent(template, xdto);
+    }
+
+    /** Render one FQN inside BM; lazy materialization completes before opening the read task. */
+    void processFqn(String fqn, StringBuilder sb, List<String[]> failures, RenderContext ctx)
+    {
+        if (ctx.bmModel == null)
+        {
+            processFqnRead(fqn, sb, failures, ctx, new LazyContent(null, null));
+            return;
+        }
+        LazyContent content = prepareContent(fqn, ctx);
+        BmTransactions.read(ctx.bmModel, NAME, (tx, monitor) -> {
+            processFqnRead(fqn, sb, failures, ctx, content);
+            return null;
+        });
+    }
+
+    private void processFqnRead(String fqn, StringBuilder sb, List<String[]> failures, RenderContext ctx,
+        LazyContent content)
+    {
+        // A section's command interface renders its commands by panel group (issue #666). Checked
+        // first: it is its own top object, and no other view has anything to say about it.
+        CommandInterfaceAddress commandInterface = CommandInterfaceAddress.parse(fqn);
+        if (commandInterface != null)
+        {
+            appendCommandInterfaceView(commandInterface, fqn, sb, failures, ctx);
+            return;
+        }
+        if (isMisaddressedCommandInterface(fqn))
+        {
+            // resolveObject reads only the first two segments, so this would render the owner instead.
+            failures.add(new String[] { fqn, "only a subsystem and the configuration have a section " //$NON-NLS-1$
+                + "command interface: address it as 'Subsystem.<Name>.CommandInterface' or " //$NON-NLS-1$
+                + "'Configuration.MainSectionCommandInterface'" }); //$NON-NLS-1$
+            return;
+        }
+
         // Assignable-schema mode: resolve the node (top object OR member) via the shared
         // resolver and render its assignable-property table - what modify_metadata can set.
         if (ctx.assignable)
         {
             appendAssignableView(fqn, sb, failures, ctx);
+            return;
+        }
+
+        // The configuration ROOT (issue #741) is read with get_configuration_properties, and what
+        // modify_metadata sets on it renders with assignable=true; this view does not render it.
+        ConfigurationRoot.Resolution root = ConfigurationRoot.resolve(ctx.scope, fqn);
+        if (root != null)
+        {
+            failures.add(new String[] { fqn, root.error != null ? root.error : ROOT_DETAILS_ROUTE });
             return;
         }
 
@@ -296,20 +378,9 @@ public class GetMetadataDetailsTool implements IMcpTool
             return;
         }
 
-        // A FQN that addresses a TEMPLATE whose content is a DataCompositionSchema (a report's DCS
-        // template, a common template, or an object-owned template - issue #267) renders the
-        // schema's STRUCTURE (data sources / data sets / calculated fields / total fields /
-        // parameters / the default settings variant) via the cross-model hop
-        // (DcsStructureReader), mirroring the FORM branch above. Resolved through the shared
-        // MetadataNodeResolver (handles both the 2-part CommonTemplate FQN and the 4-part
-        // owned-template FQN, bilingually - the same resolver TemplateScreenshotHelper uses), so
-        // this does not duplicate FQN navigation. A FQN that is not a template, or a template whose
-        // content is NOT a DataCompositionSchema (e.g. a SpreadsheetDocument print form), falls
-        // through UNCHANGED to the generic object-resolution path below.
-        String dcsStructure = renderTemplateDcsIfApplicable(ctx.scope, ctx.bmModel, fqn, ctx.effectiveLanguage);
-        if (dcsStructure != null)
+        if (content.template() != null)
         {
-            sb.append(dcsStructure);
+            sb.append(content.template());
             sb.append(SECTION_SEPARATOR);
             return;
         }
@@ -351,10 +422,40 @@ public class GetMetadataDetailsTool implements IMcpTool
             return;
         }
 
-        MdObject mdObject = resolveObject(ctx.scope, fqn);
+        // A NESTED subsystem chain must not fall through to resolveObject either: a nested subsystem is
+        // its own top object that its parent only REFERS to, and resolveObject reads only the first two
+        // segments - so it rendered the PARENT for the child's address (issue #708). The chain resolves
+        // by the shared rule (SubsystemUtils.resolveInScope, the one MetadataNodeResolver.resolveAddress
+        // resolves a chain with), and a chain that addresses nothing is a failure row, never one of its
+        // parents.
+        String[] nestedChain = SubsystemUtils.nestedChain(MetadataTypeUtils.normalizeFqn(fqn));
+        // Nor may a subsystem address that goes on past 'Subsystem.<Name>' without being a whole chain
+        // (one cut short, or with a foreign segment): resolveObject would render its FIRST level. A chain
+        // with a stray or padded segment is refused too, though it parses: the tolerant parse would
+        // render the subsystem its trimmed reading names (one rule with the writes, issue #897).
+        if (isMalformedSubsystemChain(fqn) && !ctx.scope.isExternalObjects())
+        {
+            String segment = SubsystemUtils.malformedSegmentError(MetadataTypeUtils.normalizeFqn(fqn));
+            failures.add(new String[] { fqn, segment != null ? segment : MALFORMED_SUBSYSTEM_CHAIN });
+            return;
+        }
+        // Only the special views above may consume a deeper address. The generic resolver reads
+        // Type.Name only, so otherwise it would render the owner even for a missing member (#731).
+        String normalizedFqn = MetadataTypeUtils.normalizeFqn(fqn);
+        MetadataNodeResolver.MetadataNode referenced = MetadataNodeResolver.resolveExisting(ctx.scope, normalizedFqn);
+        boolean referencedTop = referenced != null
+            && ReferencedTopObjects.isReferencedTopCollection(referenced.feature);
+        if (nestedChain == null && !referencedTop && normalizedFqn.split("\\.", -1).length > 2) //$NON-NLS-1$
+        {
+            failures.add(new String[] { fqn, memberAddressReason(ctx.scope, normalizedFqn) });
+            return;
+        }
+        MdObject mdObject = nestedChain != null ? SubsystemUtils.resolveInScope(ctx.scope, nestedChain)
+            : referencedTop ? referenced.object : resolveObject(ctx.scope, fqn);
         if (mdObject == null)
         {
-            failures.add(new String[] { fqn, describeResolutionFailure(fqn, ctx.scope) });
+            failures.add(new String[] { fqn, nestedChain != null && !ctx.scope.isExternalObjects()
+                ? NESTED_SUBSYSTEM_NOT_FOUND : describeResolutionFailure(fqn, ctx.scope) });
             return;
         }
 
@@ -377,14 +478,7 @@ public class GetMetadataDetailsTool implements IMcpTool
         // cross-model hop (XdtoStructureReader), APPENDED after the standard property block (unlike
         // the template/DCS branch above, the package's own properties - namespace, comment, synonym -
         // stay useful, so this augments rather than replaces the generic render).
-        if (mdObject instanceof XDTOPackage)
-        {
-            String xdtoStructure = renderXdtoPackageStructure(ctx.bmModel, (XDTOPackage)mdObject, fqn);
-            if (xdtoStructure != null)
-            {
-                sb.append(xdtoStructure);
-            }
-        }
+        if (content.xdto() != null) { sb.append(content.xdto()); }
         // ORIGIN footer: core / core (adopted) / extension. For a base
         // configuration this is always "core"; for an extension it distinguishes
         // an adopted base object from one the extension itself owns.
@@ -392,7 +486,70 @@ public class GetMetadataDetailsTool implements IMcpTool
             .append(ExtensionOriginUtils.originLabel(mdObject.getObjectBelonging(),
                 ctx.isExtensionProject, ctx.scope.isExternalObjects()))
             .append("\n"); //$NON-NLS-1$
+        // Present only for an object vendor support locks, so an agent sees it before writing (#642).
+        sb.append(VendorSupportGuard.detailsLine(mdObject, ctx.scope));
         sb.append(SECTION_SEPARATOR);
+    }
+
+    /**
+     * Renders a section's command interface: its panel groups in display order, each with its
+     * commands, their visibility and what the section customizes. Read from EDT's computed command
+     * interface inside one BM read transaction.
+     */
+    private void appendCommandInterfaceView(CommandInterfaceAddress address, String fqn, StringBuilder sb,
+        List<String[]> failures, RenderContext ctx)
+    {
+        String refusal = commandInterfaceRefusal(address, ctx);
+        if (refusal != null)
+        {
+            failures.add(new String[] { fqn, refusal });
+            return;
+        }
+        Boolean computed = CommandInterfaceSupport.isComputed(ctx.project);
+        CommandInterfaceSupport.Snapshot snapshot = CommandInterfaceSupport.read(ctx.bmModel, address);
+        if (snapshot.error != null)
+        {
+            failures.add(new String[] { fqn, snapshot.error });
+            return;
+        }
+        String note = Boolean.FALSE.equals(computed) ? CommandInterfaceSupport.staleNote() : null;
+        sb.append(snapshot.section.render(note));
+        sb.append(SECTION_SEPARATOR);
+    }
+
+    /** Why a command-interface address cannot be read in this request, or {@code null}. */
+    private static String commandInterfaceRefusal(CommandInterfaceAddress address, RenderContext ctx)
+    {
+        if (ctx.assignable)
+        {
+            return "a command interface has no assignable properties: read it without 'assignable', and " //$NON-NLS-1$
+                + "change its commands with modify_metadata 'commands'"; //$NON-NLS-1$
+        }
+        if (address.kind() == CommandInterfaceAddress.Kind.SECTIONS_PANEL)
+        {
+            return CommandInterfaceSupport.sectionsPanelRefusal();
+        }
+        if (ctx.scope.isExternalObjects())
+        {
+            return "an external-objects project has no command interface; address it in the " //$NON-NLS-1$
+                + "configuration project"; //$NON-NLS-1$
+        }
+        if (ctx.isExtensionProject)
+        {
+            return CommandInterfaceSupport.extensionRefusal(ctx.project.getName());
+        }
+        return ctx.bmModel == null ? "the project's BM model is not available" : null; //$NON-NLS-1$
+    }
+
+    /**
+     * Whether a three-part FQN puts a command interface under an object that has none, e.g.
+     * {@code Catalog.Products.CommandInterface}. Package-visible for tests.
+     */
+    static boolean isMisaddressedCommandInterface(String fqn)
+    {
+        return fqn != null && fqn.trim().split("\\.", -1).length == 3 //$NON-NLS-1$
+            && CommandInterfaceAddress.hasCommandInterfaceTail(fqn)
+            && CommandInterfaceAddress.parse(fqn) == null;
     }
 
     /**
@@ -404,6 +561,20 @@ public class GetMetadataDetailsTool implements IMcpTool
      */
     private void appendAssignableView(String fqn, StringBuilder sb, List<String[]> failures, RenderContext ctx)
     {
+        // The configuration ROOT (issue #741): its own address, never the generic resolver's, which
+        // has no root to offer (and must not: it backs delete, rename, adopt and reference targets).
+        ConfigurationRoot.Resolution root = ConfigurationRoot.resolve(ctx.scope, fqn);
+        if (root != null)
+        {
+            if (root.error != null)
+            {
+                failures.add(new String[] { fqn, root.error });
+                return;
+            }
+            sb.append(formatConfigurationRootAssignable((Configuration)root.node.object));
+            sb.append(SECTION_SEPARATOR);
+            return;
+        }
         String normFqn = MetadataTypeUtils.normalizeFqn(fqn);
         // A four-part owned-form ROOT has no mdclass node at that address. Resolve it through the
         // form seams before the mdclass resolver and render the editable form:Form object's own
@@ -460,6 +631,29 @@ public class GetMetadataDetailsTool implements IMcpTool
             sb.append(SECTION_SEPARATOR);
             return;
         }
+        // A NESTED subsystem is its own top object that its parent only REFERS to, so the containment
+        // grammar below has no step to it: it resolves by its chain, by the very rule modify_metadata
+        // writes it with (MetadataNodeResolver.resolveNestedSubsystem, yo retry included), and is named
+        // by its canonical chain - this view lists what that write sets (issue #929). A malformed chain
+        // is refused as the plain view refuses it, never rendered by its trimmed reading.
+        if (isMalformedSubsystemChain(fqn) && !ctx.scope.isExternalObjects())
+        {
+            String segment = SubsystemUtils.malformedSegmentError(normFqn);
+            failures.add(new String[] { fqn, segment != null ? segment : MALFORMED_SUBSYSTEM_CHAIN });
+            return;
+        }
+        if (SubsystemUtils.nestedChain(normFqn) != null && !ctx.scope.isExternalObjects())
+        {
+            MetadataNodeResolver.ResolvedNode nested = MetadataNodeResolver.resolveNestedSubsystem(ctx.scope, normFqn, true);
+            if (nested.node == null || nested.node.object == null)
+            {
+                failures.add(new String[] { fqn, NESTED_SUBSYSTEM_NOT_FOUND });
+                return;
+            }
+            sb.append(formatAssignable(nested.fqn, nested.node.object));
+            sb.append(SECTION_SEPARATOR);
+            return;
+        }
         MetadataNodeResolver.MetadataNode node = MetadataNodeResolver.resolveExisting(ctx.scope, fqn);
         if (node == null || node.object == null)
         {
@@ -510,6 +704,7 @@ public class GetMetadataDetailsTool implements IMcpTool
             .append(ExtensionOriginUtils.originLabel(role.getObjectBelonging(),
                 ctx.isExtensionProject, ctx.scope.isExternalObjects()))
             .append("\n"); //$NON-NLS-1$
+        sb.append(VendorSupportGuard.detailsLine(role, ctx.scope));
         sb.append(SECTION_SEPARATOR);
     }
 
@@ -686,13 +881,7 @@ public class GetMetadataDetailsTool implements IMcpTool
         sb.append(MarkdownUtils.tableRow("Action period is base", nullableYesNo(actionPeriodIsBase))); //$NON-NLS-1$
     }
 
-    /**
-     * Immutable per-request render context threaded through {@link #processFqn}: the resolution
-     * ROOT, the (best-effort) BM model used only for a form's cross-model hop, the
-     * effective synonym language code and the three rendering flags. Computed once in
-     * {@link #getMetadataDetailsInternal} and constant across every FQN. Bundles the parameters
-     * without changing any value or rendering behaviour.
-     */
+    /** Per-request scope, captured BM model and detached rendering options. */
     static final class RenderContext
     {
         /** Workspace project used to obtain the form edit/read scaffold. */
@@ -750,13 +939,32 @@ public class GetMetadataDetailsTool implements IMcpTool
         return formatAssignableSection("## Form content root assignable properties: ", fqn, obj); //$NON-NLS-1$
     }
 
+    /**
+     * Renders the configuration ROOT's assignable section (issue #741) under its canonical address: the
+     * shared table, which for a {@link Configuration} lists only the properties {@code modify_metadata}
+     * sets on the root, then the sentence that says what else reads the root - no more than
+     * {@code get_configuration_properties} renders (its name, behaviour settings and languages, not every
+     * other property).
+     *
+     * @param config the project's own configuration
+     * @return the Markdown section
+     */
+    static String formatConfigurationRootAssignable(Configuration config)
+    {
+        return formatAssignable(ConfigurationRoot.FQN, config) + "\nOnly these properties of the " //$NON-NLS-1$
+            + "configuration root are settable; get_configuration_properties also reads its name, behaviour " //$NON-NLS-1$
+            + "settings and languages.\n"; //$NON-NLS-1$
+    }
+
     /** Shared table body; callers supply the heading that identifies the represented surface. */
     private static String formatAssignableSection(String heading, String fqn, EObject obj)
     {
         StringBuilder sb = new StringBuilder();
         sb.append(heading).append(fqn).append("\n\n"); //$NON-NLS-1$
         sb.append("Set these with `modify_metadata`. For an ENUM property the value must be one of " //$NON-NLS-1$
-            + "the listed Allowed values.\n\n"); //$NON-NLS-1$
+            + "the listed Allowed values; a FIELD_LIST property takes a JSON array of the listed field " //$NON-NLS-1$
+            + "addresses (at most " + FieldListSupport.MAX_LISTED + " are listed, then the rest is " //$NON-NLS-1$ //$NON-NLS-2$
+            + "counted).\n\n"); //$NON-NLS-1$
         sb.append(MarkdownUtils.tableHeader("Property", "Kind", "Current", "Allowed values")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         // A form element additionally exposes the assignable properties nested in its <extInfo> (e.g. a
         // UsualGroup's group / united layout props). When it carries a LIVE extInfo instance (the common
@@ -781,13 +989,26 @@ public class GetMetadataDetailsTool implements IMcpTool
         {
             props = MetadataPropertyIntrospector.introspect(obj, extInfoEClass);
         }
+        else if (obj instanceof Configuration)
+        {
+            // The configuration root offers only what modify_metadata sets on it (issue #741), and its
+            // collections - every top object of the configuration - are never read for the table.
+            props = MetadataPropertyIntrospector.introspectOnly(obj, ConfigurationRoot::isSettable);
+        }
         else
         {
             props = MetadataPropertyIntrospector.introspect(obj);
         }
         for (MetadataPropertyIntrospector.PropertyInfo p : props)
         {
-            String allowed = p.allowedValues.isEmpty() ? null : String.join(", ", p.allowedValues); //$NON-NLS-1$
+            // A field list offers every lockable field of the object for data locking - several KB on an
+            // ERP-size document - so its Allowed cell is bounded (issue #740), as are form commands.
+            String allowed = p.allowedValues.isEmpty() ? null
+                : p.valueKind == MetadataPropertyIntrospector.ValueKind.FIELD_LIST
+                    ? Pagination.boundedListing(p.allowedValues, FieldListSupport.MAX_LISTED)
+                    : p.valueKind == MetadataPropertyIntrospector.ValueKind.EXCLUDED_COMMANDS
+                        ? Pagination.boundedListing(p.allowedValues, ExcludedCommandsSupport.MAX_LISTED)
+                        : String.join(", ", p.allowedValues); //$NON-NLS-1$
             sb.append(MarkdownUtils.tableRow(p.name, p.valueKind.toString(), p.currentValue, allowed));
         }
         return sb.toString();
@@ -1098,42 +1319,26 @@ public class GetMetadataDetailsTool implements IMcpTool
         });
     }
 
-    /**
-     * Renders a template's Data Composition Schema STRUCTURE for a template FQN whose content is a
-     * {@link DataCompositionSchema} (issue #267): resolves the FQN to its {@link BasicTemplate} via the
-     * shared {@link MetadataNodeResolver} (handles a 2-part common template and a 4-part owned-object
-     * template, bilingually - the same resolver {@code TemplateScreenshotHelper} uses for the analogous
-     * SpreadsheetDocument-template screenshot), then inside a {@link BmTransactions#executeAndRollback}
-     * boundary re-fetches it by its BM id and reads its content. A write-capable-but-rolled-back
-     * transaction is required here (not a plain read) because {@code BasicTemplate.getTemplate()} lazily
-     * materializes the content from the separate, lazily-loaded {@code .dcs} resource - a model-write side
-     * effect - mirroring {@code TemplateScreenshotHelper.renderTemplate}'s reasoning for a
-     * SpreadsheetDocument template; every edit the lazy materialization makes is discarded when the
-     * transaction returns, so this pure read never persists anything.
-     *
-     * @param scope the resolution root of the project (configuration, or external-objects roots)
-     * @param bmModel the (best-effort) BM model; {@code null} yields {@code null}
-     * @param fqn the requested FQN (not yet normalized)
-     * @param language the resolved title/presentation language CODE (may be {@code null})
-     * @return the rendered Markdown, or {@code null} when the FQN does not resolve to a template, the BM
-     *         model is unavailable, or the resolved template's content is NOT a
-     *         {@link DataCompositionSchema} (a {@code null} content, a {@code SpreadsheetDocument} print
-     *         form, etc.) - {@code null} means "not applicable here", NOT a failure: the caller falls
-     *         through to the generic object-resolution render.
-     */
-    private static String renderTemplateDcsIfApplicable(MetadataScope scope, IBmModel bmModel, String fqn,
-        String language)
+    /** Read the file-backed text under a BM boundary, without changing the model or the file. */
+    private static String renderTemplateText(IProject project, IBmModel bmModel, long templateId, String fqn)
     {
-        if (bmModel == null)
+        return BmTransactions.executeAndRollback(bmModel, "GetMetadataDetailsTextTemplate", (tx, monitor) ->
         {
-            return null;
-        }
-        MetadataNodeResolver.MetadataNode node = MetadataNodeResolver.resolveExisting(scope, fqn);
-        if (node == null || !(node.object instanceof BasicTemplate) || !(node.object instanceof IBmObject))
-        {
-            return null;
-        }
-        final long templateBmId = ((IBmObject)node.object).bmGetId();
+            Object object = tx.getObjectById(templateId);
+            if (!(object instanceof BasicTemplate)
+                || ((BasicTemplate)object).getTemplateType() != TemplateType.TEXT_DOCUMENT)
+            {
+                return null;
+            }
+            BasicTemplate template = (BasicTemplate)object;
+            String text = TemplateContentSupport.readText(TemplateContentSupport.contentFile(project, template));
+            return TemplateContentSupport.renderText(MetadataTypeUtils.normalizeFqn(fqn), text);
+        });
+    }
+
+    /** Lazy DCS materialization needs a rollback task, outside the ordinary read transaction. */
+    private static String renderTemplateDcs(IBmModel bmModel, long templateBmId, String fqn, String language)
+    {
         final String normalized = MetadataTypeUtils.normalizeFqn(fqn);
         return BmTransactions.executeAndRollback(bmModel, "GetMetadataDetailsTemplateDcs", (tx, monitor) -> //$NON-NLS-1$
         {
@@ -1148,24 +1353,9 @@ public class GetMetadataDetailsTool implements IMcpTool
         });
     }
 
-    /**
-     * Renders an XDTOPackage's CONTENT (object types with their properties, package-global properties,
-     * value types, dependencies - issue #183 stream 1) via {@link XdtoStructureReader}: re-fetches the
-     * package inside a {@link BmTransactions#executeAndRollback} boundary (required, not a plain read -
-     * {@code XDTOPackage.getPackage()} lazily materializes the content from the separate, lazily-loaded
-     * {@code .xdto} resource, a model-write side effect, exactly like {@code BasicTemplate.getTemplate()}
-     * for the DCS branch above) and renders it. Returns {@code null} only when the BM model or the
-     * package's BM id is unavailable (never - a resolved {@code mdObject} is always a real BM object);
-     * an XDTOPackage with NO content yet still renders the "(no package content)" note, matching
-     * {@link XdtoStructureReader#render}'s null-content contract.
-     */
-    private static String renderXdtoPackageStructure(IBmModel bmModel, XDTOPackage pkg, String fqn)
+    /** Lazy XDTO materialization retains its rollback boundary and never persists changes. */
+    private static String renderXdtoPackageStructure(IBmModel bmModel, long pkgBmId, String fqn)
     {
-        if (bmModel == null || !(pkg instanceof IBmObject))
-        {
-            return null;
-        }
-        final long pkgBmId = ((IBmObject)pkg).bmGetId();
         final String normalized = MetadataTypeUtils.normalizeFqn(fqn);
         return BmTransactions.executeAndRollback(bmModel, "GetMetadataDetailsXdtoPackage", (tx, monitor) -> //$NON-NLS-1$
         {
@@ -1294,8 +1484,7 @@ public class GetMetadataDetailsTool implements IMcpTool
                 // this view never renders handlers anyway - only a MEMBER address gets kind advice.
                 if (!FormElementWriter.isHandlerToken(ref.kindToken))
                 {
-                    kindAdviceOut[0] = FormElementWriter.kindMismatchAdvice(formModel, ref.kindToken,
-                        ref.name, normFqn);
+                    kindAdviceOut[0] = FormElementWriter.kindMismatchAdvice(formModel, ref, normFqn);
                 }
                 return null;
             }
@@ -1372,6 +1561,93 @@ public class GetMetadataDetailsTool implements IMcpTool
         return scope.findObject(mdType, mdName);
     }
 
+    /** Explains an unhandled deeper address without silently substituting its owner. */
+    private String memberAddressReason(MetadataScope scope, String normalizedFqn)
+    {
+        // The shared parsers discard trailing empty segments; these do not name an existing member.
+        if (normalizedFqn.endsWith(".")) //$NON-NLS-1$
+        {
+            return describeResolutionFailure(normalizedFqn, scope);
+        }
+        // Exact resolution only: the routes this text points to (assignable: true, the owner's
+        // Type.Name, the package view) resolve exactly, so a yo/ye-only match must not be called existing.
+        XdtoWriter.MemberRef xdtoRef = XdtoWriter.parseMemberRef(normalizedFqn);
+        if (xdtoRef != null && MetadataNodeResolver.resolveAddress(scope, xdtoRef.packageFqn, false) != null)
+        {
+            // XDTO content is not an MdObject and has no assignable view. Parsing its address does
+            // not establish that the member exists; the package's content view is where to check.
+            return "This is an XDTO member address; read package '" + xdtoRef.packageFqn //$NON-NLS-1$
+                + "' to inspect its content."; //$NON-NLS-1$
+        }
+        MdObject member = MetadataNodeResolver.isValidArity(normalizedFqn.split("\\.", -1).length) //$NON-NLS-1$
+            ? MetadataNodeResolver.resolveAddress(scope, normalizedFqn, false) : null;
+        if (member instanceof BasicTemplate && isRenderedTemplateType(((BasicTemplate)member).getTemplateType()))
+        {
+            // A text or DCS template has its own plain view; it only lands here when that view could
+            // not read the content (the BM model is not available yet), so the call is worth retrying.
+            return "This template's content could not be read right now (the project model is not ready); " //$NON-NLS-1$
+                + "retry the same call once the project is ready."; //$NON-NLS-1$
+        }
+        if (member != null)
+        {
+            String[] parts = normalizedFqn.split("\\.", 3); //$NON-NLS-1$
+            String ownerFqn = parts[0] + "." + parts[1]; //$NON-NLS-1$
+            MetadataNodeResolver.MetadataNode node = MetadataNodeResolver.resolveExisting(scope, normalizedFqn);
+            if (node != null && node.owner instanceof MdObject)
+            {
+                String address = MetadataNodeResolver.resolvableAddressOf(renderableOwner((MdObject)node.owner));
+                if (address != null)
+                {
+                    ownerFqn = address;
+                }
+            }
+            return "This addresses a member of '" + ownerFqn //$NON-NLS-1$
+                + "'; read its properties with assignable: true. The owner's details render from '" //$NON-NLS-1$
+                + ownerFqn + "'."; //$NON-NLS-1$
+        }
+        return describeResolutionFailure(normalizedFqn, scope);
+    }
+
+    /**
+     * The nearest ancestor this view renders: a containment-nested owner (a tabular section) is climbed
+     * to its top object, while a referenced top object (an external data source's Table) is itself
+     * renderable and stays. Package-visible for tests.
+     */
+    static MdObject renderableOwner(MdObject owner)
+    {
+        MdObject current = owner;
+        while (current.eContainer() instanceof MdObject && !(current.eContainer() instanceof Configuration))
+        {
+            current = (MdObject)current.eContainer();
+        }
+        return current;
+    }
+
+    /** Template types the plain view renders itself (text and Data Composition Schema). */
+    private static boolean isRenderedTemplateType(TemplateType type)
+    {
+        return type == TemplateType.TEXT_DOCUMENT || type == TemplateType.DATA_COMPOSITION_SCHEMA;
+    }
+
+    /**
+     * Whether {@code fqn} starts with a subsystem type token and goes on past {@code Subsystem.<Name>}
+     * without being a whole chain of subsystems - a chain cut short ({@code Subsystem.Sales.Subsystem})
+     * or one with a foreign segment ({@code Subsystem.Sales.Attribute.Weight}). Below a subsystem
+     * nothing but a nested subsystem has an address (its command interface is taken before this is
+     * asked), so such an address names nothing - and {@link #resolveObject}, which reads only the
+     * first two segments, would render its FIRST level for it. A chain with an empty or padded segment
+     * ({@code Subsystem.Sales.Subsystem.Orders.}) counts too: it parses, but only by dropping what the
+     * caller typed. Package-visible for tests.
+     *
+     * @param fqn the requested FQN (may be {@code null})
+     * @return {@code true} for a subsystem address that no subsystem walk can take
+     */
+    static boolean isMalformedSubsystemChain(String fqn)
+    {
+        // The shared rule every subsystem write refuses a chain request by (issue #897).
+        return SubsystemUtils.malformedChainError(MetadataTypeUtils.normalizeFqn(fqn)) != null;
+    }
+
     /**
      * Builds the machine-readable reason for a FQN that {@link #resolveObject}
      * could not resolve. The reason becomes data in the failures table, never
@@ -1396,10 +1672,13 @@ public class GetMetadataDetailsTool implements IMcpTool
         String[] parts = fqn.split("\\."); //$NON-NLS-1$
         if (parts.length < 2)
         {
-            return "Invalid FQN. Expected format: Type.Name (e.g. Catalog.Products)"; //$NON-NLS-1$
+            return "Invalid FQN. Expected format: Type.Name (e.g. Catalog.Products); the configuration " //$NON-NLS-1$
+                + "root itself is '" + ConfigurationRoot.FQN + "'"; //$NON-NLS-1$ //$NON-NLS-2$
         }
         String hint = scope == null ? "" : scope.addressingHint(fqn); //$NON-NLS-1$
-        return "Object not found - use get_metadata_objects to list valid FQNs" + hint; //$NON-NLS-1$
+        // A short 'Subsystem.<Child>' of a subsystem that exists only nested names its chains (issue #929).
+        String nested = SubsystemUtils.nestedNamesakesHint(scope, MetadataTypeUtils.normalizeFqn(fqn));
+        return "Object not found - use get_metadata_objects to list valid FQNs" + nested + hint; //$NON-NLS-1$
     }
 
     /**

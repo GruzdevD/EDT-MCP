@@ -6,9 +6,14 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import com.ditrix.edt.mcp.server.utils.EdtVersion;
+import com.ditrix.edt.mcp.server.HostKind;
+
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import org.eclipse.jface.preference.IPreferenceStore;
 
@@ -21,6 +26,8 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
 import com.ditrix.edt.mcp.server.transport.HttpTransport;
+import com.ditrix.edt.mcp.server.transport.StdioPluginSupport;
+import com.ditrix.edt.mcp.server.transport.TransportStatus;
 import com.ditrix.edt.mcp.server.utils.CheckDescriptionLoader;
 import com.ditrix.edt.mcp.server.utils.NativeRenderModeProbe;
 import com.ditrix.edt.mcp.server.utils.NativeRenderModeProbe.NativeRenderMode;
@@ -32,7 +39,7 @@ import com.ditrix.edt.mcp.server.utils.NativeRenderModeProbe.NativeRenderMode;
  * <p>
  * Reports: listening port, MCP protocol version, plugin and EDT version, the
  * enabled/total tool counts, the {@code plainTextMode} and {@code checksFolder}
- * preference flags, the startup, requested and runtime-forced states of the two form-render modes
+ * preference flags, the startup modes and requested properties of the two form-render modes
  * ({@code -DnativeFormBufferedLayoutRender} / {@code -DnativeFormLayoutRender}),
  * and whether authentication is enabled.
  * <p>
@@ -49,6 +56,16 @@ import com.ditrix.edt.mcp.server.utils.NativeRenderModeProbe.NativeRenderMode;
  */
 public class GetServerStatusTool implements IMcpTool
 {
+    private final Supplier<McpServer> httpServer;
+    private final BooleanSupplier ipcRunning;
+
+    public GetServerStatusTool()
+    {
+        this(() -> Activator.getDefault() == null ? null : Activator.getDefault().getMcpServer(), StdioPluginSupport::isIpcRunning);
+    }
+
+    GetServerStatusTool(Supplier<McpServer> httpServer, BooleanSupplier ipcRunning)
+    { this.httpServer = httpServer; this.ipcRunning = ipcRunning; }
     public static final String NAME = "get_server_status"; //$NON-NLS-1$
 
     /** Form-render JVM flag: enables the offscreen buffered layout render. */
@@ -90,8 +107,13 @@ public class GetServerStatusTool implements IMcpTool
     {
         return JsonSchemaBuilder.object()
             .booleanProperty("success", "Whether the operation succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
-            .integerProperty("port", "TCP port the MCP server listens on") //$NON-NLS-1$ //$NON-NLS-2$
-            .booleanProperty(KEY_RUNNING, "Whether the MCP server is currently running") //$NON-NLS-1$
+            .integerProperty("port", "HTTP configured or last bound TCP port; active only when transports.http is true") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty(KEY_RUNNING, "Whether at least one MCP transport is listening") //$NON-NLS-1$
+            .objectProperty("transports", "Active MCP listeners; IPC exposes no secret or socket address",
+                JsonSchemaBuilder.object()
+                    .booleanProperty("http", "Whether the HTTP listener is running", true)
+                    .booleanProperty("ipc", "Whether the local IPC listener is running", true), false)
+            .stringProperty("hostKind", "EDT host kind: WINDOWED or HEADLESS")
             .stringProperty("protocolVersion", "MCP protocol version implemented by the server") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("pluginVersion", "Version of the EDT-MCP plugin") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("edtVersion", "Detected 1C:EDT version") //$NON-NLS-1$ //$NON-NLS-2$
@@ -102,9 +124,8 @@ public class GetServerStatusTool implements IMcpTool
             .booleanProperty("authEnabled", "Whether bearer-token authentication is enabled") //$NON-NLS-1$ //$NON-NLS-2$
             .objectProperty("formRenderFlags", //$NON-NLS-1$
                 "atStartup is the mode when this plugin activated; requested is the current " //$NON-NLS-1$
-                    + "system property; forcedAtRuntime marks a later live-mode change, which " //$NON-NLS-1$
-                    + "reaches the renderer only if it preceded EDT's layout-service init - not " //$NON-NLS-1$
-                    + "observable from here, so none of the three states the effective mode") //$NON-NLS-1$
+                    + "system property. EDT binds these modes at class initialization; changing them " //$NON-NLS-1$
+                    + "requires an EDT restart") //$NON-NLS-1$
             .build();
     }
 
@@ -124,21 +145,18 @@ public class GetServerStatusTool implements IMcpTool
             ToolResult result = ToolResult.success();
 
             // Port: read from the live server when available; null-safe for headless.
-            McpServer server = activator != null ? activator.getMcpServer() : null;
-            if (server != null)
-            {
-                result.put("port", server.getPort()); //$NON-NLS-1$
-                result.put(KEY_RUNNING, server.isRunning());
-            }
-            else
-            {
-                result.put("port", PreferenceConstants.DEFAULT_PORT); //$NON-NLS-1$
-                result.put(KEY_RUNNING, false);
-            }
+            McpServer server = httpServer.get();
+            TransportStatus transports = TransportStatus.read(server, ipcRunning);
+            boolean http = transports.http();
+            boolean ipc = transports.ipc();
+            result.put("port", server == null ? PreferenceConstants.DEFAULT_PORT : server.getPort()); //$NON-NLS-1$
+            result.put(KEY_RUNNING, transports.running());
+            result.put("transports", Map.of("http", http, "ipc", ipc));
 
+            result.put("hostKind", HostKind.current().name());
             result.put("protocolVersion", McpConstants.PROTOCOL_VERSION); //$NON-NLS-1$
             result.put("pluginVersion", McpConstants.PLUGIN_VERSION); //$NON-NLS-1$
-            result.put("edtVersion", GetEdtVersionTool.getEdtVersion()); //$NON-NLS-1$
+            result.put("edtVersion", EdtVersion.getEdtVersion()); //$NON-NLS-1$
 
             result.put("enabledTools", enabledTools); //$NON-NLS-1$
             result.put("totalTools", totalTools); //$NON-NLS-1$
@@ -172,16 +190,14 @@ public class GetServerStatusTool implements IMcpTool
             result.put("checksFolderConfigured", checksFolderConfigured); //$NON-NLS-1$
             result.put("authEnabled", authEnabled); //$NON-NLS-1$
 
-            // EDT-startup render modes, current live modes and raw requested System properties:
+            // EDT-startup render modes and raw requested System properties:
             // the diagnostic for a blank get_form_screenshot / get_form_layout_snapshot.
             Map<String, Object> formRenderFlags = new LinkedHashMap<>();
             formRenderFlags.put(FLAG_NATIVE_LAYOUT_RENDER,
                 createRenderFlagState(NativeRenderModeProbe.getStartupNativeRenderMode(),
-                    NativeRenderModeProbe.getNativeRenderMode(),
                     System.getProperty(FLAG_NATIVE_LAYOUT_RENDER)));
             formRenderFlags.put(FLAG_BUFFERED_LAYOUT_RENDER,
                 createRenderFlagState(NativeRenderModeProbe.getStartupBufferedRenderMode(),
-                    NativeRenderModeProbe.getBufferedRenderMode(),
                     System.getProperty(FLAG_BUFFERED_LAYOUT_RENDER)));
             result.put("formRenderFlags", formRenderFlags); //$NON-NLS-1$
 
@@ -195,32 +211,19 @@ public class GetServerStatusTool implements IMcpTool
     }
 
     /**
-     * Builds one render-flag state: the mode at plugin activation, the raw requested system
-     * property, and whether the live mode has since been forced away from it.
-     *
-     * <p>Deliberately NOT called "effective". EDT binds buffered render ONCE: {@code
-     * HippoLayoutService.INSTANCE} is a static final singleton whose constructor creates its
-     * {@code offscreenHandler} if and only if {@code NativeRenderService.isBufferedRender()} held
-     * at that moment, and every later render branches on that field rather than re-reading the
-     * flag. So a runtime force reaches the renderer only when it precedes that class
-     * initialisation - and this tool cannot find out which happened, because reading the
-     * singleton to ask would itself initialise the class and decide the answer. Reporting the
-     * two states we can actually observe, plus the fact that a force happened, is the whole of
-     * what is provable here.</p>
+     * Builds one render-flag state from the mode at MCP activation and the raw requested
+     * system property. EDT reads the flags into static finals at class initialization and
+     * binds its offscreen handler once in {@code HippoLayoutService.INSTANCE}; changing
+     * a property later cannot reconfigure that handler. An EDT restart is required.
      */
     private static Map<String, Object> createRenderFlagState(NativeRenderMode startupMode,
-        NativeRenderMode liveMode, String requested)
+        String requested)
     {
         Map<String, Object> state = new LinkedHashMap<>();
         state.put("atStartup", startupMode.name().toLowerCase(Locale.ROOT)); //$NON-NLS-1$
         if (requested != null)
         {
             state.put("requested", requested); //$NON-NLS-1$
-        }
-        if (startupMode != NativeRenderMode.UNKNOWN && liveMode != NativeRenderMode.UNKNOWN
-            && startupMode != liveMode)
-        {
-            state.put("forcedAtRuntime", true); //$NON-NLS-1$
         }
         return state;
     }

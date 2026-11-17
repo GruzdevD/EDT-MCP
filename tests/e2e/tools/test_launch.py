@@ -7,9 +7,9 @@ launch starts an EDT session in debug mode (default) or regular run mode. It has
 TWO target-selection forms, selected by which params are present (see LaunchTool.execute):
 
   Mode 1 — launchConfigurationName: start any existing EDT debug launch
-           configuration by its EXACT name (runtime client OR an
-           "Attach to 1C:Enterprise Debug Server" config). projectName /
-           applicationId are NOT required in this mode.
+           configuration by its EXACT name (runtime client, an
+           "Attach to 1C:Enterprise Debug Server" config, OR a standalone-server
+           config). projectName / applicationId are NOT required in this mode.
   Mode 2 — projectName + applicationId: legacy path that finds the matching
            runtime-client launch config for that project+application and starts it.
 
@@ -19,6 +19,11 @@ This is a RUNTIME tool. In THIS EDT there is NO running infobase for
 TestConfiguration, NO registered application, and NO pre-created EDT launch
 configuration. Actually starting a session is heavy, spawns a 1C client,
 and is not configured here — so we deliberately do NOT drive a real launch.
+
+The standalone-server start is covered the same way and for one extra reason: it
+needs a configured standalone server, which CI has none of, and starting one would
+leave a running server that the terminate_launch tests read as state. It is verified
+on the EDT stand instead, where the round trip is start -> terminate -> start.
 
 The realistic, CORRECT contract in this environment is that EVERY reachable call
 fails FAST with a CLEAR, ACTIONABLE sentinel that names the missing precondition
@@ -68,6 +73,7 @@ Fixture inventory used (TestConfiguration, English Names): the project itself
 ("TestConfiguration"). It has NO registered application and NO launch config.
 """
 
+import os
 import time
 
 from harness import (
@@ -78,9 +84,152 @@ from harness import (
     assert_ok,
     e2e_test,
     requires_live_infobase,
+    E2ESkip,
     _post,
     PROJECT,
+    calls_aborted,
+    any_launch_running,
+    wait_until_no_running_launch,
 )
+
+
+@e2e_test(tool="launch", kind="read")
+def test_guide_refuses_launch_during_an_update():
+    r = call("get_tool_guide", {"toolName": "launch"})
+    assert_ok(r, "launch serialization guide")
+    assert "busy infobase refuses launch within one second" in r.text, r.text
+    assert "Poll `get_job_status` and launch after completion" in r.text, r.text
+    assert_no_diff("reading the launch guide must leave project sources unchanged")
+
+
+def _check_effective_testing_settings(stored_mode, stored_port, override_mode=None, override_port=None):
+    requires_live_infobase("starts and stops a client to verify effective launch settings")
+    name = "e2e_launch_testing_settings"
+    create_params = {"projectName": PROJECT, "name": name}
+    if stored_mode is not None:
+        create_params["automatedTestingMode"] = stored_mode
+    if stored_port is not None:
+        create_params["automatedTestingPort"] = stored_port
+    created = call("create_launch_config", create_params)
+    assert_ok(created, "save testing settings for launch")
+    try:
+        params = {"launchConfigurationName": name, "mode": "run", "restartIfRunning": True}
+        if override_mode is not None:
+            params["automatedTestingMode"] = override_mode
+        if override_port is not None:
+            params["automatedTestingPort"] = override_port
+        dispatched = False
+        try:
+            launched = call("launch", params)
+            assert_ok(launched, "launch with stored or overridden testing settings")
+            dispatched = True
+            sc = launched.structured
+            assert isinstance(sc, dict) and sc.get("status") == "launching", sc
+            expected_mode = override_mode or stored_mode
+            if expected_mode is None:
+                assert "automatedTestingMode" not in sc, sc
+            else:
+                assert sc.get("automatedTestingMode") == expected_mode, sc
+            if expected_mode == "TESTCLIENT":
+                expected_port = override_port or stored_port or 1538
+                assert sc.get("automatedTestingPort") == expected_port, sc
+            else:
+                assert "automatedTestingPort" not in sc, sc
+        finally:
+            if dispatched and not calls_aborted():
+                deadline = time.monotonic() + 120
+                while not any_launch_running(name):
+                    assert time.monotonic() < deadline, "dispatched client never appeared: " + name
+                stopped = call("terminate_launch", {"launchConfigurationName": name, "force": True})
+                assert_ok(stopped, "stop the client launched by this test")
+                assert wait_until_no_running_launch(name), "client is still running: " + name
+        assert_no_diff("launch settings must not change project sources")
+    finally:
+        if not calls_aborted():
+            deleted = call("delete_launch_config", {"name": name, "confirm": True})
+            assert_ok(deleted, "remove throwaway testing configuration")
+
+
+@e2e_test(tool="launch", kind="action")
+def test_stored_testclient_reports_saved_port_without_override():
+    _check_effective_testing_settings("TESTCLIENT", 1550)
+
+
+@e2e_test(tool="launch", kind="action")
+def test_stored_testclient_reports_default_port_without_override():
+    _check_effective_testing_settings("TESTCLIENT", None)
+
+
+@e2e_test(tool="launch", kind="action")
+def test_testing_override_wins_over_stored_mode_and_port():
+    _check_effective_testing_settings("TESTCLIENT", 1550, "TESTCLIENT", 1540)
+
+
+@e2e_test(tool="launch", kind="action")
+def test_testing_override_switches_stored_manager_to_client():
+    _check_effective_testing_settings("TESTMANAGER", None, "TESTCLIENT", 1540)
+
+
+@e2e_test(tool="launch", kind="action")
+def test_stored_testmanager_reports_mode_without_port():
+    _check_effective_testing_settings("TESTMANAGER", None)
+
+
+@e2e_test(tool="launch", kind="action")
+def test_no_testing_setting_omits_mode_and_port():
+    _check_effective_testing_settings(None, None)
+
+
+@e2e_test(tool="launch", kind="action")
+def test_live_standalone_recovery_launch_reports_running_and_releases_ownership():
+    """Attended smoke check after recovery; interrupt/UI fault injection is unit-tested.
+
+    Set MCP_LIVE_STANDALONE_LAUNCH_CONFIG to a dedicated standalone configuration for
+    PROJECT. To exercise stale recovery, leave its WST state STARTED with no live launch
+    before this call. The operator owns that platform precondition.
+    """
+    requires_live_infobase("starts and stops a dedicated standalone server")
+    config = os.environ.get("MCP_LIVE_STANDALONE_LAUNCH_CONFIG", "").strip()
+    if not config:
+        raise E2ESkip("set MCP_LIVE_STANDALONE_LAUNCH_CONFIG to a dedicated standalone configuration")
+
+    def start_and_observe():
+        result = call("launch", {"launchConfigurationName": config,
+                                 "standaloneServerPortConflict": "cancel"})
+        assert_ok(result, "standalone start after recovery")
+        data = result.structured or {}
+        assert data.get("status") == "running", data
+        assert data.get("mode") == "debug", data
+        assert data.get("project") == PROJECT, data
+        assert data.get("launchConfiguration") == config, data
+        app_id = data.get("applicationId", "")
+        assert app_id.startswith("ServerApplication."), data
+        status = call("debug_status", {})
+        assert_ok(status, "observe the server independently of the launch response")
+        launches = (status.structured or {}).get("launches")
+        assert isinstance(launches, list), status.structured
+        assert any(item.get("launchConfiguration") == config for item in launches), status.structured
+
+    def stop_and_observe(expect_live):
+        stopped = call("terminate_launch", {"launchConfigurationName": config})
+        assert_ok(stopped, "stop only the standalone server this test started")
+        if expect_live:
+            assert "not_found" not in (stopped.text or ""), stopped.text
+        status = call("debug_status", {})
+        assert_ok(status, "confirm the standalone launch has ended")
+        launches = (status.structured or {}).get("launches")
+        assert isinstance(launches, list), status.structured
+        assert not any(item.get("launchConfiguration") == config
+                       for item in launches), status.structured
+
+    try:
+        start_and_observe()
+        stop_and_observe(expect_live=True)
+        # A second start must not be refused by a recovery claim retained after the first.
+        start_and_observe()
+    finally:
+        stop_and_observe(expect_live=False)
+    assert_no_diff("standalone recovery must not change project source")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -696,3 +845,67 @@ def test_live_external_processor_is_actually_launched_with_execute():
     # written into it - that is the acceptance criterion the unit test pins on a mock and this
     # one would have caught for real had applyTo saved the working copy.
     assert_no_diff("launching a processor must not touch the project source")
+
+
+@e2e_test(tool="launch", kind="action")
+def test_unknown_automated_testing_mode_names_native_values():
+    e = assert_error(call("launch", {
+        "launchConfigurationName": "NoSuchLaunchConfig_654_e2e",
+        "automatedTestingMode": "UNKNOWN",
+        "restartIfRunning": True,
+    }), "unknown automated-testing mode must fail before restarting or launching")
+    assert_error_quality(e, names=["automatedTestingMode", "UNKNOWN"],
+                         suggests=["TESTCLIENT", "TESTMANAGER"])
+    assert_no_diff("invalid testing mode must leave the fixture unchanged")
+
+
+@e2e_test(tool="launch", kind="action")
+def test_automated_testing_port_requires_client_mode():
+    e = assert_error(call("launch", {
+        "launchConfigurationName": "NoSuchLaunchConfig_654_e2e",
+        "automatedTestingPort": 1540,
+    }), "port without a testing mode must fail before launch")
+    assert_error_quality(e, names=["automatedTestingPort"],
+                         suggests=["automatedTestingMode=TESTCLIENT", "omit"])
+    assert_no_diff("a refused testing port must leave the fixture unchanged")
+
+
+@e2e_test(tool="launch", kind="action")
+def test_test_manager_refuses_automated_testing_port():
+    e = assert_error(call("launch", {
+        "launchConfigurationName": "NoSuchLaunchConfig_654_e2e",
+        "automatedTestingMode": "TESTMANAGER",
+        "automatedTestingPort": 1540,
+    }), "a manager must not silently ignore a test-client port")
+    assert_error_quality(e, names=["automatedTestingPort"],
+                         suggests=["automatedTestingMode=TESTCLIENT", "omit"])
+    assert_no_diff("a refused manager port must leave the fixture unchanged")
+
+
+@e2e_test(tool="launch", kind="action")
+def test_automated_testing_port_range_is_enforced_before_launch():
+    for port in (0, -1, 65536):
+        e = assert_error(call("launch", {
+            "launchConfigurationName": "NoSuchLaunchConfig_654_e2e",
+            "automatedTestingMode": "TESTCLIENT",
+            "automatedTestingPort": port,
+        }), "out-of-range testing port %s" % port)
+        assert_error_quality(e, names=["automatedTestingPort", "Invalid automatedTestingPort: '%s'." % port],
+                             suggests=["1 to 65535", "TESTCLIENT"])
+        assert_no_diff("invalid testing port must leave the fixture unchanged")
+
+
+@e2e_test(tool="launch", kind="action")
+def test_malformed_automated_testing_port_names_caller_value():
+    for port in ("abc", "1.5", "2147483648", "", True):
+        e = assert_error(call("launch", {
+            "launchConfigurationName": "NoSuchLaunchConfig_654_e2e",
+            "automatedTestingMode": "TESTCLIENT",
+            "automatedTestingPort": port,
+            "restartIfRunning": True,
+        }), "malformed testing port must be refused before launch")
+        assert_error_quality(e, names=["automatedTestingPort"],
+                             suggests=["Use an integer from 1 to 65535", "TESTCLIENT"])
+        raw = "true" if port is True else port
+        assert "Invalid automatedTestingPort: '%s'." % raw in e, e
+        assert_no_diff("a malformed testing port must leave the fixture unchanged")
