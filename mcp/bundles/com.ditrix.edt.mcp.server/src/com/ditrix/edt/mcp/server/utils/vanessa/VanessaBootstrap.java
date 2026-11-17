@@ -225,7 +225,7 @@ public final class VanessaBootstrap
      *
      * @param project the project key
      */
-    static void markVanessaDerived(String project)
+    public static void markVanessaDerived(String project)
     {
         try
         {
@@ -266,7 +266,7 @@ public final class VanessaBootstrap
      * @param epf the absolute epf path to record
      * @throws IOException if the env.sh cannot be read/written
      */
-    static void updateEpfInEnv(Path env, Path epf) throws IOException
+    public static void updateEpfInEnv(Path env, Path epf) throws IOException
     {
         if (env == null || !Files.isRegularFile(env))
         {
@@ -331,12 +331,12 @@ public final class VanessaBootstrap
         {
             Files.createDirectories(parent);
         }
-        Files.writeString(file, fillTemplate(template == null ? "" : template, vars), //$NON-NLS-1$
+        public Files.writeString(file, fillTemplate(template == null ? "" : template, vars), //$NON-NLS-1$
             StandardCharsets.UTF_8);
     }
 
     /** Replaces {@code @KEY@} tokens with their values. Pure. */
-    static String fillTemplate(String template, Map<String, String> vars)
+    public static String fillTemplate(String template, Map<String, String> vars)
     {
         if (template == null)
         {
@@ -620,7 +620,7 @@ public final class VanessaBootstrap
     /**
      * Some VA release zips nest {@link #EPF_FILE} (plus its {@code locales/}) under a
      * top-level folder (e.g. {@code vanessa-automation/}) instead of the archive root.
-     * Lifts the {@code .epf} to the cache root — where {@code epfCacheFile()}/
+     public * Lifts the {@code .epf} to the cache root — where {@code epfCacheFile()}/
      * {@code provisionVanessaBin} expect it — without disturbing release subfolders.
      * Idempotent: no-op once the root copy already exists.
      */
@@ -789,7 +789,7 @@ public final class VanessaBootstrap
     }
 
     /** Whether a download for the project is already in flight. */
-    static boolean isEpfDownloading(String project)
+    public static boolean isEpfDownloading(String project)
     {
         return EPF_DOWNLOADS.containsKey(project);
     }
@@ -829,7 +829,7 @@ public final class VanessaBootstrap
     }
 
     /** Job id of the in-flight download for the project, or {@code null}. */
-    static String epfDownloadJobId(String project)
+    public static String epfDownloadJobId(String project)
     {
         String id = EPF_DOWNLOADS.get(project);
         return id == null || id.isEmpty() ? null : id;
@@ -981,7 +981,7 @@ public final class VanessaBootstrap
     }
 
     /** Recursively copies a directory tree; existing target files are kept when {@code overwrite} is false. */
-    static void copyDir(Path src, Path dst, boolean overwrite) throws IOException
+    public static void copyDir(Path src, Path dst, boolean overwrite) throws IOException
     {
         if (!Files.isDirectory(src))
         {

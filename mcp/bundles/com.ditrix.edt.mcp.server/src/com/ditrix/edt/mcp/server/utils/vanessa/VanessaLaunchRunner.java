@@ -38,7 +38,7 @@ public final class VanessaLaunchRunner
 {
     /** Terminal VA status/log file names, relative to the out dir. */
     static final String STATUS_FILE = VanessaRunArtifacts.STATUS_FILE;
-    static final String LOG_FILE = VanessaRunArtifacts.LOG_FILE;
+    public static final String LOG_FILE = VanessaRunArtifacts.LOG_FILE;
     static final String JUNIT_SUBPATH = "junit/" + VanessaRunArtifacts.JUNIT_FILE; //$NON-NLS-1$
 
     /**

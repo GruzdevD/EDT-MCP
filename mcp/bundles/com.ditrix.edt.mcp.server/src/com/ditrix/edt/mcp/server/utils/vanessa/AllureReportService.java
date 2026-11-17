@@ -338,7 +338,7 @@ public final class AllureReportService
     }
 
     /** Last (highest) lines of an output string, for error messages. */
-    static String tail(String output)
+    public static String tail(String output)
     {
         if (output == null || output.isEmpty())
         {

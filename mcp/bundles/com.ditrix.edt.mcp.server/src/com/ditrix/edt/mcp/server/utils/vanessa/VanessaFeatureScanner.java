@@ -26,7 +26,7 @@ import java.util.stream.Stream;
  * feed {@code vanessa_list_features} / {@code vanessa_get_feature} without
  * pulling in a full gherkin parser dependency.
  */
-final class VanessaFeatureScanner
+public final class VanessaFeatureScanner
 {
     private VanessaFeatureScanner()
     {
@@ -98,7 +98,7 @@ final class VanessaFeatureScanner
      *         {@code {name, tags[], steps[]}} (may be empty)
      * @throws IOException if the file cannot be read
      */
-    static Map<String, Object> parse(Path path) throws IOException
+    public static Map<String, Object> parse(Path path) throws IOException
     {
         Map<String, Object> out = new LinkedHashMap<>();
         String featureName = null;

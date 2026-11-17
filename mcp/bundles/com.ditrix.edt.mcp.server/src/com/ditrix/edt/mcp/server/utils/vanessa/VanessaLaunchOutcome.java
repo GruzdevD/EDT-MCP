@@ -36,7 +36,7 @@ public final class VanessaLaunchOutcome
     /** Absolute junit.xml path expected for this run. */
     public final String junitReportPath;
 
-    VanessaLaunchOutcome(boolean success, String rawResponse, long id, String project,
+    public VanessaLaunchOutcome(boolean success, String rawResponse, long id, String project,
         String feature, String configuration, String outDir, String junitReportPath)
     {
         this.success = success;

@@ -366,7 +366,7 @@ public final class PluginSelfUpdate
         {
             if (lines.get(i).trim().startsWith(prefix))
             {
-                lines.set(i, bundlesInfoLine(symbolic, version, jarPath));
+                public lines.set(i, bundlesInfoLine(symbolic, version, jarPath));
                 Files.write(path, lines, StandardCharsets.UTF_8);
                 return 1;
             }

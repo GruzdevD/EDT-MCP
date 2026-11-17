@@ -41,9 +41,9 @@ public final class VanessaRunArtifacts
 
     /** Terminal VA status/log file names (absolute, under the out dir). */
     static final String LOG_FILE = "BDD.log"; //$NON-NLS-1$
-    static final String STATUS_FILE = "BDDStatus.log"; //$NON-NLS-1$
+    public static final String STATUS_FILE = "BDDStatus.log"; //$NON-NLS-1$
     static final String JUNIT_DIR = "junit"; //$NON-NLS-1$
-    static final String JUNIT_FILE = "junit.xml"; //$NON-NLS-1$
+    public static final String JUNIT_FILE = "junit.xml"; //$NON-NLS-1$
     static final String ALLURE_DIR = "allure"; //$NON-NLS-1$
 
     /** Vanessa /C startup option prefix consumed by vanessa-automation.epf. */
@@ -64,7 +64,7 @@ public final class VanessaRunArtifacts
         /** Absolute out directory (logs, junit, allure live here). */
         public final String outDir;
 
-        Result(String vaparamsOverride, String outDir)
+        public Result(String vaparamsOverride, String outDir)
         {
             this.vaparamsOverride = vaparamsOverride;
             this.outDir = outDir;
@@ -81,7 +81,7 @@ public final class VanessaRunArtifacts
      */
     public static Result generate(VanessaProjectConfig config, String featureTarget) throws IOException
     {
-        return generate(config, featureTarget, GenerateOptions.EMPTY);
+        public return generate(config, featureTarget, GenerateOptions.EMPTY);
     }
 
     /**

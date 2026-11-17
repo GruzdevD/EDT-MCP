@@ -171,7 +171,7 @@ public final class VanessaProjectConfig
      * @param userHome the user home directory
      * @return the candidate paths in priority order (never {@code null}, never empty)
      */
-    static List<Path> resolveEnvCandidates(Path projectRoot, String project, String userHome)
+    public static List<Path> resolveEnvCandidates(Path projectRoot, String project, String userHome)
     {
         List<Path> candidates = new ArrayList<>();
         if (projectRoot != null)
@@ -193,7 +193,7 @@ public final class VanessaProjectConfig
      * @param project project key
      * @return the absolute project root, or {@code null}
      */
-    static Path projectRoot(String project)
+    public static Path projectRoot(String project)
     {
         try
         {
