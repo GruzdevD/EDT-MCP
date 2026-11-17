@@ -4272,6 +4272,80 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
+    "description": "Register an EXISTING EDT project directory (a git worktree, a second checkout, a copy) that already contains a .project file into the workspace as a LINKED project: files stay in place, nothing is copied or moved. Use it to give a parallel task its own copy of a configuration project (a slot): point path at the worktree directory, optionally rename it via projectName. The project is also EGit-shared (Team > Share Project equivalent) when a .git is found at or above the directory, so it resolves to its OWN repository/branch; result reports gitConnected, gitRepository, gitBranch and gitWarning. To start an EMPTY new project use create_project; to build a project from a configuration XML dump use import_configuration_from_xml. Parameters and examples: get_tool_guide('import_project').",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "description": "ABSOLUTE path to the directory that contains .project (used in place, linked - not copied).",
+          "type": "string"
+        },
+        "projectName": {
+          "description": "Optional new name for the project in the workspace. Needed when the .project name already exists in the workspace (e.g. the main checkout is imported). The rename is workspace-level; the on-disk .project file is NOT rewritten.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "import_project",
+    "outputSchema": {
+      "properties": {
+        "action": {
+          "description": "One of 'imported' (registered and opened), 'opened' (existed closed, now open), 'alreadyOpen' (nothing to do) or 'importing' (still running past the wait window).",
+          "type": "string"
+        },
+        "gitBranch": {
+          "description": "Current branch of the shared repository, when known.",
+          "type": "string"
+        },
+        "gitConnected": {
+          "description": "Whether the project is shared with EGit (Team > Share Project equivalent).",
+          "type": "boolean"
+        },
+        "gitRepository": {
+          "description": "Repository path the project is shared with, when known.",
+          "type": "string"
+        },
+        "gitWarning": {
+          "description": "Present when EGit sharing was skipped or failed (fail-open).",
+          "type": "string"
+        },
+        "location": {
+          "description": "Absolute directory the project is linked from.",
+          "type": "string"
+        },
+        "message": {
+          "description": "Human-readable status message.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Workspace name of the project.",
+          "type": "string"
+        },
+        "renamed": {
+          "description": "Whether projectName renamed the project.",
+          "type": "boolean"
+        },
+        "state": {
+          "description": "'ready' when lifecycle STARTED was reached, 'created' otherwise.",
+          "type": "string"
+        },
+        "success": {
+          "description": "Whether the operation succeeded",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Create a NEW EDT project from a 1C binary file: .cf (configuration), .cfe (extension; baseProjectName required) or .epf/.erf (external data processor/report). Needs an installed 1C:Enterprise platform. Runs in background: an unfinished call returns a jobId - poll get_job_status, do not call again. Parameters and examples: get_tool_guide('import_project_from_file').",
     "inputSchema": {
       "properties": {

@@ -28,6 +28,7 @@ public final class HostToolCapabilities
         define("export_configuration_to_xml", Capability.HEADLESS, "Core/file service path; platform readiness and ordinary tool preconditions still apply");
         define("import_configuration_from_xml", Capability.HEADLESS, "Core/file service path; platform readiness and ordinary tool preconditions still apply");
         define("import_project_from_file", Capability.HEADLESS, "Core/file service path; platform readiness and ordinary tool preconditions still apply");
+        define("import_project", Capability.HEADLESS, "Core/file service path; registers an existing project directory as LINKED, ordinary tool preconditions still apply");
         define("build_external_objects", Capability.HEADLESS, "Core/file service path; platform readiness and ordinary tool preconditions still apply");
         define("export_configuration_to_file", Capability.HEADLESS, "Core prepare/dump uses an empty ExecutionContext; no mandatory shell handoff");
         define("delete_project", Capability.HEADLESS, "EDT 2026.2.2 real headless host previewed and confirmed deletion of a disposable project; its directory was removed");
