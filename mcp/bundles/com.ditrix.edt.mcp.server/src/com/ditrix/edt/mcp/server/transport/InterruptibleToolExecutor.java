@@ -42,10 +42,12 @@ public class InterruptibleToolExecutor
      *
      * @param exchange the HTTP exchange
      * @param requestBody the request body
+     * @param client authenticated loopback client, or null for legacy admission
      * @return the response, or {@code null} if the response was already sent (interrupted)
      * @throws Exception if tool execution failed (propagated to the caller for error mapping)
      */
-    public String execute(HttpExchange exchange, String requestBody) throws Exception // NOSONAR propagates checked exceptions across the reflective boundary by design
+    public String execute(HttpExchange exchange, String requestBody, HttpTransport.AuthenticatedClient client)
+        throws Exception // NOSONAR propagates checked exceptions across the reflective boundary by design
     {
         // Extract request ID and tool name for ActiveToolCall via the shared parser.
         JsonRpcRequest request = protocolHandler.parse(requestBody);
@@ -65,7 +67,7 @@ public class InterruptibleToolExecutor
         Thread executionThread = new Thread(() -> {
             try
             {
-                resultContainer[0] = protocolHandler.processRequest(requestBody);
+                resultContainer[0] = protocolHandler.processRequest(requestBody, client);
             }
             catch (Exception e)
             {

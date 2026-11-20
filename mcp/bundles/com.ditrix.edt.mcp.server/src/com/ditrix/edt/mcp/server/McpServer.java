@@ -222,6 +222,12 @@ public class McpServer
         return running;
     }
 
+    /** Whether this listener was actually bound to loopback, regardless of later preference edits. */
+    public synchronized boolean isLoopbackListener()
+    {
+        return running && server != null && server.getAddress().getAddress().isLoopbackAddress();
+    }
+
     /**
      * Returns the current port.
      * 

@@ -9,6 +9,9 @@ package com.ditrix.edt.mcp.server.transport;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.preferences.PreferenceConstants;
@@ -62,26 +65,91 @@ public final class HttpTransport
      * either as {@code "Bearer <token>"} or the raw token value.
      *
      * @param exchange the HTTP exchange
-     * @return true if authorized (or auth disabled), false otherwise
+     * @return admission decision and, for a protected loopback call, its authenticated client
      */
-    public static boolean isAuthorized(HttpExchange exchange)
+    public static Admission authorize(HttpExchange exchange)
     {
         String token = configuredAuthToken();
         if (token == null || token.isEmpty())
         {
-            return true; // authentication disabled (default)
+            return new Admission(true, null); // legacy admission, not an authenticated identity
         }
         String header = exchange.getRequestHeaders().getFirst("Authorization"); //$NON-NLS-1$
         if (header == null)
         {
-            return false;
+            return new Admission(false, null);
         }
         // Accept "Bearer <token>" (scheme case-insensitive per RFC 6750) or the raw token.
         String trimmed = header.trim();
         String presented = trimmed.regionMatches(true, 0, "Bearer ", 0, 7) //$NON-NLS-1$
             ? trimmed.substring(7).trim()
             : trimmed;
-        return constantTimeEquals(token, presented);
+        return authenticate(token, presented, exchange.getLocalAddress(), exchange.getRemoteAddress());
+    }
+
+    static Admission authenticate(String token, String presented, java.net.InetSocketAddress local,
+        java.net.InetSocketAddress remote)
+    {
+        boolean allowed = constantTimeEquals(token, presented);
+        boolean loopback = local != null && local.getAddress() != null && local.getAddress().isLoopbackAddress()
+            && remote != null && remote.getAddress() != null && remote.getAddress().isLoopbackAddress();
+        return new Admission(allowed, allowed && loopback && !token.isBlank() ? new AuthenticatedClient(token) : null);
+    }
+
+    /** HTTP admission, independent of any caller-supplied MCP session ID. */
+    public record Admission(boolean allowed, AuthenticatedClient client) { }
+
+    /** Opaque identity from successful authentication. Never stores or returns the raw token. */
+    public static final class AuthenticatedClient
+    {
+        private static final byte[] SALT = new SecureRandom().generateSeed(32);
+        private final byte[] digest;
+
+        private AuthenticatedClient(String token)
+        {
+            digest = fingerprint(token);
+        }
+
+        /** Snapshot calls require a dedicated loopback listener and a still-current credential. */
+        public boolean isCurrent()
+        {
+            Activator activator = Activator.getDefault();
+            return activator != null
+                && activator.getMcpServer() != null && activator.getMcpServer().isLoopbackListener()
+                && !activator.getPreferenceStore().getBoolean(PreferenceConstants.PREF_ALLOW_REMOTE_ACCESS)
+                && matches(configuredAuthToken());
+        }
+
+        boolean matches(String token)
+        {
+            return token != null && !token.isBlank() && MessageDigest.isEqual(digest, fingerprint(token));
+        }
+
+        @Override
+        public boolean equals(Object other)
+        {
+            return other instanceof AuthenticatedClient client && MessageDigest.isEqual(digest, client.digest);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return java.util.Arrays.hashCode(digest);
+        }
+
+        private static byte[] fingerprint(String token)
+        {
+            try
+            {
+                MessageDigest sha = MessageDigest.getInstance("SHA-256"); //$NON-NLS-1$
+                sha.update(SALT);
+                return sha.digest(token.getBytes(StandardCharsets.UTF_8));
+            }
+            catch (NoSuchAlgorithmException e)
+            {
+                throw new IllegalStateException(e);
+            }
+        }
     }
 
     private static String configuredAuthToken()

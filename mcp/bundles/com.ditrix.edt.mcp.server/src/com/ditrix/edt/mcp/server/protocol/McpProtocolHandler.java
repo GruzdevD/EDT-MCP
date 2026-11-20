@@ -23,6 +23,7 @@ import com.ditrix.edt.mcp.server.protocol.jsonrpc.ToolCallResult;
 import com.ditrix.edt.mcp.server.protocol.jsonrpc.ToolsListResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
+import com.ditrix.edt.mcp.server.transport.HttpTransport.AuthenticatedClient;
 import com.ditrix.edt.mcp.server.utils.DcsXmlCodec;
 import com.ditrix.edt.mcp.server.utils.GuideRenderer;
 import com.ditrix.edt.mcp.server.utils.InfobaseAuthDialogSuppressor;
@@ -135,6 +136,46 @@ public class McpProtocolHandler
      *         notification answered with 202 Accepted)
      */
     public String processRequest(String requestBody)
+    {
+        return processRequest(requestBody, null);
+    }
+
+    private static final ThreadLocal<AuthenticatedClient> CURRENT_CLIENT = new ThreadLocal<>();
+
+    /** Authentication of the current call, never inherited by a worker or in-process request. */
+    public static AuthenticatedClient currentAuthenticatedClient()
+    {
+        return CURRENT_CLIENT.get();
+    }
+
+    /** Handle a call with the identity proved by the HTTP transport. */
+    public String processRequest(String requestBody, AuthenticatedClient client)
+    {
+        AuthenticatedClient previous = CURRENT_CLIENT.get();
+        setClient(client);
+        try
+        {
+            return processRequestAndRecord(requestBody);
+        }
+        finally
+        {
+            setClient(previous);
+        }
+    }
+
+    private static void setClient(AuthenticatedClient client)
+    {
+        if (client == null)
+        {
+            CURRENT_CLIENT.remove();
+        }
+        else
+        {
+            CURRENT_CLIENT.set(client);
+        }
+    }
+
+    private String processRequestAndRecord(String requestBody)
     {
         long startNanos = System.nanoTime();
         // Parse once at the choke point; parse() swallows a JSON syntax error and
