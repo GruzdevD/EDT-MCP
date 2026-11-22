@@ -10,6 +10,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
 
 import java.io.IOException;
@@ -78,23 +79,22 @@ public class WindowsSourceTreeTest
         try (WindowsSourceTree.Directory project = WindowsSourceTree.load().openProject(root.toString()))
         {
             assertEquals(List.of(new WindowsSourceTree.Entry("module", true, false)), project.entries(10));
-            Files.move(folder, root.resolve("moved"));
+            // Remove the empty child while keeping the enumerated project handle open.
+            Files.delete(folder);
             Process command = new ProcessBuilder("cmd.exe", "/d", "/c", "mklink", "/J", folder.toString(),
                 external.toString()).redirectErrorStream(true).start();
-            try
+            if (!command.waitFor(15, TimeUnit.SECONDS))
             {
-                if (!command.waitFor(15, TimeUnit.SECONDS))
-                {
-                    command.destroyForcibly();
-                    throw new IOException("mklink timed out");
-                }
-                assertEquals("Windows junction fixture must be created", 0, command.exitValue());
-                assertSanitized(assertThrows(IOException.class, () -> project.child("module")), external);
+                command.destroyForcibly();
+                throw new IOException("mklink timed out");
             }
-            finally
-            {
-                Files.deleteIfExists(folder);
-            }
+            assertEquals("Windows junction fixture must be created", 0, command.exitValue());
+            assertTrue("Fixture junction must point outside the project", Files.isSameFile(folder, external));
+            assertSanitized(assertThrows(IOException.class, () -> project.child("module")), external);
+        }
+        finally
+        {
+            Files.deleteIfExists(folder);
         }
     }
 

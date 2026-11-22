@@ -1252,6 +1252,23 @@ public class McpProtocolHandlerTest
     }
 
     @Test
+    public void testSnapshotPayloadsStayOutOfHistoryButReachTheCaller()
+    {
+        String name = "inspect_project_snapshot";
+        registry.register(new StubJsonTool(name, "{\"patch\":\"synthetic private source\"}"));
+        RecordingSpyHandler handler = new RecordingSpyHandler();
+        String result = handler.processRequest(buildToolCallRequest(1, name, null));
+        assertTrue(result.contains("synthetic private source"));
+        assertEquals(name, handler.toolNames.get(0));
+        assertNull(handler.requests.get(0));
+        assertNull(handler.responses.get(0));
+        assertTrue(McpProtocolHandler.isSnapshotCall(buildToolCallRequest(2, "capture_project_snapshot", null)));
+        String escaped = buildToolCallRequest(2, name, null).replace("inspect_", "inspect\\u005f");
+        assertTrue(McpProtocolHandler.isSnapshotCall(escaped));
+        assertFalse(McpProtocolHandler.isSnapshotCall(buildToolCallRequest(3, "list_projects", null)));
+    }
+
+    @Test
     public void testNullNotificationRecordedAsOk()
     {
         // A notification (notifications/initialized) is answered with 202 and no body,

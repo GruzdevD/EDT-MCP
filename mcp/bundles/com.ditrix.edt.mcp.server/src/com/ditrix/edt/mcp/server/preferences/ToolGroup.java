@@ -19,13 +19,14 @@ import java.util.Map;
 public enum ToolGroup
 {
     CORE("core", "Core / Project", //$NON-NLS-1$ //$NON-NLS-2$
-        "Essential server, project, configuration, history, and XML export/import tools", //$NON-NLS-1$
+        "Essential server, plugin update, project, configuration, history, and XML export/import tools", //$NON-NLS-1$
         "get_edt_version", "get_server_status", "get_tool_guide", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "list_toolsets", "enable_toolset", "list_projects", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "get_configuration_properties", //$NON-NLS-1$
         "clean_project", "revalidate_objects", "resync_to_disk", "get_check_description", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "export_configuration_to_xml", "import_configuration_from_xml", //$NON-NLS-1$ //$NON-NLS-2$
-        "delete_project", "create_project", "get_event_log", "get_mcp_history"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "delete_project", "create_project", "get_event_log", "get_mcp_history", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "plugin_check_for_update", "plugin_update"), //$NON-NLS-1$ //$NON-NLS-2$
 
     PROBLEMS("problems", "Errors & Problems", //$NON-NLS-1$ //$NON-NLS-2$
         "Error reporting, validation, and workspace markers (bookmarks, tasks)", //$NON-NLS-1$
@@ -47,11 +48,12 @@ public enum ToolGroup
             + "background jobs, and Workmate", //$NON-NLS-1$
         "get_applications", "list_configurations", "create_launch_config", "delete_launch_config", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "create_infobase", "delete_infobase", "update_database", "launch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "terminate_launch", "run_yaxunit_tests", "ask_workmate", "get_job_status", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "terminate_launch", "list_yaxunit_tests", "run_yaxunit_tests", "ask_workmate", "get_job_status", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
         "cancel_job", "build_external_objects", "set_infobase_credentials", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "vanessa_list_launches", "vanessa_list_features", "vanessa_get_feature", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         "vanessa_run_feature", "vanessa_run_by_tags", "vanessa_get_execution_status", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "vanessa_get_test_report", "vanessa_get_log", "vanessa_get_artifacts"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "vanessa_get_test_report", "vanessa_get_log", "vanessa_get_artifacts", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "vanessa_open_allure_report", "vanessa_doctor", "vanessa_setup"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
     DEBUG("debug", "Debugging", //$NON-NLS-1$ //$NON-NLS-2$
         "Breakpoints, stepping, variables, expression evaluation, and profiling", //$NON-NLS-1$
@@ -87,8 +89,9 @@ public enum ToolGroup
      */
     COMPARISON("comparison", "Comparison", //$NON-NLS-1$ //$NON-NLS-2$
         "Three-way configuration comparison: start one against two git revisions, expand a node," //$NON-NLS-1$
-            + " and read or author the merge-rules file", //$NON-NLS-1$
-        "compare_configurations", "get_comparison_node", "merge_rules"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " read or author merge rules, and inspect retained project sources", //$NON-NLS-1$
+        "compare_configurations", "get_comparison_node", "merge_rules", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "capture_project_snapshot", "inspect_project_snapshot"), //$NON-NLS-1$ //$NON-NLS-2$
 
     /**
      * Git tools. The {@code git} command tool ships DISABLED by default, and this tree is the UI its

@@ -220,6 +220,66 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
+    "description": "Capture HEAD, index, and disk versions of an authorized EDT project's sources for review without a local clone. Read the result with inspect_project_snapshot. Full parameters and examples: call get_tool_guide('capture_project_snapshot').",
+    "inputSchema": {
+      "properties": {
+        "includedProjects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "capture_project_snapshot",
+    "outputSchema": {
+      "properties": {
+        "expiresAt": {
+          "type": "string"
+        },
+        "modelStatus": {
+          "enum": [
+            "verified",
+            "diverged",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "projects": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "snapshotId": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "verified": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Rebuild an EDT project from the on-disk src/ files and revalidate everything. Direction DISK -> MODEL; slow, and it DISCARDS unsaved in-memory model edits - save first. For one externally-edited object prefer revalidate_objects; for the opposite direction see resync_to_disk. Parameters and examples: get_tool_guide('clean_project').",
     "inputSchema": {
       "properties": {
@@ -2958,10 +3018,113 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
+    "description": "Read an immutable manifest or diff page from capture_project_snapshot, or compare two retained snapshots. Full parameters and examples: call get_tool_guide('inspect_project_snapshot').",
+    "inputSchema": {
+      "properties": {
+        "compareTo": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "entryId": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "snapshotId": {
+          "type": "string"
+        },
+        "view": {
+          "enum": [
+            "manifest",
+            "diff"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshotId",
+        "view"
+      ],
+      "type": "object"
+    },
+    "name": "inspect_project_snapshot",
+    "outputSchema": {
+      "properties": {
+        "compareTo": {
+          "type": "string"
+        },
+        "entries": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "expiresAt": {
+          "type": "string"
+        },
+        "modelStatus": {
+          "enum": [
+            "verified",
+            "diverged",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "nextCursor": {
+          "type": "string"
+        },
+        "projects": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "snapshotId": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "view": {
+          "enum": [
+            "manifest",
+            "diff"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Start a 1C application in EDT debug (default) or run mode. An already-running session is NOT relaunched - the call short-circuits with alreadyRunning:true; restartIfRunning=true instead TERMINATES that live session first. Parameters and examples: get_tool_guide('launch').",
     "inputSchema": {
       "properties": {
         "applicationId": {
+          "type": "string"
+        },
+        "automatedTestingMode": {
+          "enum": [
+            "TESTMANAGER",
+            "TESTCLIENT"
+          ],
           "type": "string"
         },
         "externalInfobaseChanges": {
@@ -3018,6 +3181,9 @@
         },
         "attach": {
           "type": "boolean"
+        },
+        "automatedTestingMode": {
+          "type": "string"
         },
         "configurationType": {
           "type": "string"
@@ -3337,6 +3503,28 @@
   },
   {
     "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Enumerate YAXUnit test suites (common modules that register a test set via 'ЮТТесты...ДобавитьТестовыйНабор(...).ДобавитьТест(...)') and the tests within each suite for a project. Returns JSON: {project, count, testCount, suites:[{moduleName, modulePath, moduleType, parentName, tests:[{name}]}]}. Feed a whole suite's moduleName into `modules`, or individual `Module.Method` names into `tests`, of `run_yaxunit_tests` to run at that granularity. Parameters and examples: get_tool_guide('list_yaxunit_tests').",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "projectName": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_yaxunit_tests",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
       "destructiveHint": true,
       "openWorldHint": false,
       "readOnlyHint": false
@@ -3505,6 +3693,112 @@
             "type": "string"
           },
           "type": "array"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Check whether a newer build of this plugin is published on its git repo: fetches the update-site branch (which holds the built com.ditrix.edt.mcp.server_<version>.jar) and compares it with the version running in EDT. Returns installedVersion, availableVersion and updateAvailable. Authenticates with the project git credentials, so the private repo stays private. When updateAvailable is true, run plugin_update to apply. Parameters and examples: get_tool_guide('plugin_check_for_update').",
+    "inputSchema": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "repositoryUrl": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "plugin_check_for_update",
+    "outputSchema": {
+      "properties": {
+        "availableVersion": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "installedVersion": {
+          "type": "string"
+        },
+        "jar": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "updateAvailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Deploy the newest published build of this plugin over git: fetches the update-site branch, installs the new com.ditrix.edt.mcp.server_<version>.jar into ~/.p2/pool/plugins/ and rewrites bundles.info. Returns the new version and the installed jar path; the change takes effect after an EDT restart. Run plugin_check_for_update first to confirm an update is available. Parameters and examples: get_tool_guide('plugin_update').",
+    "inputSchema": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "repositoryUrl": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "plugin_update",
+    "outputSchema": {
+      "properties": {
+        "bundlesInfo": {
+          "type": "string"
+        },
+        "installedVersion": {
+          "type": "string"
+        },
+        "jar": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "newVersion": {
+          "type": "string"
+        },
+        "restartRequired": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "target": {
+          "type": "string"
         }
       },
       "required": [
@@ -4681,6 +4975,597 @@
       "type": "object"
     },
     "name": "validate_xdto_package",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Read-only readiness report for a project's Vanessa Automation environment (layout, env.sh, VAParams.json, the vanessa-automation.epf runtime, Allure CLI). Does not download or change anything. Use vanessa_setup to provision. Parameters and examples: get_tool_guide('vanessa_doctor').",
+    "inputSchema": {
+      "properties": {
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_doctor",
+    "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "List the artifacts a Vanessa Automation run produced in its out dir: junit report, Allure files, screenshots and the run log, each with a size and a coarse kind. Address the dir by launchId or absolute outDir. Parameters and examples: get_tool_guide('vanessa_get_artifacts').",
+    "inputSchema": {
+      "properties": {
+        "launchId": {
+          "type": "integer"
+        },
+        "outDir": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "vanessa_get_artifacts",
+    "outputSchema": {
+      "properties": {
+        "artifacts": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "outDir": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Poll the execution status of a Vanessa Automation BDD run started by vanessa_run_feature. Reads VA's BDDStatus.log artifact, so a run is 'running' until that file carries a numeric verdict (0 = passed). Returns running/passed/failed plus the junit path. Parameters and examples: get_tool_guide('vanessa_get_execution_status').",
+    "inputSchema": {
+      "properties": {
+        "launchId": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "launchId"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_get_execution_status",
+    "outputSchema": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "feature": {
+          "type": "string"
+        },
+        "junitReportPath": {
+          "type": "string"
+        },
+        "launchId": {
+          "type": "integer"
+        },
+        "project": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Read and parse a Vanessa Automation .feature file: the Feature headline, feature-level tags, each scenario's name/tags/steps, and the raw source. 'path' is an absolute path from vanessa_list_features. Parameters and examples: get_tool_guide('vanessa_get_feature').",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_get_feature",
+    "outputSchema": {
+      "properties": {
+        "feature": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "raw": {
+          "type": "string"
+        },
+        "scenarios": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Read lines from a Vanessa Automation run log (BDD.log). Address it by launchId (reuses the run's out dir) or by absolute logPath; page big logs with offsetLines/limit. Returns the lines, offsets and a 'more' flag. Parameters and examples: get_tool_guide('vanessa_get_log').",
+    "inputSchema": {
+      "properties": {
+        "launchId": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "logPath": {
+          "type": "string"
+        },
+        "offsetLines": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "vanessa_get_log",
+    "outputSchema": {
+      "properties": {
+        "lines": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "more": {
+          "type": "boolean"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "returned": {
+          "type": "integer"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "totalLines": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Parse a Vanessa Automation junit.xml report into a structured summary: per-suite counts, per-test status (passed/failed/error/skipped) and an overall verdict. Pass junitReportPath directly, or launchId to reuse the path recorded by vanessa_run_feature. Parameters and examples: get_tool_guide('vanessa_get_test_report').",
+    "inputSchema": {
+      "properties": {
+        "detail": {
+          "enum": [
+            "summary",
+            "tests",
+            "steps"
+          ],
+          "type": "string"
+        },
+        "junitReportPath": {
+          "type": "string"
+        },
+        "launchId": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "vanessa_get_test_report",
+    "outputSchema": {
+      "properties": {
+        "report": {
+          "type": "object"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "List the Vanessa Automation .feature files under a project (or an explicit directory): each entry carries the path, the Feature: headline and the feature-level tags, plus a count. Use a returned path with vanessa_get_feature or vanessa_run_feature. Parameters and examples: get_tool_guide('vanessa_list_features').",
+    "inputSchema": {
+      "properties": {
+        "dir": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_list_features",
+    "outputSchema": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "features": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "root": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "List EDT launch configurations suitable for launching a Vanessa Automation BDD run (optionally filtered to a project). Returns each configuration's name, project and a 'vanessa' hint (name looks like a BDD/vanessa config). Use the returned name with vanessa_run_feature. Parameters and examples: get_tool_guide('vanessa_list_launches').",
+    "inputSchema": {
+      "properties": {
+        "projectFilter": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "vanessa_list_launches",
+    "outputSchema": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "launches": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Generate and open the Allure report of a Vanessa Automation BDD run. Address the run by launchId (from vanessa_run_feature) or absolute outDir. Generates the static report from the raw Allure results via the allure commandline, serves it over loopback and opens it in the in-EDT Allure Report view (or the OS browser when detached). Parameters and examples: get_tool_guide('vanessa_open_allure_report').",
+    "inputSchema": {
+      "properties": {
+        "allureBin": {
+          "type": "string"
+        },
+        "detached": {
+          "type": "boolean"
+        },
+        "generate": {
+          "type": "boolean"
+        },
+        "launchId": {
+          "type": "integer"
+        },
+        "outDir": {
+          "type": "string"
+        },
+        "reportDir": {
+          "type": "string"
+        },
+        "resultsDir": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "vanessa_open_allure_report",
+    "outputSchema": {
+      "properties": {
+        "detached": {
+          "type": "boolean"
+        },
+        "outDir": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "reportDir": {
+          "type": "string"
+        },
+        "resultsDir": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Launch a Vanessa Automation BDD run limited to scenarios/features carrying a given tag (sets the VAParams tag filter, generates the run artifacts, and starts VA_Runner on the project's EDT launch configuration). Returns a launchId for vanessa_get_execution_status / vanessa_get_test_report, like vanessa_run_feature. Parameters and examples: get_tool_guide('vanessa_run_by_tags').",
+    "inputSchema": {
+      "properties": {
+        "featureDir": {
+          "type": "string"
+        },
+        "launchConfigurationName": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "tags"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_run_by_tags",
+    "outputSchema": {
+      "properties": {
+        "configuration": {
+          "type": "string"
+        },
+        "feature": {
+          "type": "string"
+        },
+        "junitReportPath": {
+          "type": "string"
+        },
+        "launchId": {
+          "type": "integer"
+        },
+        "outDir": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "tags": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Launch a Vanessa Automation BDD run on a project (reads the out-of-repo env.sh at ~/.1c-tools/vanessa/projects/<project>/env.sh, generates the VAParams/junit run artifacts, and starts the VA_Runner external object via the project's EDT launch configuration). Returns a launchId for vanessa_get_execution_status / vanessa_get_test_report; poll that status until it leaves 'running'. Parameters and examples: get_tool_guide('vanessa_run_feature').",
+    "inputSchema": {
+      "properties": {
+        "allure": {
+          "type": "boolean"
+        },
+        "asyncSteps": {
+          "type": "boolean"
+        },
+        "feature": {
+          "type": "string"
+        },
+        "launchConfigurationName": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "reportDir": {
+          "type": "string"
+        },
+        "retries": {
+          "type": "integer"
+        },
+        "scenarios": {
+          "type": "string"
+        },
+        "screenshotsOnError": {
+          "type": "boolean"
+        },
+        "tagsFilter": {
+          "type": "string"
+        },
+        "tagsIgnore": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_run_feature",
+    "outputSchema": {
+      "properties": {
+        "configuration": {
+          "type": "string"
+        },
+        "feature": {
+          "type": "string"
+        },
+        "junitReportPath": {
+          "type": "string"
+        },
+        "launchId": {
+          "type": "integer"
+        },
+        "options": {
+          "type": "object"
+        },
+        "outDir": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Turnkey provisioning of a project's Vanessa Automation environment: creates .vanessa/ (env.sh, VAParams.json, features/, out/) and downloads the vanessa-automation.epf runtime (plus the optional Allure CLI) as a background job pollable with get_job_status. Idempotent: re-running never overwrites an edited env.sh. Use vanessa_doctor to see what is still missing. Parameters and examples: get_tool_guide('vanessa_setup').",
+    "inputSchema": {
+      "properties": {
+        "installAllure": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "type": "object"
+    },
+    "name": "vanessa_setup",
     "outputSchema": null
   },
   {

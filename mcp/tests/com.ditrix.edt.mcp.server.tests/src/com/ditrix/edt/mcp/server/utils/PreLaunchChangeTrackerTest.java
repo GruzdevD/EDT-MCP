@@ -14,8 +14,11 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.matches;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -728,9 +731,11 @@ public class PreLaunchChangeTrackerTest
 
         productionStore.save(project, "fp-2");
         verify(project).setPersistentProperty(PreLaunchChangeTracker.FINGERPRINT_PROPERTY, "fp-2");
+        verify(project, never()).setPersistentProperty(eq(PreLaunchChangeTracker.PREP_TIMESTAMP_PROPERTY), any());
+
+        productionStore.touchPrepared(project);
         verify(project).setPersistentProperty(
-            org.mockito.ArgumentMatchers.eq(PreLaunchChangeTracker.PREP_TIMESTAMP_PROPERTY),
-            org.mockito.ArgumentMatchers.matches("\\d+"));
+            eq(PreLaunchChangeTracker.PREP_TIMESTAMP_PROPERTY), matches("\\d+"));
 
         productionStore.clear(project);
         verify(project).setPersistentProperty(PreLaunchChangeTracker.FINGERPRINT_PROPERTY, null);

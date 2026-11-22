@@ -62,6 +62,17 @@ public class VanessaGetArtifactsTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the operation succeeded.", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("outDir", "Run output directory that was scanned.") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("count", "Number of artifacts returned.") //$NON-NLS-1$ //$NON-NLS-2$
+            .objectArrayProperty("artifacts", "Files in the run output directory, with path, size in bytes, and kind.") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public ResponseType getResponseType()
     {
         return ResponseType.JSON;

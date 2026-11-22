@@ -58,6 +58,15 @@ public class VanessaGetTestReportTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the operation succeeded.", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .objectProperty("report", "Parsed JUnit report with verdict, counts, suites, and test cases.") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public ResponseType getResponseType()
     {
         return ResponseType.JSON;

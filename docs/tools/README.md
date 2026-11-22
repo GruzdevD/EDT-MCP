@@ -2,11 +2,11 @@
 
 One page per tool: what it does, every parameter, and how it works. Generated from the live server by `docs/generate_tool_docs.py` (re-run to refresh; the source of truth is each tool's Java).
 
-**93 tools.**
+**110 tools.**
 
 ## Core
 
-> Always-on essentials: project/module navigation, source read, metadata discovery, and the toolset-management tools (list_toolsets / enable_toolset).
+> Always-on essentials: project/module navigation, source read, metadata discovery, toolset management, and plugin updates.
 
 | Tool | Description |
 |------|-------------|
@@ -20,6 +20,8 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | [`list_modules`](list_modules.md) | List BSL modules in an EDT project as a table (module path, module type, parent type, parent name). Use it to discover module paths before reading or editing… |
 | [`list_projects`](list_projects.md) | List all workspace projects with properties (name, path, type, natures). format='md' (default) returns the human Markdown table; format='json' returns the ma… |
 | [`list_toolsets`](list_toolsets.md) | List the tool groups (toolsets) used by progressive tool disclosure: each toolset's id, title, description, member tools, and whether it is currently visible… |
+| [`plugin_check_for_update`](plugin_check_for_update.md) | Check whether a newer build of this plugin is published on its git repo: fetches the update-site branch (which holds the built com.ditrix.edt.mcp.server_<ver… |
+| [`plugin_update`](plugin_update.md) | Deploy the newest published build of this plugin over git: fetches the update-site branch, installs the new com.ditrix.edt.mcp.server_<version>.jar into ~/.p… |
 | [`read_module_source`](read_module_source.md) | Read BSL module source code from an EDT project, whole file or a line range. Returns YAML frontmatter (including a contentHash revision token to round-trip i… |
 | [`search_in_code`](search_in_code.md) | Literal/regex full-text search across all BSL modules in a project. Matching is purely textual and NOT ru/en dialect-aware, so a query in one BSL language wo… |
 
@@ -82,7 +84,7 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 
 ## Testing
 
-> YAXUnit unit testing, 1C:Workmate assistance, and shared background-job polling.
+> YAXUnit and Vanessa Automation testing, 1C:Workmate assistance, and background-job polling.
 
 | Tool | Description |
 |------|-------------|
@@ -90,7 +92,20 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 | [`cancel_job`](cancel_job.md) | Preview or cancel a background job by jobId. Destructive: omitting confirm or passing confirm=false only describes the owning tool, state, and progress; conf… |
 | [`debug_yaxunit_tests`](debug_yaxunit_tests.md) | Deprecated alias for run_yaxunit_tests with debug=true. Launches YAXUnit tests in DEBUG mode so breakpoints fire, then call wait_for_break to inspect. Prefer… |
 | [`get_job_status`](get_job_status.md) | Poll any background job by the jobId returned from its owning tool. Returns the current state, progress journal, and terminal result; optionally waits for a… |
+| [`list_yaxunit_tests`](list_yaxunit_tests.md) | Enumerate YAXUnit test suites (common modules that register a test set via 'ЮТТесты...ДобавитьТестовыйНабор(...).ДобавитьТест(...)') and the tests within eac… |
 | [`run_yaxunit_tests`](run_yaxunit_tests.md) | Run YAXUnit tests as a named background job and return a JUnit Markdown report. The start call waits up to `timeout` (default and maximum 45s, larger values… |
+| [`vanessa_doctor`](vanessa_doctor.md) | Read-only readiness report for a project's Vanessa Automation environment (layout, env.sh, VAParams.json, the vanessa-automation.epf runtime, Allure CLI). Do… |
+| [`vanessa_get_artifacts`](vanessa_get_artifacts.md) | List the artifacts a Vanessa Automation run produced in its out dir: junit report, Allure files, screenshots and the run log, each with a size and a coarse k… |
+| [`vanessa_get_execution_status`](vanessa_get_execution_status.md) | Poll the execution status of a Vanessa Automation BDD run started by vanessa_run_feature. Reads VA's BDDStatus.log artifact, so a run is 'running' until that… |
+| [`vanessa_get_feature`](vanessa_get_feature.md) | Read and parse a Vanessa Automation .feature file: the Feature headline, feature-level tags, each scenario's name/tags/steps, and the raw source. 'path' is a… |
+| [`vanessa_get_log`](vanessa_get_log.md) | Read lines from a Vanessa Automation run log (BDD.log). Address it by launchId (reuses the run's out dir) or by absolute logPath; page big logs with offsetLi… |
+| [`vanessa_get_test_report`](vanessa_get_test_report.md) | Parse a Vanessa Automation junit.xml report into a structured summary: per-suite counts, per-test status (passed/failed/error/skipped) and an overall verdict… |
+| [`vanessa_list_features`](vanessa_list_features.md) | List the Vanessa Automation .feature files under a project (or an explicit directory): each entry carries the path, the Feature: headline and the feature-lev… |
+| [`vanessa_list_launches`](vanessa_list_launches.md) | List EDT launch configurations suitable for launching a Vanessa Automation BDD run (optionally filtered to a project). Returns each configuration's name, pro… |
+| [`vanessa_open_allure_report`](vanessa_open_allure_report.md) | Generate and open the Allure report of a Vanessa Automation BDD run. Address the run by launchId (from vanessa_run_feature) or absolute outDir. Generates the… |
+| [`vanessa_run_by_tags`](vanessa_run_by_tags.md) | Launch a Vanessa Automation BDD run limited to scenarios/features carrying a given tag (sets the VAParams tag filter, generates the run artifacts, and starts… |
+| [`vanessa_run_feature`](vanessa_run_feature.md) | Launch a Vanessa Automation BDD run on a project (reads the out-of-repo env.sh at ~/.1c-tools/vanessa/projects/<project>/env.sh, generates the VAParams/junit… |
+| [`vanessa_setup`](vanessa_setup.md) | Turnkey provisioning of a project's Vanessa Automation environment: creates .vanessa/ (env.sh, VAParams.json, features/, out/) and downloads the vanessa-auto… |
 
 ## Profiling
 
@@ -169,8 +184,10 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 
 | Tool | Description |
 |------|-------------|
+| [`capture_project_snapshot`](capture_project_snapshot.md) | Capture HEAD, index, and disk versions of an authorized EDT project's sources for review without a local clone. Read the result with inspect_project_snapshot… |
 | [`compare_configurations`](compare_configurations.md) | Compare a project's working tree against two git revisions (three-way) and report which top objects differ. Read-only: it never merges and never writes the p… |
 | [`get_comparison_node`](get_comparison_node.md) | Expand one node of a comparison started by compare_configurations: three-way property table, form structure, module sections, support state and potential pro… |
+| [`inspect_project_snapshot`](inspect_project_snapshot.md) | Read an immutable manifest or diff page from capture_project_snapshot, or compare two retained snapshots. Full parameters and examples: call get_tool_guide('… |
 | [`merge_rules`](merge_rules.md) | Read or author EDT's merge-rules file - the per-node decisions a configuration comparison saves and re-applies when it is launched. Which container to write… |
 
 ## Git

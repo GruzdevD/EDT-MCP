@@ -23,6 +23,8 @@ import com.ditrix.edt.mcp.server.protocol.jsonrpc.ToolCallResult;
 import com.ditrix.edt.mcp.server.protocol.jsonrpc.ToolsListResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
+import com.ditrix.edt.mcp.server.tools.impl.CaptureProjectSnapshotTool;
+import com.ditrix.edt.mcp.server.tools.impl.InspectProjectSnapshotTool;
 import com.ditrix.edt.mcp.server.transport.HttpTransport.AuthenticatedClient;
 import com.ditrix.edt.mcp.server.utils.DcsXmlCodec;
 import com.ditrix.edt.mcp.server.utils.GuideRenderer;
@@ -201,7 +203,8 @@ public class McpProtocolHandler
                 String method = request != null ? request.getMethod() : null;
                 String toolName = (request != null && McpConstants.METHOD_TOOLS_CALL.equals(method))
                     ? request.getToolName() : null;
-                recordToHistory(method, toolName, requestBody, response, durationMs);
+                boolean snapshot = isSnapshotTool(toolName);
+                recordToHistory(method, toolName, snapshot ? null : requestBody, snapshot ? null : response, durationMs);
             }
             catch (Exception recordingFailure) // NOSONAR: history recording must never break a call
             {
@@ -222,6 +225,26 @@ public class McpProtocolHandler
             }
         }
         return response;
+    }
+
+    /** Classifies an HTTP request for the transport's optional payload tracing. */
+    public static boolean isSnapshotCall(String body)
+    {
+        try
+        {
+            JsonRpcRequest request = GsonProvider.fromJson(body, JsonRpcRequest.class);
+            return request != null && McpConstants.METHOD_TOOLS_CALL.equals(request.getMethod())
+                && isSnapshotTool(request.getToolName());
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
+    }
+
+    private static boolean isSnapshotTool(String name)
+    {
+        return CaptureProjectSnapshotTool.NAME.equals(name) || InspectProjectSnapshotTool.NAME.equals(name);
     }
 
     /**

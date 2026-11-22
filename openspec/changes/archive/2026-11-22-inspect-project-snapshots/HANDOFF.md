@@ -1,5 +1,7 @@
 # Windows handoff: `inspect-project-snapshots`
 
+See [Windows verification](WINDOWS-VERIFICATION.md) for the follow-up results on the dedicated Windows copy. The sections below record the original handoff.
+
 ## Resume here
 
 Start OpenCode in the checkout and ask it to read this file, then run

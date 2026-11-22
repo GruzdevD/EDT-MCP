@@ -35,6 +35,7 @@ final class WindowsSourceTree
     private static final int FILE_SHARE_WRITE = 2;
     private static final int OPEN_EXISTING = 3;
     private static final int FILE_OPEN = 1;
+    private static final int STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034;
     private static final int FILE_DIRECTORY_FILE = 1;
     private static final int FILE_NON_DIRECTORY_FILE = 0x40;
     private static final int FILE_SYNCHRONOUS_IO_NONALERT = 0x20;
@@ -106,6 +107,16 @@ final class WindowsSourceTree
 
     Directory openProject(String path) throws IOException
     {
+        return openDirectory(path, false);
+    }
+
+    Directory openDirectoryIfPresent(String path) throws IOException
+    {
+        return openDirectory(path, true);
+    }
+
+    private Directory openDirectory(String path, boolean allowMissing) throws IOException
+    {
         if (!isDrivePath(path) || path.length() <= 3)
         {
             throw unavailable();
@@ -134,7 +145,11 @@ final class WindowsSourceTree
         {
             for (String name : path.substring(3).split("\\\\", -1)) //$NON-NLS-1$
             {
-                Directory child = directory.child(name);
+                Directory child = directory.child(name, allowMissing);
+                if (child == null)
+                {
+                    return null;
+                }
                 child.parentToClose = directory;
                 directory = child;
             }
@@ -156,6 +171,12 @@ final class WindowsSourceTree
 
     record Entry(String name, boolean directory, boolean reparsePoint) { }
 
+    interface PinnedFile extends AutoCloseable
+    {
+        @Override
+        void close();
+    }
+
     final class Directory implements AutoCloseable
     {
         private Opened opened;
@@ -168,7 +189,18 @@ final class WindowsSourceTree
 
         Directory child(String name) throws IOException
         {
-            return new Directory(openChild(opened, name, true));
+            return child(name, false);
+        }
+
+        Directory childIfPresent(String name) throws IOException
+        {
+            return child(name, true);
+        }
+
+        private Directory child(String name, boolean allowMissing) throws IOException
+        {
+            Opened child = openChild(opened, name, true, allowMissing);
+            return child == null ? null : new Directory(child);
         }
 
         List<Entry> entries(int limit) throws IOException
@@ -228,8 +260,28 @@ final class WindowsSourceTree
 
         byte[] read(String name, int maxBytes) throws IOException
         {
-            try (Opened file = openChild(opened, name, false))
+            return read(name, maxBytes, false);
+        }
+
+        byte[] readIfPresent(String name, int maxBytes) throws IOException
+        {
+            return read(name, maxBytes, true);
+        }
+
+        PinnedFile pinFileIfPresent(String name) throws IOException
+        {
+            Opened file = openChild(opened, name, false, true);
+            return file == null ? null : file::close;
+        }
+
+        private byte[] read(String name, int maxBytes, boolean allowMissing) throws IOException
+        {
+            try (Opened file = openChild(opened, name, false, allowMissing))
             {
+                if (file == null)
+                {
+                    return null;
+                }
                 if (maxBytes < 0 || file.size > maxBytes)
                 {
                     throw new IOException("Snapshot source exceeds the file size limit."); //$NON-NLS-1$
@@ -276,7 +328,7 @@ final class WindowsSourceTree
         }
     }
 
-    private Opened openChild(Opened parent, String name, boolean directory) throws IOException
+    private Opened openChild(Opened parent, String name, boolean directory, boolean allowMissing) throws IOException
     {
         if (parent == null || !isComponent(name))
         {
@@ -301,8 +353,13 @@ final class WindowsSourceTree
             int access = FILE_READ_ATTRIBUTES | FILE_READ_DATA | SYNCHRONIZE | (directory ? FILE_TRAVERSE : 0);
             int options = FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT
                 | (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE);
-            if (nt.NtCreateFile(result, access, attributes, status, null, 0, FILE_SHARE_READ, FILE_OPEN,
-                options, null, 0) != 0)
+            int openStatus = nt.NtCreateFile(result, access, attributes, status, null, 0, FILE_SHARE_READ, FILE_OPEN,
+                options, null, 0);
+            if (allowMissing && openStatus == STATUS_OBJECT_NAME_NOT_FOUND)
+            {
+                return null;
+            }
+            if (openStatus != 0)
             {
                 throw unavailable();
             }

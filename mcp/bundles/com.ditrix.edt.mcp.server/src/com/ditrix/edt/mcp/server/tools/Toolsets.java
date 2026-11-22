@@ -42,7 +42,7 @@ public final class Toolsets
     public static final String CODE = "code"; //$NON-NLS-1$
     /** Runtime debugging: launches, breakpoints, suspended-state inspection. */
     public static final String DEBUG = "debug"; //$NON-NLS-1$
-    /** YAXUnit unit testing and 1C:Workmate assistance. */
+    /** YAXUnit and Vanessa Automation testing, plus 1C:Workmate assistance. */
     public static final String TESTING = "testing"; //$NON-NLS-1$
     /** Performance profiling (start / stop / results). */
     public static final String PROFILING = "profiling"; //$NON-NLS-1$
@@ -100,7 +100,7 @@ public final class Toolsets
     {
         define(CORE, "Core",
             "Always-on essentials: project/module navigation, source read, metadata discovery, " //$NON-NLS-1$
-                + "and the toolset-management tools (list_toolsets / enable_toolset)."); //$NON-NLS-1$
+                + "toolset management, and plugin updates."); //$NON-NLS-1$
         define(METADATA, "Metadata",
             "Metadata objects: discovery, create/modify/delete/rename/adopt, subsystems, configuration."); //$NON-NLS-1$
         define(CODE, "Code",
@@ -108,7 +108,7 @@ public final class Toolsets
         define(DEBUG, "Debug",
             "Runtime debugging: launch/attach, breakpoints, step/resume, variables, expression evaluation."); //$NON-NLS-1$
         define(TESTING, "Testing",
-            "YAXUnit unit testing, 1C:Workmate assistance, and shared background-job polling."); //$NON-NLS-1$
+            "YAXUnit and Vanessa Automation testing, 1C:Workmate assistance, and background-job polling."); //$NON-NLS-1$
         define(PROFILING, "Profiling",
             "Performance profiling: start/stop a measurement and read the results."); //$NON-NLS-1$
         define(FORMS, "Forms",
@@ -134,7 +134,8 @@ public final class Toolsets
             "get_tool_guide", "get_server_status", "get_edt_version", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "list_projects", "list_modules", "get_module_structure", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "read_module_source", "search_in_code", //$NON-NLS-1$ //$NON-NLS-2$
-            "get_metadata_objects", "get_metadata_details"); //$NON-NLS-1$ //$NON-NLS-2$
+            "get_metadata_objects", "get_metadata_details", //$NON-NLS-1$ //$NON-NLS-2$
+            "plugin_check_for_update", "plugin_update"); //$NON-NLS-1$ //$NON-NLS-2$
 
         assign(METADATA,
             "create_metadata", "modify_metadata", "delete_metadata", "dcs", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
@@ -155,12 +156,13 @@ public final class Toolsets
             "step", "resume", "evaluate_expression", "get_applications", "terminate_launch"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
 
         assign(TESTING,
-            "run_yaxunit_tests", "debug_yaxunit_tests", "ask_workmate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "list_yaxunit_tests", "run_yaxunit_tests", "debug_yaxunit_tests", "ask_workmate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             "get_job_status", "cancel_job", //$NON-NLS-1$ //$NON-NLS-2$
             "vanessa_list_launches", "vanessa_run_feature", //$NON-NLS-1$ //$NON-NLS-2$
             "vanessa_get_execution_status", "vanessa_get_test_report", //$NON-NLS-1$ //$NON-NLS-2$
             "vanessa_list_features", "vanessa_get_feature", //$NON-NLS-1$ //$NON-NLS-2$
-            "vanessa_run_by_tags", "vanessa_get_log", "vanessa_get_artifacts"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "vanessa_run_by_tags", "vanessa_get_log", "vanessa_get_artifacts", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "vanessa_open_allure_report", "vanessa_doctor", "vanessa_setup"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
         assign(PROFILING,
             "start_profiling", "stop_profiling", "get_profiling_results"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -185,7 +187,8 @@ public final class Toolsets
             "get_check_description", "apply_quick_fix", "get_platform_documentation"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
         assign(COMPARISON,
-            "compare_configurations", "get_comparison_node", "merge_rules"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "compare_configurations", "get_comparison_node", "merge_rules", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "capture_project_snapshot", "inspect_project_snapshot"); //$NON-NLS-1$ //$NON-NLS-2$
 
         assign(GIT,
             "git"); //$NON-NLS-1$

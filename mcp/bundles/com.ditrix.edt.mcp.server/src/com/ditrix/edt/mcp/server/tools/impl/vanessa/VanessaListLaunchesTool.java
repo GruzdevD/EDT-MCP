@@ -58,6 +58,16 @@ public class VanessaListLaunchesTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the operation succeeded.", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("count", "Number of launch configurations returned.") //$NON-NLS-1$ //$NON-NLS-2$
+            .objectArrayProperty("launches", "EDT launch configurations with names, projects, and Vanessa detection flags.") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public ResponseType getResponseType()
     {
         return ResponseType.JSON;

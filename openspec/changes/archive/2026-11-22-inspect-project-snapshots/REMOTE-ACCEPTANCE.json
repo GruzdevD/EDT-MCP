@@ -1,0 +1,16 @@
+{
+  "checkedAtUtc": "2026-11-22T12:20:06.481329+00:00",
+  "clientDirectoryOutsideGitClone": true,
+  "clientIPAddress": "10.0.2.15",
+  "clientKernel": "6.18.60-0-virt",
+  "clientOS": "Linux",
+  "comparisonReflectsSecondCapture": true,
+  "firstSnapshotUnchanged": true,
+  "genericGitToolDisabled": true,
+  "manifestPages": 2,
+  "modelStatus": "unknown",
+  "protectedRoute": "TLS to a loopback-only Windows relay",
+  "stagedMdoAndNewBsl": true,
+  "tlsServerCertificateVerified": true,
+  "unauthenticatedRequestRejected": true
+}

@@ -364,6 +364,8 @@ def _post(method, params):
     }
     if _SESSION_ID:
         headers["Mcp-Session-Id"] = _SESSION_ID
+    if token := os.environ.get("EDT_MCP_AUTH_TOKEN"):
+        headers["Authorization"] = "Bearer " + token
     if _TIMED_OUT:
         raise E2ECallTimeout(
             "refusing to send %s: %s, so the run is over. (The latch, not a new timeout - see "
@@ -1045,6 +1047,8 @@ def _notify(method, params):
     }
     if _SESSION_ID:
         headers["Mcp-Session-Id"] = _SESSION_ID
+    if token := os.environ.get("EDT_MCP_AUTH_TOKEN"):
+        headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(MCP_URL, data=body, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:

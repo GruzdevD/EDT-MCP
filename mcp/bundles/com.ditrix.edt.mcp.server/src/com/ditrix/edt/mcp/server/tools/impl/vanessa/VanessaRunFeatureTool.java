@@ -117,6 +117,22 @@ public class VanessaRunFeatureTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the operation succeeded.", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("launchId", "ID used to poll the Vanessa run.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("project", "EDT project name.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("feature", "Feature target for the run.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("configuration", "EDT launch configuration name.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("status", "Initial state of the run.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("outDir", "Path to the run output directory.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("junitReportPath", "Expected path to the JUnit report.") //$NON-NLS-1$ //$NON-NLS-2$
+            .objectProperty("options", "Overrides applied to this run.") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public ResponseType getResponseType()
     {
         return ResponseType.JSON;

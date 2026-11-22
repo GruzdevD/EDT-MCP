@@ -56,6 +56,21 @@ public class PluginCheckForUpdateTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the operation succeeded.", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("source", "Fetched Git remote.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("branch", "Fetched artifact branch.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("availableVersion", "Newest published bundle version.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("installedVersion", "Running bundle version, or unknown if unavailable.") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("updateAvailable", "Whether the published build is newer or the installed version is unknown.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("jar", "Filename of the published bundle.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("message", "Optional update status message.") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public ResponseType getResponseType()
     {
         return ResponseType.JSON;
