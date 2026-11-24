@@ -17,6 +17,8 @@ import java.util.Map;
 import org.junit.Test;
 
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 /**
  * Tests for {@link FindReferencesTool}.
@@ -68,6 +70,23 @@ public class FindReferencesToolTest
         assertNotNull(schema);
         assertTrue(schema.contains("\"projectName\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"objectFqn\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testSourceScopeSchemaRequiresSearchProjectsAndRejectsUnknownKeys()
+    {
+        JsonObject schema = JsonParser.parseString(new FindReferencesTool().getInputSchema()).getAsJsonObject();
+        JsonObject scope = schema.getAsJsonObject("properties").getAsJsonObject("sourceScope");
+        assertEquals("object", scope.get("type").getAsString());
+        assertFalse(scope.get("additionalProperties").getAsBoolean());
+        assertEquals("[\"projectNames\"]", scope.getAsJsonArray("required").toString());
+        for (String key : new String[] {"projectNames", "paths"})
+        {
+            JsonObject list = scope.getAsJsonObject("properties").getAsJsonObject(key);
+            assertEquals("array", list.get("type").getAsString());
+            assertEquals(1, list.get("minItems").getAsInt());
+            assertEquals("string", list.getAsJsonObject("items").get("type").getAsString());
+        }
     }
 
     /**

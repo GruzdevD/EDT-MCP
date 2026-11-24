@@ -8,6 +8,7 @@ package com.ditrix.edt.mcp.server.tools;
 
 import java.util.Map;
 
+import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.protocol.jsonrpc.ToolAnnotations;
 import com.ditrix.edt.mcp.server.utils.GuideLoader;
 
@@ -90,7 +91,19 @@ public interface IMcpTool
      * @return result string (format depends on getResponseType())
      */
     String execute(Map<String, String> params);
-    
+
+    /**
+     * Optional wire validation before arguments are converted to strings and explicit nulls are
+     * discarded. Inspect, but do not modify, the arguments or access EDT from this hook.
+     *
+     * @param arguments parsed JSON arguments (empty if not supplied)
+     * @return a tool error to return instead of dispatching, or {@code null} to continue
+     */
+    default ToolResult validateRawArguments(Map<String, Object> arguments)
+    {
+        return null;
+    }
+
     /**
      * Returns the response content type for this tool.
      * Default is MARKDOWN for better context efficiency.

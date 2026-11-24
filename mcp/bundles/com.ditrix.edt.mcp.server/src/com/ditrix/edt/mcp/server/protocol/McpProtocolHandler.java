@@ -399,8 +399,13 @@ public class McpProtocolHandler
         
         Activator.logInfo("Processing tools/call: " + tool.getName()); //$NON-NLS-1$
         
-        // Extract parameters from request arguments
-        Map<String, String> params = extractToolParams(request);
+        Map<String, Object> arguments = request.getArguments();
+        ToolResult validation = tool.validateRawArguments(arguments == null ? Map.of() : arguments);
+        if (validation != null)
+        {
+            return buildToolCallJsonResponse(validation.toJson(), requestId, toolName);
+        }
+        Map<String, String> params = extractToolParams(arguments);
         
         // Set current tool name for status bar display
         McpServer server = Activator.getDefault() != null ? Activator.getDefault().getMcpServer() : null;
@@ -894,11 +899,10 @@ public class McpProtocolHandler
     /**
      * Extracts tool parameters from request.
      */
-    private Map<String, String> extractToolParams(JsonRpcRequest request)
+    private Map<String, String> extractToolParams(Map<String, Object> arguments)
     {
         Map<String, String> params = new HashMap<>();
         
-        Map<String, Object> arguments = request != null ? request.getArguments() : null;
         if (arguments == null)
         {
             return params;

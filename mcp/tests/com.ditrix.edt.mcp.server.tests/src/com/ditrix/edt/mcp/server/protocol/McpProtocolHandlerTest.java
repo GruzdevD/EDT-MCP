@@ -18,8 +18,10 @@ import org.junit.Test;
 
 import com.ditrix.edt.mcp.server.UserSignal;
 import com.ditrix.edt.mcp.server.UserSignal.SignalType;
+import com.ditrix.edt.mcp.server.bridge.EdtMcpBridge;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
+import com.ditrix.edt.mcp.server.tools.impl.FindReferencesTool;
 import com.ditrix.edt.mcp.server.utils.OutputSizeGuard;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -822,6 +824,34 @@ public class McpProtocolHandlerTest
         assertTrue("a key sent with a value reaches the tool", tool.params.containsKey("kept"));
         assertFalse("a key sent as JSON null must not reach the tool at all",
             tool.params.containsKey("dropped"));
+    }
+
+    @Test
+    public void testFindReferencesRefusesNullAndStringifiedScopeBeforeDispatch()
+    {
+        registry.register(new FindReferencesTool()
+        {
+            @Override
+            public String execute(Map<String, String> params)
+            {
+                throw new AssertionError("Malformed sourceScope reached tool execution: " + params);
+            }
+        });
+        EdtMcpBridge bridge = new EdtMcpBridge();
+        for (String scope : new String[] {"null", "\"{\\\"projectNames\\\":[\\\"Base\\\"]}\""})
+        {
+            String args = "{\"projectName\":\"Base\",\"objectFqn\":\"Catalog.Products\",\"sourceScope\":" + scope + "}";
+            assertScopeError(handler.processRequest(buildToolCallRequest(1, FindReferencesTool.NAME, args)));
+            assertScopeError(bridge.callTool(FindReferencesTool.NAME, args));
+        }
+    }
+
+    private void assertScopeError(String response)
+    {
+        JsonObject result = parseResponse(response).getAsJsonObject("result");
+        assertTrue(response, result.get("isError").getAsBoolean());
+        assertTrue(response, result.getAsJsonObject("structuredContent").get("error").getAsString()
+            .contains("sourceScope must be an object"));
     }
 
     @Test

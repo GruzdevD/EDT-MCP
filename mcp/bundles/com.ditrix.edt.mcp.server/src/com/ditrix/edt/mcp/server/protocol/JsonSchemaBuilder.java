@@ -263,6 +263,19 @@ public class JsonSchemaBuilder
     }
 
     /**
+     * Adds an optional property with an explicitly supplied JSON Schema definition.
+     *
+     * @param name property name
+     * @param definition property schema, including its type and any constraints
+     * @return this builder
+     */
+    public JsonSchemaBuilder property(String name, Map<String, Object> definition)
+    {
+        properties.put(name, definition);
+        return this;
+    }
+
+    /**
      * Adds an object property to the schema. The nested object's inner shape is left
      * unconstrained ({@code {"type":"object"}}) on purpose: an {@code outputSchema}
      * must stay permissive so a conformant client never rejects a valid payload whose

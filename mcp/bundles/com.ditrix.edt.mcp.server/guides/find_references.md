@@ -6,8 +6,9 @@ Locates every reference to one metadata object across the whole configuration: B
 - To find an identifier regardless of its ru/en spelling - unlike `search_in_code`, this is model-aware, not a literal text search.
 
 ## Parameter details
-- `projectName` (required) - EDT project name.
+- `projectName` (required) - EDT project that owns the target. It does not restrict the sources selected by `sourceScope`.
 - `objectFqn` (required) - fully qualified name `Type.Name` of the object to find references for. The `Name` part is the object's programmatic name (never its synonym). Only the leading TYPE token is bilingual: `Catalog.Products` and `Справочник.Products` resolve to the same object (the Russian type spelling is normalized internally). Examples: `Catalog.Products`, `Document.SalesOrder`, `CommonModule.Common`, `InformationRegister.Prices`.
+- `sourceScope` - optional object with a nonempty `projectNames` array of exact EDT project names and an optional nonempty `paths` array. Omit `paths` for entire `src/` trees, including files directly under `src/`. Each path is relative to `src/` and uses `/`. A trailing slash selects a directory subtree (for example `CommonModules/`); otherwise it selects one exact file. The selectors form a union without duplicates, and each must exist in at least one of the selected projects. Absolute paths, `.` or `..` segments, unknown properties, and `null` are errors; invalid scopes never fall back to a broader search.
 - `limit` - result-size hint; default 100, max 500 (clamped). It caps the OVERALL number of references collected (at `limit*10`) before they are grouped, NOT a per-category count - so a single busy category can consume most of the budget. Raise it when a large object truncates the result.
 
 ## Result categories

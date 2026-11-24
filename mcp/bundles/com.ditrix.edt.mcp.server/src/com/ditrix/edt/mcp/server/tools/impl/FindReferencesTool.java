@@ -12,12 +12,15 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.PlatformUI;
 
 import com.ditrix.edt.mcp.server.Activator;
+import com.ditrix.edt.mcp.server.protocol.GsonProvider;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.McpKeys;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.reference.MetadataReferenceService;
+import com.ditrix.edt.mcp.server.tools.reference.ReferenceSourceScope;
+import com.google.gson.JsonParseException;
 
 /**
  * Tool to find all references to a metadata object.
@@ -56,6 +59,7 @@ public class FindReferencesTool implements IMcpTool
             .integerProperty("limit", //$NON-NLS-1$
                 "Result-size hint (default 100, max 500); caps the overall reference count " //$NON-NLS-1$
                 + "(at limit*10), not per category.") //$NON-NLS-1$
+            .property(ReferenceSourceScope.KEY, ReferenceSourceScope.inputSchema())
             .build();
     }
 
@@ -78,6 +82,23 @@ public class FindReferencesTool implements IMcpTool
     }
 
     @Override
+    public ToolResult validateRawArguments(Map<String, Object> arguments)
+    {
+        if (arguments.containsKey(ReferenceSourceScope.KEY))
+        {
+            try
+            {
+                ReferenceSourceScope.parse(arguments.get(ReferenceSourceScope.KEY));
+            }
+            catch (IllegalArgumentException e)
+            {
+                return ToolResult.error(e.getMessage());
+            }
+        }
+        return null;
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         // Validate required parameters via the shared guard (canonical reference
@@ -95,6 +116,25 @@ public class FindReferencesTool implements IMcpTool
 
         String projectName = JsonUtils.extractStringArgument(params, McpKeys.PROJECT_NAME);
         String objectFqn = JsonUtils.extractStringArgument(params, KEY_OBJECT_FQN);
+
+        if (params.containsKey(ReferenceSourceScope.KEY))
+        {
+            try
+            {
+                String rawScope = JsonUtils.extractStringArgument(params, ReferenceSourceScope.KEY);
+                ReferenceSourceScope.parse(GsonProvider.fromJson(rawScope, Object.class)).resolveProjects();
+            }
+            catch (JsonParseException e)
+            {
+                return ToolResult.error("sourceScope must be a JSON object with projectNames.").toJson(); //$NON-NLS-1$
+            }
+            catch (IllegalArgumentException e)
+            {
+                return ToolResult.error(e.getMessage()).toJson();
+            }
+            // Until the scoped collectors are connected, never run the unscoped collector for this call.
+            return ToolResult.error("Scoped reference search is not available.").toJson(); //$NON-NLS-1$
+        }
 
         // Shared typed accessor (handles the "42.0" form and invalid/missing -> default),
         // replacing the inline Double.parseDouble. Default 100, upper clamp 500 preserved.

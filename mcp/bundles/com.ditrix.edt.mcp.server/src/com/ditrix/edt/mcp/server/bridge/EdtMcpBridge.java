@@ -133,7 +133,8 @@ public class EdtMcpBridge implements IEdtMcpBridge, BiFunction<String, String, S
         request.addProperty("method", McpConstants.METHOD_TOOLS_CALL); //$NON-NLS-1$
         request.add("params", params); //$NON-NLS-1$
 
-        return protocolHandler.processRequest(GsonProvider.toJson(request));
+        // Keep explicit nulls for opt-in wire validation in the dispatcher.
+        return protocolHandler.processRequest(GsonProvider.toJsonSerializeNulls(request));
     }
 
     /**
