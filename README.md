@@ -204,6 +204,7 @@ set VER_EDT=2025.2.3+30
 | **Refactoring** | Создание, переименование, удаление, свойства метаданных и СКД | `rename_metadata_object`, `delete_metadata`, `create_metadata`, `modify_metadata`, `adopt_metadata_object` |
 | **Translation** | Синхронизация переводов (LanguageTool) | `generate_translation_strings`, `translate_configuration`, `get_translation_project_info` |
 | **Comparison** | Трёхстороннее сравнение конфигураций и снимки исходников | `compare_configurations`, `get_comparison_node`, `merge_rules`, `capture_project_snapshot`, `inspect_project_snapshot` |
+| **Git** | Preview and confirm selected source changes from an authorized snapshot | [`preview_project_commit`](docs/tools/preview_project_commit.md), [`confirm_project_commit`](docs/tools/confirm_project_commit.md) |
 | **Vanessa / BDD** *(форк)* | Запуск и анализ Vanessa Automation + провижининг | `vanessa_run_feature`, `vanessa_get_execution_status`, `vanessa_get_test_report`, `vanessa_open_allure_report`, `vanessa_list_launches`, `vanessa_doctor`, `vanessa_setup` |
 | **Self-update** *(форк)* | Самообновление плагина | `plugin_check_for_update`, `plugin_update` |
 

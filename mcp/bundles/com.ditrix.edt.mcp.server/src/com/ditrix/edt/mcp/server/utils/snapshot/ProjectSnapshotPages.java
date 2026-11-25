@@ -268,7 +268,12 @@ final class ProjectSnapshotPages
 
     private static UUID entryId(UUID snapshot, Key entry)
     {
-        return UUID.nameUUIDFromBytes((snapshot + "\n" + entry.project() + "\n" + entry.path())
+        return entryId(snapshot, entry.project(), entry.path());
+    }
+
+    static UUID entryId(UUID snapshot, String project, String path)
+    {
+        return UUID.nameUUIDFromBytes((snapshot + "\n" + project + "\n" + path)
             .getBytes(StandardCharsets.UTF_8));
     }
 

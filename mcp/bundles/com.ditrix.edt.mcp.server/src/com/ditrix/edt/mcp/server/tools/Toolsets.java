@@ -191,7 +191,7 @@ public final class Toolsets
             "capture_project_snapshot", "inspect_project_snapshot"); //$NON-NLS-1$ //$NON-NLS-2$
 
         assign(GIT,
-            "git"); //$NON-NLS-1$
+            "git", "preview_project_commit", "confirm_project_commit"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private Toolsets()

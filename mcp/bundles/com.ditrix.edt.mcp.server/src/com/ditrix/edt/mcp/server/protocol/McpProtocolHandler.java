@@ -24,7 +24,9 @@ import com.ditrix.edt.mcp.server.protocol.jsonrpc.ToolsListResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
 import com.ditrix.edt.mcp.server.tools.impl.CaptureProjectSnapshotTool;
+import com.ditrix.edt.mcp.server.tools.impl.ConfirmProjectCommitTool;
 import com.ditrix.edt.mcp.server.tools.impl.InspectProjectSnapshotTool;
+import com.ditrix.edt.mcp.server.tools.impl.PreviewProjectCommitTool;
 import com.ditrix.edt.mcp.server.transport.HttpTransport.AuthenticatedClient;
 import com.ditrix.edt.mcp.server.utils.BackgroundJobs;
 import com.ditrix.edt.mcp.server.utils.DcsXmlCodec;
@@ -245,7 +247,8 @@ public class McpProtocolHandler
 
     private static boolean isSnapshotTool(JsonRpcRequest request, String name)
     {
-        if (CaptureProjectSnapshotTool.NAME.equals(name) || InspectProjectSnapshotTool.NAME.equals(name))
+        if (CaptureProjectSnapshotTool.NAME.equals(name) || InspectProjectSnapshotTool.NAME.equals(name)
+            || PreviewProjectCommitTool.NAME.equals(name) || ConfirmProjectCommitTool.NAME.equals(name))
         {
             return true;
         }
@@ -993,9 +996,15 @@ public class McpProtocolHandler
         
         // Convert all arguments to strings
         boolean boundYaxunit = isBoundYaxunit(request.getToolName(), arguments);
+        boolean previewCommit = PreviewProjectCommitTool.NAME.equals(request.getToolName());
         for (Map.Entry<String, Object> entry : arguments.entrySet())
         {
             Object value = entry.getValue();
+            if (previewCommit && ("message".equals(entry.getKey()) && !(value instanceof String)
+                || "entryIds".equals(entry.getKey()) && !(value instanceof List<?>)))
+            {
+                continue;
+            }
             if (value != null)
             {
                 if (value instanceof List || value instanceof Map)

@@ -40,15 +40,16 @@ import com.ditrix.edt.mcp.server.utils.git.GitRepositoryResolver;
 import com.ditrix.edt.mcp.server.utils.snapshot.SnapshotSourcePolicy.Access;
 import com.ditrix.edt.mcp.server.utils.snapshot.SnapshotSourcePolicy.ScopedProject;
 import com.ditrix.edt.mcp.server.utils.snapshot.WindowsSourceTree.Directory;
+import com.ditrix.edt.mcp.server.utils.snapshot.WindowsSourceTree.Handle;
 import com.ditrix.edt.mcp.server.utils.snapshot.WindowsSourceTree.PinnedFile;
 
 /** Captures the three source versions with independent HEAD-to-index and index-to-disk deltas. */
 final class ProjectSourceManifest
 {
     private static final String SOURCE = SnapshotSourcePolicy.SOURCE_DIRECTORY;
-    private static final int MAX_DIRECTORY_ENTRIES = 50_000;
+    static final int MAX_DIRECTORY_ENTRIES = 50_000;
     private static final int MAX_DEPTH = 96;
-    private static final int MAX_FILE_BYTES = 4 * 1024 * 1024;
+    static final int MAX_FILE_BYTES = 4 * 1024 * 1024;
     private static final int MAX_RULE_BYTES = 256 * 1024;
     private static final long MAX_CONTENT_BYTES = 64L * 1024 * 1024;
 
@@ -99,11 +100,17 @@ final class ProjectSourceManifest
     }
 
     record Project(String name, String branch, String head, List<Entry> entries, boolean rawDiskComparison,
-        SnapshotBuildInputs buildInputs)
+        SnapshotBuildInputs buildInputs, Path workTree)
     {
         Project(String name, String branch, String head, List<Entry> entries, boolean rawDiskComparison)
         {
-            this(name, branch, head, entries, rawDiskComparison, null);
+            this(name, branch, head, entries, rawDiskComparison, null, null);
+        }
+
+        Project(String name, String branch, String head, List<Entry> entries, boolean rawDiskComparison,
+            SnapshotBuildInputs buildInputs)
+        {
+            this(name, branch, head, entries, rawDiskComparison, buildInputs, null);
         }
 
         Project
@@ -132,6 +139,23 @@ final class ProjectSourceManifest
         return capture(project, local, new Budget(), false);
     }
 
+    @FunctionalInterface
+    interface CommitRepository<T>
+    {
+        T operate(Repository repository, Runnable releaseIndexPin) throws IOException;
+    }
+
+    static <T> T withCommitRepository(WindowsSourceTree local, Path root, CommitRepository<T> action)
+        throws IOException
+    {
+        try (Directory workTree = local.openProject(root.toString()); Directory git = workTree.gitWriteDirectory();
+            MetadataPins pins = new MetadataPins(git, new Budget());
+            Repository repository = GitRepositoryResolver.openSnapshotWorkTree(root.toFile()))
+        {
+            return action.operate(repository, pins::releaseIndex);
+        }
+    }
+
     private static Project capture(ScopedProject project, WindowsSourceTree local, Budget budget, boolean forYaxunit)
         throws IOException
     {
@@ -144,24 +168,79 @@ final class ProjectSourceManifest
                 {
                     if (git != null)
                     {
-                        try (Directory objects = git.child("objects"); Directory info = objects.childIfPresent("info");
-                            Directory packs = objects.childIfPresent("pack"); Directory refs = git.childIfPresent("refs");
-                            PinnedFile head = git.pinFileIfPresent("HEAD"); PinnedFile config = git.pinFileIfPresent("config");
-                            PinnedFile index = git.pinFileIfPresent("index"); PinnedFile packedRefs = git.pinFileIfPresent("packed-refs"))
+                        try (MetadataPins pins = new MetadataPins(git, budget))
                         {
-                            if (head == null || config == null || git.readIfPresent("commondir", MAX_RULE_BYTES) != null
-                                || (info != null && info.readIfPresent("alternates", MAX_RULE_BYTES) != null))
-                            {
-                                throw WindowsSourceTree.unavailable();
-                            }
-                            checkMetadataEntries(refs, budget, 0, true);
-                            checkMetadataEntries(packs, budget, 0, false);
                             return captureWorkTree(project, local, projectRoot, root, git, budget, forYaxunit);
                         }
                     }
                 }
             }
             throw new IOException("No local Git work tree was found for the snapshot project.");
+        }
+    }
+
+    private static final class MetadataPins implements AutoCloseable
+    {
+        private final List<Handle> opened = new ArrayList<>();
+        private PinnedFile index;
+
+        MetadataPins(Directory git, Budget budget) throws IOException
+        {
+            boolean complete = false;
+            try
+            {
+                Directory objects = keep(git.child("objects"));
+                Directory info = keep(objects.childIfPresent("info"));
+                Directory packs = keep(objects.childIfPresent("pack"));
+                Directory refs = keep(git.childIfPresent("refs"));
+                PinnedFile head = keep(git.pinFileIfPresent("HEAD"));
+                PinnedFile config = keep(git.pinFileIfPresent("config"));
+                index = git.pinFileIfPresent("index");
+                keep(git.pinFileIfPresent("packed-refs"));
+                if (head == null || config == null || git.readIfPresent("commondir", MAX_RULE_BYTES) != null
+                    || info != null && info.readIfPresent("alternates", MAX_RULE_BYTES) != null)
+                {
+                    throw WindowsSourceTree.unavailable();
+                }
+                checkMetadataEntries(refs, budget, 0, true);
+                checkMetadataEntries(packs, budget, 0, false);
+                complete = true;
+            }
+            finally
+            {
+                if (!complete)
+                {
+                    close();
+                }
+            }
+        }
+
+        void releaseIndex()
+        {
+            if (index != null)
+            {
+                index.close();
+                index = null;
+            }
+        }
+
+        private <T extends Handle> T keep(T openedHandle)
+        {
+            if (openedHandle != null)
+            {
+                opened.add(openedHandle);
+            }
+            return openedHandle;
+        }
+
+        @Override
+        public void close()
+        {
+            releaseIndex();
+            for (int i = opened.size() - 1; i >= 0; i--)
+            {
+                opened.get(i).close();
+            }
         }
     }
 
@@ -259,7 +338,8 @@ final class ProjectSourceManifest
                 rawComparison |= info != null && info.readIfPresent("attributes", MAX_RULE_BYTES) != null;
             }
             SnapshotBuildInputs inputs = forYaxunit ? SnapshotBuildInputs.read(project, projectRoot) : null;
-            return new Project(project.grant().name(), initial.branch(), initial.headId(), entries, rawComparison, inputs);
+            return new Project(project.grant().name(), initial.branch(), initial.headId(), entries, rawComparison, inputs,
+                root);
         }
     }
 

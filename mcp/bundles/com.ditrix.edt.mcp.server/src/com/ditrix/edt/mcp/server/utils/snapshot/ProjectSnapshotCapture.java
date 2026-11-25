@@ -172,6 +172,7 @@ final class ProjectSnapshotCapture
             Project right = b.get(position);
             if (!left.name().equals(right.name()) || !Objects.equals(left.head(), right.head())
                 || !Objects.equals(left.branch(), right.branch()) || left.rawDiskComparison() != right.rawDiskComparison()
+                || !Objects.equals(left.workTree(), right.workTree())
                 || left.entries().size() != right.entries().size())
             {
                 return false;
@@ -286,6 +287,15 @@ final class ProjectSnapshotCapture
         finally
         {
             result.cancel(false);
+        }
+    }
+
+    static void requireNoObservedDivergence(Access access) throws IOException
+    {
+        Set<IProject> projects = Set.copyOf(access.projects().stream().map(ScopedProject::project).toList());
+        if (model(projects).dirty())
+        {
+            throw new IOException("The EDT model diverged. Resolve the divergence and capture a new snapshot.");
         }
     }
 

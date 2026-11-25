@@ -171,13 +171,18 @@ final class WindowsSourceTree
 
     record Entry(String name, boolean directory, boolean reparsePoint) { }
 
-    interface PinnedFile extends AutoCloseable
+    interface Handle extends AutoCloseable
     {
         @Override
         void close();
     }
 
-    final class Directory implements AutoCloseable
+    interface PinnedFile extends Handle
+    {
+        byte[] read(int maxBytes) throws IOException;
+    }
+
+    final class Directory implements Handle
     {
         private Opened opened;
         private Directory parentToClose;
@@ -195,6 +200,12 @@ final class WindowsSourceTree
         Directory childIfPresent(String name) throws IOException
         {
             return child(name, true);
+        }
+
+        Directory gitWriteDirectory() throws IOException
+        {
+            // Atomic replacement of a child index requires write sharing on the parent directory.
+            return new Directory(openChild(opened, ".git", true, false, FILE_SHARE_READ | FILE_SHARE_WRITE));
         }
 
         private Directory child(String name, boolean allowMissing) throws IOException
@@ -270,36 +281,14 @@ final class WindowsSourceTree
 
         PinnedFile pinFileIfPresent(String name) throws IOException
         {
-            Opened file = openChild(opened, name, false, true);
-            return file == null ? null : file::close;
+            return openChild(opened, name, false, true);
         }
 
         private byte[] read(String name, int maxBytes, boolean allowMissing) throws IOException
         {
             try (Opened file = openChild(opened, name, false, allowMissing))
             {
-                if (file == null)
-                {
-                    return null;
-                }
-                if (maxBytes < 0 || file.size > maxBytes)
-                {
-                    throw new IOException("Snapshot source exceeds the file size limit."); //$NON-NLS-1$
-                }
-                byte[] buffer = new byte[8192];
-                IntByReference count = new IntByReference();
-                ByteArrayOutputStream content = new ByteArrayOutputStream((int)file.size);
-                while (content.size() < file.size)
-                {
-                    int remaining = Math.min(buffer.length, (int)file.size - content.size());
-                    if (!kernel.ReadFile(file.handle, buffer, remaining, count, null)
-                        || count.getValue() <= 0 || count.getValue() > remaining)
-                    {
-                        throw unavailable();
-                    }
-                    content.write(buffer, 0, count.getValue());
-                }
-                return content.toByteArray();
+                return file == null ? null : file.read(maxBytes);
             }
             catch (LinkageError | RuntimeException e)
             {
@@ -330,6 +319,12 @@ final class WindowsSourceTree
 
     private Opened openChild(Opened parent, String name, boolean directory, boolean allowMissing) throws IOException
     {
+        return openChild(parent, name, directory, allowMissing, FILE_SHARE_READ);
+    }
+
+    private Opened openChild(Opened parent, String name, boolean directory, boolean allowMissing, int sharing)
+        throws IOException
+    {
         if (parent == null || !isComponent(name))
         {
             throw unavailable();
@@ -353,7 +348,7 @@ final class WindowsSourceTree
             int access = FILE_READ_ATTRIBUTES | FILE_READ_DATA | SYNCHRONIZE | (directory ? FILE_TRAVERSE : 0);
             int options = FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT
                 | (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE);
-            int openStatus = nt.NtCreateFile(result, access, attributes, status, null, 0, FILE_SHARE_READ, FILE_OPEN,
+            int openStatus = nt.NtCreateFile(result, access, attributes, status, null, 0, sharing, FILE_OPEN,
                 options, null, 0);
             if (allowMissing && openStatus == STATUS_OBJECT_NAME_NOT_FOUND)
             {
@@ -407,7 +402,7 @@ final class WindowsSourceTree
         }
     }
 
-    private final class Opened implements AutoCloseable
+    private final class Opened implements PinnedFile
     {
         private final Pointer handle;
         private final int volume;
@@ -418,6 +413,36 @@ final class WindowsSourceTree
             this.handle = Objects.requireNonNull(handle);
             this.volume = volume;
             this.size = size;
+        }
+
+        @Override
+        public byte[] read(int maxBytes) throws IOException
+        {
+            if (maxBytes < 0 || size > maxBytes)
+            {
+                throw new IOException("Snapshot source exceeds the file size limit."); //$NON-NLS-1$
+            }
+            try
+            {
+                byte[] buffer = new byte[8192];
+                IntByReference count = new IntByReference();
+                ByteArrayOutputStream content = new ByteArrayOutputStream((int)size);
+                while (content.size() < size)
+                {
+                    int remaining = Math.min(buffer.length, (int)size - content.size());
+                    if (!kernel.ReadFile(handle, buffer, remaining, count, null)
+                        || count.getValue() <= 0 || count.getValue() > remaining)
+                    {
+                        throw unavailable();
+                    }
+                    content.write(buffer, 0, count.getValue());
+                }
+                return content.toByteArray();
+            }
+            catch (LinkageError | RuntimeException e)
+            {
+                throw unavailable();
+            }
         }
 
         @Override

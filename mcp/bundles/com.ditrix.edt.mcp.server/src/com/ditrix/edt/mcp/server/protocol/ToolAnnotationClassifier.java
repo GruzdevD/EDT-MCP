@@ -48,6 +48,7 @@ public final class ToolAnnotationClassifier
      * recoverable operations as irreversible. They classify as ordinary non-destructive writes.</p>
      */
     private static final Set<String> DESTRUCTIVE_TOOLS = Set.of(
+        "confirm_project_commit", //$NON-NLS-1$
         "delete_metadata", //$NON-NLS-1$
         "update_database", //$NON-NLS-1$
         "rename_metadata_object", //$NON-NLS-1$
@@ -88,7 +89,13 @@ public final class ToolAnnotationClassifier
 
         if (DESTRUCTIVE_TOOLS.contains(toolName))
         {
-            return new ToolAnnotations(null, Boolean.FALSE, Boolean.TRUE, null, openWorldHint);
+            Boolean idempotent = "confirm_project_commit".equals(toolName) ? Boolean.TRUE : null;
+            return new ToolAnnotations(null, Boolean.FALSE, Boolean.TRUE, idempotent, openWorldHint);
+        }
+
+        if ("preview_project_commit".equals(toolName))
+        {
+            return new ToolAnnotations(null, Boolean.TRUE, null, Boolean.FALSE, openWorldHint);
         }
 
         if (isReadOnly(toolName))

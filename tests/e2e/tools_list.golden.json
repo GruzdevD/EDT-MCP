@@ -375,6 +375,63 @@
   },
   {
     "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Confirm a reviewed project commit on the authorized local branch. Retry the same plan ID after a lost response. Full parameters and examples: call get_tool_guide('confirm_project_commit').",
+    "inputSchema": {
+      "properties": {
+        "planId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "planId"
+      ],
+      "type": "object"
+    },
+    "name": "confirm_project_commit",
+    "outputSchema": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "commitSha": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "mutationOutcomeUnknown": {
+          "type": "boolean"
+        },
+        "parentSha": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "committed",
+            "recovery_required"
+          ],
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "treeId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
       "destructiveHint": false,
       "openWorldHint": false,
       "readOnlyHint": false
@@ -3807,6 +3864,82 @@
           "type": "boolean"
         },
         "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Preview the exact Git tree for selected entries from an authorized project snapshot. Review the plan before calling confirm_project_commit. Full parameters and examples: call get_tool_guide('preview_project_commit').",
+    "inputSchema": {
+      "properties": {
+        "entryIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "snapshotId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshotId",
+        "entryIds",
+        "message"
+      ],
+      "type": "object"
+    },
+    "name": "preview_project_commit",
+    "outputSchema": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "entries": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "error": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "modelStatus": {
+          "enum": [
+            "verified",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "parentSha": {
+          "type": "string"
+        },
+        "planId": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "treeId": {
           "type": "string"
         }
       },

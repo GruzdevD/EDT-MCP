@@ -16,6 +16,8 @@ import java.util.Set;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
+import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.Repository;
 
 import com.ditrix.edt.mcp.server.protocol.McpProtocolHandler;
 import com.ditrix.edt.mcp.server.transport.HttpTransport.AuthenticatedClient;
@@ -140,12 +142,8 @@ final class SnapshotSourcePolicy
                 {
                     throw denied();
                 }
-                JsonElement runner = item.get("yaxunit");
-                if (runner != null && (!runner.isJsonPrimitive() || !runner.getAsJsonPrimitive().isBoolean()))
-                {
-                    throw denied();
-                }
-                result.add(new Grant(name, location, Set.copyOf(extensions), runner != null && runner.getAsBoolean()));
+                result.add(new Grant(name, location, Set.copyOf(extensions), enabled(item, "yaxunit"),
+                    commitBranches(item.get("commitBranches")), enabled(item, "commit")));
             }
             return List.copyOf(result);
         }
@@ -153,6 +151,47 @@ final class SnapshotSourcePolicy
         {
             throw denied();
         }
+    }
+
+    private static boolean enabled(JsonObject item, String key) throws IOException
+    {
+        JsonElement value = item.get(key);
+        if (value == null)
+        {
+            return false;
+        }
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isBoolean())
+        {
+            throw denied();
+        }
+        return value.getAsBoolean();
+    }
+
+    private static Set<String> commitBranches(JsonElement value) throws IOException
+    {
+        if (value == null)
+        {
+            return Set.of();
+        }
+        if (!value.isJsonArray() || value.getAsJsonArray().size() > 64)
+        {
+            throw denied();
+        }
+        Set<String> branches = new HashSet<>();
+        for (JsonElement branch : value.getAsJsonArray())
+        {
+            if (!branch.isJsonPrimitive() || !branch.getAsJsonPrimitive().isString())
+            {
+                throw denied();
+            }
+            String ref = branch.getAsString();
+            if (ref.length() > 240 || !ref.startsWith(Constants.R_HEADS) || !Repository.isValidRefName(ref)
+                || !branches.add(ref))
+            {
+                throw denied();
+            }
+        }
+        return Set.copyOf(branches);
     }
 
     static IOException denied()
@@ -176,11 +215,17 @@ final class SnapshotSourcePolicy
         }
     }
 
-    record Grant(String name, String location, Set<String> extensions, boolean yaxunit)
+    record Grant(String name, String location, Set<String> extensions, boolean yaxunit, Set<String> commitBranches,
+        boolean commit)
     {
         Grant(String name, String location, Set<String> extensions)
         {
             this(name, location, extensions, false);
+        }
+
+        Grant(String name, String location, Set<String> extensions, boolean yaxunit)
+        {
+            this(name, location, extensions, yaxunit, Set.of(), false);
         }
 
         ReadScope readScope()

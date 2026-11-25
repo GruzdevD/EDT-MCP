@@ -105,9 +105,9 @@ public enum ToolGroup
      */
     GIT("git", "Git", //$NON-NLS-1$ //$NON-NLS-2$
         "Git operations: the 'git' command tool (disabled by default), branch listing/switching" //$NON-NLS-1$
-            + " and the branch-to-infobase binding", //$NON-NLS-1$
+            + ", the branch-to-infobase binding, and reviewed project commits", //$NON-NLS-1$
         "git", "list_git_branches", "switch_git_branch", "create_git_branch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "set_branch_infobase"); //$NON-NLS-1$
+        "set_branch_infobase", "preview_project_commit", "confirm_project_commit"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
     private final String id;
     private final String displayName;

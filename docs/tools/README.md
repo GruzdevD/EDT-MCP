@@ -2,7 +2,7 @@
 
 One page per tool: what it does, every parameter, and how it works. Generated from the live server by `docs/generate_tool_docs.py` (re-run to refresh; the source of truth is each tool's Java).
 
-**110 tools.**
+**112 tools.**
 
 ## Core
 
@@ -192,8 +192,10 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 
 ## Git
 
-> Run raw git commands (status/diff/commit/push/pull/...) in a project's repository via the 'git' tool. Powerful (it can push, checkout, stash); DISABLED by default - check it in the MCP Server Tools preference tab to enable.
+> Preview and confirm selected changes from an authorized project snapshot. The general `git` command tool is disabled by default and can be enabled in the MCP Server Tools preferences.
 
 | Tool | Description |
 |------|-------------|
+| [`confirm_project_commit`](confirm_project_commit.md) | Confirm a reviewed snapshot selection on an authorized local branch. |
 | [`git`](git.md) | Run a git command in a project's repository - the non-UI equivalent of typing it in a terminal. Send it as a shell-style string (e.g. 'status', 'diff HEAD~1'… *(not enabled by default)* |
+| [`preview_project_commit`](preview_project_commit.md) | Preview the exact Git tree for the selected entries from a project snapshot. |

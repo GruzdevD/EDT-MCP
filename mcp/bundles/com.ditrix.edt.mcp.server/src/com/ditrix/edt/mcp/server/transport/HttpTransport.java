@@ -9,9 +9,15 @@ package com.ditrix.edt.mcp.server.transport;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.util.HexFormat;
+import java.util.UUID;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.preferences.PreferenceConstants;
@@ -123,6 +129,27 @@ public final class HttpTransport
         boolean matches(String token)
         {
             return token != null && !token.isBlank() && MessageDigest.isEqual(digest, fingerprint(token));
+        }
+
+        /** Derives an opaque, per-operation owner tag for the server's persistent commit journal. */
+        public String journalOwnerTag(byte[] serverSecret, UUID planId) throws IOException
+        {
+            String token = configuredAuthToken();
+            if (!isCurrent() || !matches(token))
+            {
+                throw new IOException("The authenticated project commit session is unavailable.");
+            }
+            try
+            {
+                Mac mac = Mac.getInstance("HmacSHA256");
+                mac.init(new SecretKeySpec(serverSecret, "HmacSHA256"));
+                mac.update(planId.toString().getBytes(StandardCharsets.US_ASCII));
+                return HexFormat.of().formatHex(mac.doFinal(token.getBytes(StandardCharsets.UTF_8)));
+            }
+            catch (GeneralSecurityException e)
+            {
+                throw new IOException("The project commit journal owner cannot be verified.");
+            }
         }
 
         @Override

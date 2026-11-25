@@ -124,6 +124,7 @@ public final class DestructiveConsentGate // NOSONAR intentional singleton (Ecli
      * never silently drift.
      */
     public static final Set<String> GATED_TOOLS = Set.of(
+        "confirm_project_commit", //$NON-NLS-1$
         "delete_metadata", //$NON-NLS-1$
         "rename_metadata_object", //$NON-NLS-1$
         "delete_project", //$NON-NLS-1$
