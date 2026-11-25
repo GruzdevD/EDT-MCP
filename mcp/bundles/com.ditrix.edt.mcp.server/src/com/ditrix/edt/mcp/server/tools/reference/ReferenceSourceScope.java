@@ -7,6 +7,7 @@
 package com.ditrix.edt.mcp.server.tools.reference;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -22,13 +23,15 @@ import com.ditrix.edt.mcp.server.utils.ProjectContext;
 /** The explicit source selection, independent of the project that owns the target. */
 public final class ReferenceSourceScope
 {
-    public static final String KEY = "sourceScope"; //$NON-NLS-1$
+    private static final String KEY = "sourceScope"; //$NON-NLS-1$
     private static final String PROJECT_NAMES = "projectNames"; //$NON-NLS-1$
     private static final String PATHS = "paths"; //$NON-NLS-1$
     private static final String SRC = "src"; //$NON-NLS-1$
 
     private final List<String> projectNames;
     private final List<String> paths;
+
+    record ResolvedSelection(List<IProject> projects, Map<IProject, Set<String>> matches) {}
 
     private ReferenceSourceScope(List<String> projectNames, List<String> paths)
     {
@@ -139,17 +142,28 @@ public final class ReferenceSourceScope
             selector -> directory(selector) ? path.startsWith(selector) : path.equals(selector)));
     }
 
-    /** @return selected project handles, after validating selector existence without visiting sources */
-    public List<IProject> resolveProjects()
+    Map<String, Object> selection()
     {
-        return resolveProjects(name -> ProjectContext.of(name).project());
+        return paths.isEmpty() ? Map.of(PROJECT_NAMES, projectNames)
+            : Map.of(PROJECT_NAMES, projectNames, PATHS, paths);
     }
 
-    List<IProject> resolveProjects(Function<String, IProject> lookup)
+    List<String> selectedPaths()
+    {
+        return paths.isEmpty() ? List.of("") : paths;
+    }
+
+    ResolvedSelection resolve(Runnable check)
+    {
+        return resolve(name -> ProjectContext.of(name).project(), check);
+    }
+
+    ResolvedSelection resolve(Function<String, IProject> lookup, Runnable check)
     {
         List<IProject> projects = new ArrayList<>();
         for (String name : projectNames)
         {
+            check.run();
             IProject project = lookup.apply(name);
             if (project == null || !project.exists())
             {
@@ -157,28 +171,46 @@ public final class ReferenceSourceScope
             }
             projects.add(project);
         }
+        var matches = selectorMatches(projects, check);
+        boolean allAccessible = matches.size() == projects.size();
         for (String selector : paths)
         {
-            if (projects.stream().noneMatch(project -> mayContain(project, selector)))
+            check.run();
+            if (allAccessible && matches.values().stream().noneMatch(selectors -> selectors.contains(selector)))
             {
                 String kind = directory(selector) ? "directory" : "file"; //$NON-NLS-1$ //$NON-NLS-2$
                 throw invalid("." + PATHS + ": '" + selector + "' does not name a " + kind //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     + " under src/ in any selected project. Check the path and trailing slash."); //$NON-NLS-1$
             }
         }
-        return List.copyOf(projects);
+        return new ResolvedSelection(List.copyOf(projects), matches);
     }
 
-    private static boolean mayContain(IProject project, String selector)
+    Map<IProject, Set<String>> selectorMatches(List<IProject> projects, Runnable check)
     {
-        // A closed project cannot prove absence. Leave it selected so the resource plan can
-        // report unavailable coverage instead of claiming the selector was not found.
-        if (!project.isAccessible())
+        Map<IProject, Set<String>> matches = new LinkedHashMap<>();
+        for (IProject project : projects)
         {
-            return true;
+            check.run();
+            // A closed project cannot prove absence. The worker reports unavailable coverage for it.
+            if (paths.isEmpty() || !project.isAccessible())
+            {
+                continue;
+            }
+            IFolder src = project.getFolder(SRC);
+            Set<String> projectSelectors = new LinkedHashSet<>();
+            for (String selector : paths)
+            {
+                check.run();
+                IResource resource = src.findMember(withoutDirectorySuffix(selector));
+                if (resource != null
+                    && resource.getType() == (directory(selector) ? IResource.FOLDER : IResource.FILE))
+                {
+                    projectSelectors.add(selector);
+                }
+            }
+            matches.put(project, Set.copyOf(projectSelectors));
         }
-        IFolder src = project.getFolder(SRC);
-        IResource resource = src.findMember(withoutDirectorySuffix(selector));
-        return resource != null && resource.getType() == (directory(selector) ? IResource.FOLDER : IResource.FILE);
+        return Map.copyOf(matches);
     }
 }

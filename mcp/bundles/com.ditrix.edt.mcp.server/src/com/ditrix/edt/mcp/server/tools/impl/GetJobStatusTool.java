@@ -71,6 +71,18 @@ public class GetJobStatusTool implements IMcpTool
     }
 
     @Override
+    public ResponseType getResponseType(Map<String, String> params)
+    {
+        String id = params == null ? null : trimToNull(params.get(KEY_JOB_ID));
+        return id != null && structured(jobs.get(id)) ? ResponseType.JSON : ResponseType.MARKDOWN;
+    }
+
+    private static boolean structured(JobSnapshot job)
+    {
+        return job != null && FindReferencesTool.NAME.equals(job.getOwningTool());
+    }
+
+    @Override
     public String execute(Map<String, String> params)
     {
         String required = JsonUtils.requireArgument(params, KEY_JOB_ID,
@@ -101,7 +113,7 @@ public class GetJobStatusTool implements IMcpTool
         {
             return unknownJobError(jobId);
         }
-        return BackgroundJobRenderer.render(snapshot);
+        return structured(snapshot) ? BackgroundJobRenderer.renderJson(snapshot) : BackgroundJobRenderer.render(snapshot);
     }
 
     static String unknownJobError(String jobId)

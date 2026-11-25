@@ -10,6 +10,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IPath;
@@ -115,6 +117,19 @@ public final class BslReferenceSearch
     }
 
     /**
+     * Reports the exact enumerated source set after a stable scoped scan. A workspace fallback
+     * still preserves legacy search behavior but cannot prove an enumerated coverage set.
+     */
+    public static boolean findReferences(IResourceServiceProvider resourceServiceProvider,
+        IReferenceFinder finder, IProject baseProject, Iterable<URI> targetURIs,
+        IAcceptor<IReferenceDescription> acceptor, IProgressMonitor monitor,
+        SearchDependenciesResult before, Consumer<List<URI>> examined)
+    {
+        return findReferences(resourceServiceProvider, finder, baseProject, targetURIs, acceptor,
+            monitor, before, () -> ProjectStateChecker.determineReferenceSearchDependencies(baseProject), examined);
+    }
+
+    /**
      * Package-visible environment seam for headless membership/readiness change tests.
      */
     static void findReferences(IResourceServiceProvider resourceServiceProvider,
@@ -134,9 +149,22 @@ public final class BslReferenceSearch
         IAcceptor<IReferenceDescription> acceptor, IProgressMonitor monitor,
         SearchDependenciesResult before, CascadeEnvironment environment)
     {
+        return findReferences(resourceServiceProvider, finder, baseProject, targetURIs, acceptor,
+            monitor, before, () -> ProjectStateChecker.determineSearchDependencies(baseProject, environment),
+            unused -> {});
+    }
+
+    private static boolean findReferences(IResourceServiceProvider resourceServiceProvider,
+        IReferenceFinder finder, IProject baseProject, Iterable<URI> targetURIs,
+        IAcceptor<IReferenceDescription> acceptor, IProgressMonitor monitor,
+        SearchDependenciesResult before, Supplier<SearchDependenciesResult> dependencies, Consumer<List<URI>> examined)
+    {
+        if (monitor != null && monitor.isCanceled())
+        {
+            return false;
+        }
         ScopeResolution scope = resolveScope(resourceServiceProvider, baseProject, before);
-        SearchDependenciesResult afterEnumeration =
-            ProjectStateChecker.determineSearchDependencies(baseProject, environment);
+        SearchDependenciesResult afterEnumeration = dependencies.get();
         boolean stable = before != null && before.hasSameSnapshot(afterEnumeration);
         if (before != null && before.isDetermined() && !stable)
         {
@@ -146,6 +174,10 @@ public final class BslReferenceSearch
                 "search dependency membership, extension kind, or readiness changed during enumeration"); //$NON-NLS-1$
         }
 
+        if (monitor != null && monitor.isCanceled())
+        {
+            return false;
+        }
         String projectName = safeProjectName(baseProject);
         if (scope.isScoped())
         {
@@ -153,28 +185,19 @@ public final class BslReferenceSearch
                 + projectName + "' (" + scope.projectCount + " project(s), " //$NON-NLS-1$ //$NON-NLS-2$
                 + scope.sourceResourceURIs.size() + " indexed resource(s))."); //$NON-NLS-1$
             finder.findReferences(targetURIs, scope.sourceResourceURIs, null, acceptor, monitor);
-            return stable && stillStableAfterSearch(baseProject, before, environment);
+            stable = stable && before.hasSameSnapshot(dependencies.get());
+            if (stable && (monitor == null || !monitor.isCanceled()))
+            {
+                examined.accept(scope.sourceResourceURIs);
+            }
+            return stable;
         }
 
         Activator.logInfo("BSL reference scan: scoped source enumeration unavailable for project '" //$NON-NLS-1$
             + projectName + "' (" + scope.failureReason //$NON-NLS-1$
             + "); using complete workspace Xtext index fallback."); //$NON-NLS-1$
         finder.findAllReferences(targetURIs, null, acceptor, monitor);
-        return stable && stillStableAfterSearch(baseProject, before, environment);
-    }
-
-    /**
-     * Re-proves the snapshot once the finder has RUN. The scoped URI list is frozen before the search
-     * starts, so a project or indexed module joining while the finder works is absent from it; the
-     * fallback enumerates for itself but still searches the adopted TARGET set captured earlier. In
-     * both cases a change spanning the search means completeness was not proven, so the caller must
-     * treat the scan as incomplete rather than as "found nothing".
-     */
-    private static boolean stillStableAfterSearch(IProject baseProject,
-        SearchDependenciesResult before, CascadeEnvironment environment)
-    {
-        return before != null && before.hasSameSnapshot(
-            ProjectStateChecker.determineSearchDependencies(baseProject, environment));
+        return stable && before.hasSameSnapshot(dependencies.get());
     }
 
     private static ScopeResolution resolveScope(IResourceServiceProvider resourceServiceProvider,

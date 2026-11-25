@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import com.ditrix.edt.mcp.server.protocol.GsonProvider;
+import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.utils.BackgroundJobs.JobSnapshot;
 import com.ditrix.edt.mcp.server.utils.BackgroundJobs.ProgressEntry;
 import com.ditrix.edt.mcp.server.utils.WorkmateGateway.WorkmateResponse;
@@ -21,6 +22,23 @@ public final class BackgroundJobRenderer
     private BackgroundJobRenderer()
     {
         // Utility class
+    }
+
+    /** Structured envelope for owners that return machine-readable results. */
+    public static String renderJson(JobSnapshot job)
+    {
+        ToolResult result = ToolResult.success().put("jobId", job.getId())
+            .put("owningTool", job.getOwningTool()).put("status", job.getStatus().value())
+            .put("elapsedMillis", job.getElapsedMs()).put("progress", job.getProgress());
+        if (job.getResult() != null)
+        {
+            result.put("result", job.getResult());
+        }
+        if (job.getErrorMessage() != null)
+        {
+            result.put("error", job.getErrorMessage());
+        }
+        return result.toJson();
     }
 
     /**

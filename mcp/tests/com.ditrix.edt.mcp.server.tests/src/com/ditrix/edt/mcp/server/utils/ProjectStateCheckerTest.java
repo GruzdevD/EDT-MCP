@@ -47,6 +47,7 @@ import com.ditrix.edt.mcp.server.utils.ProjectStateChecker.CascadeEnvironment;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker.ProjectState;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker.ProjectStateResult;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker.SearchDependenciesResult;
+import com.ditrix.edt.mcp.server.utils.ProjectStateChecker.SelectedExtension;
 
 /**
  * Tests for {@link ProjectStateChecker#buildingErrorOrNull(String)} and the cascade pre-flight
@@ -63,6 +64,25 @@ import com.ditrix.edt.mcp.server.utils.ProjectStateChecker.SearchDependenciesRes
 public class ProjectStateCheckerTest
 {
     private static final long SETTLE_TIMEOUT_MS = 5_000L;
+
+    @Test
+    public void selectedExtensionRequiresProvenRuntimeRelationshipOrUnlinkedManifest()
+    {
+        var base = mockOpenProject("Base");
+        var unrelated = mockOpenProject("Other");
+        assertEquals(SelectedExtension.UNDETERMINED,
+            ProjectStateChecker.classifySelectedExtension(base, true, false, null, null));
+        assertEquals(SelectedExtension.UNDETERMINED,
+            ProjectStateChecker.classifySelectedExtension(base, true, true, null, DeclaredBaseProject.DECLARED));
+        assertEquals(SelectedExtension.UNDETERMINED,
+            ProjectStateChecker.classifySelectedExtension(base, true, true, null, DeclaredBaseProject.UNREADABLE));
+        assertEquals(SelectedExtension.UNRELATED,
+            ProjectStateChecker.classifySelectedExtension(base, true, true, null, DeclaredBaseProject.NONE));
+        assertEquals(SelectedExtension.UNRELATED,
+            ProjectStateChecker.classifySelectedExtension(base, true, true, unrelated, null));
+        assertEquals(SelectedExtension.RELATED,
+            ProjectStateChecker.classifySelectedExtension(base, true, true, base, null));
+    }
 
     @Test
     public void buildingErrorOrNullIsNullForNullName()

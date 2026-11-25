@@ -13,8 +13,10 @@ import static org.junit.Assert.assertTrue;
 
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.BiFunction;
 
 import org.eclipse.core.resources.IFolder;
@@ -83,13 +85,33 @@ public class ReferenceSourceScopeTest
             + "\"paths\":[\"CommonModules/\",\"Root.bsl\",\"Root.bsl\"]}");
 
         List<String> lookups = new ArrayList<>();
-        assertEquals(List.of(baseProject, extensionProject), scope.resolveProjects(name -> {
+        var selection = scope.resolve(name -> {
             lookups.add(name);
             return "Base".equals(name) ? baseProject : extensionProject;
-        }));
+        }, () -> {});
+        assertEquals(List.of(baseProject, extensionProject), selection.projects());
+        assertEquals(Map.of(baseProject, Set.of("CommonModules/"), extensionProject, Set.of("Root.bsl")),
+            selection.matches());
         assertEquals(List.of("Base", "Extension"), lookups);
         assertEquals(List.of("CommonModules", "Root.bsl"), baseLookups);
-        assertEquals(List.of("Root.bsl"), extensionLookups);
+        assertEquals(List.of("CommonModules", "Root.bsl"), extensionLookups);
+    }
+
+    @Test
+    public void detectsDisappearanceOfEmptySelectedDirectoryEvenIfAnotherProjectStillMatches()
+    {
+        var baseMembers = new HashMap<>(Map.of("Empty", IResource.FOLDER));
+        IProject base = project(src(baseMembers, new ArrayList<>()));
+        IProject extension = project(src(Map.of("Empty", IResource.FOLDER), new ArrayList<>()));
+        var scope = parse("{\"projectNames\":[\"Base\",\"Extension\"],\"paths\":[\"Empty/\"]}");
+        var selection = scope.resolve(name -> "Base".equals(name) ? base : extension, () -> {});
+        baseMembers.clear();
+        var afterReadiness = scope.selectorMatches(selection.projects(), () -> {});
+
+        assertEquals(Set.of("Empty/"), selection.matches().get(base));
+        assertEquals(Set.of(), afterReadiness.get(base));
+        assertEquals(Set.of("Empty/"), afterReadiness.get(extension));
+        assertFalse(selection.matches().equals(afterReadiness));
     }
 
     @Test
@@ -100,7 +122,7 @@ public class ReferenceSourceScopeTest
         IProject unknown = stub(IProject.class, (method, args) -> "exists".equals(method) ? false : unexpected(method));
         ReferenceSourceScope unknownProject = parse("{\"projectNames\":[\"Known\",\"Typo\"],\"paths\":[\"Root.bsl\"]}");
         assertTrue(assertThrows(IllegalArgumentException.class,
-            () -> unknownProject.resolveProjects(name -> "Known".equals(name) ? known : unknown))
+            () -> unknownProject.resolve(name -> "Known".equals(name) ? known : unknown, () -> {}))
                 .getMessage().contains("Typo"));
         assertTrue(lookups.isEmpty());
 
@@ -108,7 +130,7 @@ public class ReferenceSourceScopeTest
         {
             ReferenceSourceScope scope = ReferenceSourceScope.parse(Map.of(
                 "projectNames", List.of("Known"), "paths", List.of(path)));
-            assertTrue(assertThrows(IllegalArgumentException.class, () -> scope.resolveProjects(name -> known))
+            assertTrue(assertThrows(IllegalArgumentException.class, () -> scope.resolve(name -> known, () -> {}))
                 .getMessage().contains(path));
         }
         assertEquals(List.of("Missing.bsl", "CommonModules"), lookups);

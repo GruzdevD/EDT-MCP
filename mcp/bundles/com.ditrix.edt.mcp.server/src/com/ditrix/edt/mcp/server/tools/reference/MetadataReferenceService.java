@@ -11,6 +11,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
 import java.util.List;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.emf.common.util.URI;
@@ -64,6 +67,12 @@ public class MetadataReferenceService
      */
     public String findReferences(String projectName, String objectFqn, int limit)
     {
+        return findReferences(projectName, objectFqn, limit, () -> false, unused -> {});
+    }
+
+    public String findReferences(String projectName, String objectFqn, int limit,
+        BooleanSupplier stopped, Consumer<Supplier<String>> partial)
+    {
         // Normalize Russian metadata type names: "Справочник.Номенклатура" -> "Catalog.Номенклатура"
         objectFqn = MetadataTypeUtils.normalizeFqn(objectFqn);
 
@@ -109,7 +118,9 @@ public class MetadataReferenceService
         }
 
         // Collect all references
-        ReferenceCollector collector = new ReferenceCollector(project, bmModel, (IBmObject)targetObject, limit);
+        ReferenceCollector collector = new ReferenceCollector(project, bmModel, (IBmObject)targetObject, limit, stopped);
+        String displayFqn = objectFqn;
+        partial.accept(() -> formatOutput(displayFqn, collector.getAllReferences()));
 
         try
         {
@@ -123,7 +134,7 @@ public class MetadataReferenceService
         }
 
         // Format output
-        return formatOutput(objectFqn, collector);
+        return formatOutput(objectFqn, collector.getAllReferences());
     }
 
     /**
@@ -236,11 +247,11 @@ public class MetadataReferenceService
     /**
      * Formats output as markdown - sorted list similar to EDT.
      */
-    private String formatOutput(String objectFqn, ReferenceCollector collector)
+    public static String formatOutput(String objectFqn, List<ReferenceInfo> allRefs)
     {
         StringBuilder sb = new StringBuilder();
 
-        int totalCount = collector.getTotalCount();
+        int totalCount = allRefs.size();
 
         sb.append("# References to ").append(objectFqn).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
         sb.append("**Total references found:** ").append(totalCount).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -252,8 +263,6 @@ public class MetadataReferenceService
         }
 
         // Get all references and merge BSL by module
-        List<ReferenceInfo> allRefs = collector.getAllReferences();
-
         // Separate BSL and metadata references
         java.util.Map<String, List<Integer>> bslModuleLines = new java.util.TreeMap<>();
         List<ReferenceInfo> metadataRefs = new ArrayList<>();
@@ -516,6 +525,7 @@ public class MetadataReferenceService
         /** Non-null exactly when {@code target instanceof MdObject} - see the class comment. */
         private final MdObject targetAsMdObject;
         private final int limit;
+        private final BooleanSupplier stopped;
         private final List<ReferenceInfo> references = new ArrayList<>();
         /** Set to track unique references (category:path:feature) to avoid duplicates */
         private final java.util.Set<String> seenReferences = new java.util.HashSet<>();
@@ -539,12 +549,19 @@ public class MetadataReferenceService
 
         ReferenceCollector(IProject sourceProject, IBmModel bmModel, IBmObject target, int limit)
         {
+            this(sourceProject, bmModel, target, limit, () -> false);
+        }
+
+        ReferenceCollector(IProject sourceProject, IBmModel bmModel, IBmObject target, int limit,
+            BooleanSupplier stopped)
+        {
             super("Find references to " + safeTargetName(target)); //$NON-NLS-1$
             this.sourceProject = sourceProject;
             this.bmModel = bmModel;
             this.target = target;
             this.targetAsMdObject = (target instanceof MdObject) ? (MdObject)target : null;
             this.limit = limit;
+            this.stopped = stopped;
         }
 
         /**
@@ -585,12 +602,16 @@ public class MetadataReferenceService
          */
         void collect()
         {
+            if (stopped.getAsBoolean())
+            {
+                return;
+            }
             IBmEngine engine = bmModel.getEngine();
 
             // 1. Collect direct back references - applies to ANY IBmObject.
             collectBackReferences(engine, target);
 
-            if (targetAsMdObject != null)
+            if (!stopped.getAsBoolean() && targetAsMdObject != null)
             {
                 // 2. Collect references to produced types
                 collectProducedTypesReferences(engine, targetAsMdObject);
@@ -604,15 +625,22 @@ public class MetadataReferenceService
 
             // 5. Collect BSL code references - applies to ANY IBmObject. MdObject targets add their
             // produced types; MdObject and PredefinedItem targets can add adopted-extension copies.
-            collectBslReferences(target);
+            if (!stopped.getAsBoolean())
+            {
+                collectBslReferences(target);
+            }
         }
 
         /**
          * Adds reference if not duplicate.
          * @return true if added, false if duplicate or internal path
          */
-        private boolean addReference(ReferenceInfo ref)
+        private synchronized boolean addReference(ReferenceInfo ref)
         {
+            if (stopped.getAsBoolean())
+            {
+                return false;
+            }
             // Create unique key
             String key = ref.category + ":" + ref.identityPath + ":" + //$NON-NLS-1$ //$NON-NLS-2$
                 (ref.isBslReference ? ref.line : ref.feature);
@@ -643,7 +671,7 @@ public class MetadataReferenceService
 
             for (IBmCrossReference ref : refs) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
             {
-                if (references.size() >= limit * 10) // overall cap (all categories) before grouping
+                if (stopped.getAsBoolean() || references.size() >= limit * 10)
                 {
                     break;
                 }
@@ -698,7 +726,7 @@ public class MetadataReferenceService
             Collection<IBmCrossReference> refs = engine.getBackReferences(typeItem);
             for (IBmCrossReference ref : refs) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
             {
-                if (references.size() >= limit * 10)
+                if (stopped.getAsBoolean() || references.size() >= limit * 10)
                 {
                     break;
                 }
@@ -738,10 +766,14 @@ public class MetadataReferenceService
         {
             for (PredefinedItem item : PredefinedItemUtil.getItems((EObject) target))
             {
+                if (stopped.getAsBoolean())
+                {
+                    return;
+                }
                 Collection<IBmCrossReference> refs = engine.getBackReferences((IBmObject) item);
                 for (IBmCrossReference ref : refs) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
                 {
-                    if (references.size() >= limit * 10)
+                    if (stopped.getAsBoolean() || references.size() >= limit * 10)
                     {
                         break;
                     }
@@ -775,6 +807,10 @@ public class MetadataReferenceService
             FieldSource fieldSource = (FieldSource) target;
             for (var field : fieldSource.getFields())
             {
+                if (stopped.getAsBoolean())
+                {
+                    return;
+                }
                 if (!(field instanceof IBmObject))
                 {
                     continue;
@@ -793,7 +829,7 @@ public class MetadataReferenceService
         {
             for (IBmCrossReference ref : refs) // NOSONAR intentional multiple loop exits; restructuring with flags would reduce readability
             {
-                if (references.size() >= limit * 10)
+                if (stopped.getAsBoolean() || references.size() >= limit * 10)
                 {
                     break;
                 }
@@ -887,7 +923,14 @@ public class MetadataReferenceService
 
                 boolean dependencySnapshotStable = BslReferenceSearch.findReferences(
                     resourceServiceProvider, finder, sourceProject, targetURIs,
-                    this::collectBslReferenceDescription, new NullProgressMonitor(),
+                    this::collectBslReferenceDescription, new NullProgressMonitor()
+                    {
+                        @Override
+                        public boolean isCanceled()
+                        {
+                            return super.isCanceled() || stopped.getAsBoolean();
+                        }
+                    },
                     searchDependencies);
 
                 if (!dependencySnapshotStable
@@ -929,7 +972,7 @@ public class MetadataReferenceService
 
         private void collectBslReferenceDescription(IReferenceDescription refDesc)
         {
-            if (references.size() >= limit * 10)
+            if (stopped.getAsBoolean() || references.size() >= limit * 10)
             {
                 return;
             }
@@ -1689,12 +1732,7 @@ public class MetadataReferenceService
             return sb.toString();
         }
 
-        public int getTotalCount()
-        {
-            return references.size();
-        }
-
-        public List<ReferenceInfo> getAllReferences()
+        public synchronized List<ReferenceInfo> getAllReferences()
         {
             return new ArrayList<>(references);
         }

@@ -26,6 +26,54 @@ import com.google.gson.JsonParser;
 /** Contract and headless polling tests for {@link GetJobStatusTool}. */
 public class GetJobStatusToolTest
 {
+    @Test
+    public void referenceDeadlinePublishesStructuredResultWhileWorkerUnwinds() throws Exception
+    {
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var released = new java.util.concurrent.CountDownLatch(1);
+        try (var jobs = new BackgroundJobs(4, 1))
+        {
+            var tool = new GetJobStatusTool(jobs);
+            var partial = Map.of("complete", false, "stopReason", "timeout", "references", java.util.List.of("partial"));
+            var job = jobs.startWithTimeoutResult(FindReferencesTool.NAME, 1_500, 1, "test", () -> partial, progress -> {
+                entered.countDown();
+                while (released.getCount() != 0)
+                {
+                    try
+                    {
+                        released.await();
+                    }
+                    catch (InterruptedException e)
+                    {
+                        // Model call still unwinding.
+                    }
+                }
+                return Map.of("stopReason", "late");
+            });
+            try
+            {
+                assertTrue("The worker must start before its deadline",
+                    entered.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                var params = Map.of("jobId", job.getId(), "waitSeconds", "0");
+                assertEquals(ResponseType.JSON, tool.getResponseType(params));
+                var first = com.google.gson.JsonParser.parseString(tool.execute(params)).getAsJsonObject();
+                assertEquals(job.getId(), first.get("jobId").getAsString());
+                var reply = com.google.gson.JsonParser.parseString(tool.execute(
+                    Map.of("jobId", job.getId(), "waitSeconds", "5"))).getAsJsonObject();
+                var done = jobs.get(job.getId());
+                assertEquals(BackgroundJobs.Status.DONE, done.getStatus());
+                assertEquals(partial, done.getResult());
+                assertEquals("timeout", reply.getAsJsonObject("result").get("stopReason").getAsString());
+                assertEquals(done.getElapsedMs(), reply.get("elapsedMillis").getAsLong());
+                assertTrue(jobs.startWithTimeoutResult(FindReferencesTool.NAME, 1000, 1, "test", () -> partial,
+                    progress -> partial) == null);
+            }
+            finally
+            {
+                released.countDown();
+            }
+        }
+    }
     private BackgroundJobs jobs;
     private GetJobStatusTool tool;
 

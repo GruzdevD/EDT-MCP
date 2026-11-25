@@ -664,6 +664,23 @@ public final class BackgroundJobs implements AutoCloseable
     private JobSnapshot start(String owningTool, long timeoutMs, int maxRunning,
         String initialProgress, CancellationCapability cancellation, JobWork work)
     {
+        return start(owningTool, timeoutMs, maxRunning, initialProgress, cancellation, null, work);
+    }
+
+    /**
+     * Starts bounded read-only work whose owner can freeze a terminal partial result at the deadline.
+     * The worker still holds its admission slot until it unwinds.
+     */
+    public JobSnapshot startWithTimeoutResult(String owningTool, long timeoutMs, int maxRunning,
+        String initialProgress, java.util.function.Supplier<Object> timeoutResult, JobWork work)
+    {
+        return start(owningTool, timeoutMs, maxRunning, initialProgress, null, timeoutResult, work);
+    }
+
+    private JobSnapshot start(String owningTool, long timeoutMs, int maxRunning,
+        String initialProgress, CancellationCapability cancellation,
+        java.util.function.Supplier<Object> timeoutResult, JobWork work)
+    {
         if (owningTool == null || owningTool.isBlank())
         {
             throw new IllegalArgumentException("Background job owning tool must not be blank"); //$NON-NLS-1$
@@ -728,7 +745,7 @@ public final class BackgroundJobs implements AutoCloseable
         try
         {
             ScheduledFuture<?> deadline = deadlines.schedule(
-                () -> timeOut(record, boundedTimeoutMs), boundedTimeoutMs,
+                () -> timeOut(record, boundedTimeoutMs, timeoutResult), boundedTimeoutMs,
                 TimeUnit.MILLISECONDS);
             record.setDeadlineFuture(deadline);
             workers.execute(task);
@@ -1014,8 +1031,17 @@ public final class BackgroundJobs implements AutoCloseable
         }
     }
 
-    private static void timeOut(JobRecord record, long timeoutMs)
+    private static void timeOut(JobRecord record, long timeoutMs,
+        java.util.function.Supplier<Object> timeoutResult)
     {
+        if (timeoutResult != null)
+        {
+            if (record.isRunning() && record.complete(timeoutResult.get()))
+            {
+                record.cancelWork();
+            }
+            return;
+        }
         String timeout = formatSeconds(timeoutMs);
         // Committed-or-fail is decided under the record's own lock. Reading the flag first and
         // failing afterwards would leave a window in which the work commits in between, and

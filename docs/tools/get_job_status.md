@@ -1,6 +1,6 @@
 # get_job_status
 
-Poll any background job by the jobId returned from its owning tool. Returns the current state, progress journal, and terminal result; optionally waits for a transport-safe interval. Full parameters and examples: call get_tool_guide('get_job_status').
+Poll any background job by the jobId its owning tool returned: state, progress journal and terminal result. Parameters and examples: get_tool_guide('get_job_status').
 
 ## Parameters
 | Parameter | Required | Type | Description |
@@ -35,6 +35,11 @@ Wait briefly for a terminal outcome:
 The snapshot identifies the owning tool and contains the state, elapsed time,
 timestamped progress journal, and result or error once terminal. Continue polling
 the same id while the state is `running`.
+
+For a structured `find_references` job, the poll response has a JSON envelope.
+Read the nested `result` once the job is `done`. A timed-out search can finish
+with job state `done` and `result.stopReason: "timeout"`. Read
+`result.complete` before using counts as coverage.
 
 ## Unknown and expired jobs
 

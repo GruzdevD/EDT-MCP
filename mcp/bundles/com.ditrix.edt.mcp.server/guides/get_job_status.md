@@ -25,6 +25,11 @@ The snapshot identifies the owning tool and contains the state, elapsed time,
 timestamped progress journal, and result or error once terminal. Continue polling
 the same id while the state is `running`.
 
+For a structured `find_references` job, the poll response has a JSON envelope.
+Read the nested `result` once the job is `done`. A timed-out search can finish
+with job state `done` and `result.stopReason: "timeout"`. Read
+`result.complete` before using counts as coverage.
+
 ## Unknown and expired jobs
 
 The registry is bounded and may evict old completed jobs. An unknown or expired

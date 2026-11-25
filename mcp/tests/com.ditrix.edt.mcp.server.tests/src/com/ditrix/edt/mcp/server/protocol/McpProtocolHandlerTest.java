@@ -855,6 +855,36 @@ public class McpProtocolHandlerTest
     }
 
     @Test
+    public void testFindReferencesValidatesTheExactTimeoutTokenBeforeDispatch()
+    {
+        registry.register(new FindReferencesTool()
+        {
+            @Override
+            public String execute(Map<String, String> params)
+            {
+                return ToolResult.success().put("budget", params.get("timeoutSeconds")).toJson();
+            }
+        });
+        var bridge = new EdtMcpBridge();
+        for (String token : List.of("null", "\"45\"", "false", "0", "3601", "45.5", "44.9999999999999999999999"))
+        {
+            String args = "{\"projectName\":\"Base\",\"objectFqn\":\"Catalog.Products\",\"timeoutSeconds\":" + token + "}";
+            for (String response : List.of(handler.processRequest(buildToolCallRequest(1, FindReferencesTool.NAME, args)),
+                bridge.callTool(FindReferencesTool.NAME, args)))
+            {
+                var result = parseResponse(response).getAsJsonObject("result");
+                assertTrue(response, result.get("isError").getAsBoolean());
+                assertTrue(response, result.getAsJsonObject("structuredContent").get("error").getAsString()
+                    .contains("timeoutSeconds must be a JSON integer from 1 to 3600"));
+            }
+        }
+        String args = "{\"projectName\":\"Base\",\"objectFqn\":\"Catalog.Products\",\"timeoutSeconds\":300}";
+        var accepted = parseResponse(handler.processRequest(buildToolCallRequest(1, FindReferencesTool.NAME, args)));
+        assertEquals("300.0", accepted.getAsJsonObject("result").getAsJsonObject("structuredContent")
+            .get("budget").getAsString());
+    }
+
+    @Test
     public void testToolCallErrorPayloadFlagsIsError()
     {
         // A JSON tool returning a ToolResult.error payload (success:false) must be

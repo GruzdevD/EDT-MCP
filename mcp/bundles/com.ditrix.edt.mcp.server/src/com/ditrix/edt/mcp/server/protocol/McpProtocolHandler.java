@@ -399,13 +399,12 @@ public class McpProtocolHandler
         
         Activator.logInfo("Processing tools/call: " + tool.getName()); //$NON-NLS-1$
         
-        Map<String, Object> arguments = request.getArguments();
-        ToolResult validation = tool.validateRawArguments(arguments == null ? Map.of() : arguments);
+        ToolResult validation = tool.validateRawArguments(request.getRawArguments());
         if (validation != null)
         {
             return buildToolCallJsonResponse(validation.toJson(), requestId, toolName);
         }
-        Map<String, String> params = extractToolParams(arguments);
+        Map<String, String> params = extractToolParams(request.getArguments());
         
         // Set current tool name for status bar display
         McpServer server = Activator.getDefault() != null ? Activator.getDefault().getMcpServer() : null;

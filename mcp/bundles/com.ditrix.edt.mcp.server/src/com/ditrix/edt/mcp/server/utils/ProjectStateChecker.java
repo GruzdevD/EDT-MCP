@@ -14,8 +14,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.CoreException;
 
 import com._1c.g5.v8.derived.DerivedDataStatus;
 import com._1c.g5.v8.derived.IDerivedDataManager;
@@ -63,6 +65,44 @@ public final class ProjectStateChecker
     private static final List<String> V8_DEPENDENT_PROJECT_NATURES = Arrays.asList(
         V8_EXTENSION_PROJECT_NATURE,
         V8_EXTERNAL_OBJECTS_PROJECT_NATURE);
+
+    public enum SelectedExtension
+    {
+        RELATED, UNRELATED, UNDETERMINED
+    }
+
+    /** Determine whether one selected source needs adopted targets, without inspecting other projects. */
+    public static SelectedExtension classifySelectedExtension(IProject base, IProject source)
+    {
+        if (base.equals(source))
+        {
+            return SelectedExtension.UNRELATED;
+        }
+        try
+        {
+            boolean declared = source.hasNature(V8_EXTENSION_PROJECT_NATURE);
+            boolean registered = ExtensionOriginUtils.isExtensionProject(source);
+            IProject parent = registered ? ExtensionOriginUtils.resolveBaseProject(source) : null;
+            var declaration = declared && registered && parent == null
+                ? ExtensionOriginUtils.readDeclaredBaseProject(source) : null;
+            return classifySelectedExtension(base, declared, registered, parent, declaration);
+        }
+        catch (CoreException | RuntimeException e)
+        {
+            Activator.logError("Cannot classify selected source " + source.getName(), e);
+            return SelectedExtension.UNDETERMINED;
+        }
+    }
+
+    static SelectedExtension classifySelectedExtension(IProject base, boolean declared,
+        boolean registered, IProject parent, DeclaredBaseProject declaration)
+    {
+        if (declared != registered || (declared && parent == null && declaration != DeclaredBaseProject.NONE))
+        {
+            return SelectedExtension.UNDETERMINED;
+        }
+        return declared && base.equals(parent) ? SelectedExtension.RELATED : SelectedExtension.UNRELATED;
+    }
 
     /**
      * Project state enumeration.
@@ -173,6 +213,16 @@ public final class ProjectStateChecker
      */
     public static ProjectStateResult checkProjectState(IProject project)
     {
+        return checkProjectState(project, false);
+    }
+
+    public static ProjectStateResult checkReferenceSearchProject(IProject project)
+    {
+        return checkProjectState(project, true);
+    }
+
+    private static ProjectStateResult checkProjectState(IProject project, boolean modelOnly)
+    {
         if (project == null)
         {
             return new ProjectStateResult(ProjectState.NOT_AVAILABLE, "Project is null");
@@ -201,7 +251,7 @@ public final class ProjectStateChecker
             return new ProjectStateResult(ProjectState.NOT_AVAILABLE, "Not an EDT project");
         }
         
-        return checkDtProjectState(dtProject);
+        return checkDtProjectState(dtProject, modelOnly);
     }
     
     /**
@@ -211,6 +261,11 @@ public final class ProjectStateChecker
      * @return ProjectStateResult with state and message
      */
     public static ProjectStateResult checkDtProjectState(IDtProject dtProject)
+    {
+        return checkDtProjectState(dtProject, false);
+    }
+
+    private static ProjectStateResult checkDtProjectState(IDtProject dtProject, boolean modelOnly)
     {
         if (dtProject == null)
         {
@@ -233,6 +288,13 @@ public final class ProjectStateChecker
             return new ProjectStateResult(ProjectState.UNKNOWN, "Cannot determine build state");
         }
         
+        if (modelOnly)
+        {
+            return isModelDataComputed(ddManager)
+                ? new ProjectStateResult(ProjectState.READY, "Project model and reference index are ready")
+                : new ProjectStateResult(ProjectState.BUILDING, "Project model or reference index is building");
+        }
+
         // Check if computation pipeline is idle
         if (!ddManager.isIdle())
         {
@@ -830,8 +892,20 @@ public final class ProjectStateChecker
         return determineSearchDependencies(base, CascadeEnvironment.DEFAULT);
     }
 
+    public static SearchDependenciesResult determineReferenceSearchDependencies(IProject base)
+    {
+        return determineSearchDependencies(base, CascadeEnvironment.DEFAULT,
+            ProjectStateChecker::checkReferenceSearchProject);
+    }
+
     /** Package-visible seam for headless search-snapshot tests. */
     static SearchDependenciesResult determineSearchDependencies(IProject base, CascadeEnvironment env)
+    {
+        return determineSearchDependencies(base, env, project -> env.getProjectState(project));
+    }
+
+    private static SearchDependenciesResult determineSearchDependencies(IProject base, CascadeEnvironment env,
+        Function<IProject, ProjectStateResult> checkReadiness)
     {
         if (base == null || env == null)
         {
@@ -898,7 +972,7 @@ public final class ProjectStateChecker
                     // no reference to a base-configuration object, which makes it genuinely
                     // unrelated. Failing closed here instead would hand every workspace that merely
                     // has one open the workspace-wide scan this scoping exists to avoid.
-                    ProjectStateResult unlinkedState = env.getProjectState(registeredProject);
+                    ProjectStateResult unlinkedState = checkReadiness.apply(registeredProject);
                     if (unlinkedState == null || unlinkedState.getState() != ProjectState.READY)
                     {
                         // A project that has not SETTLED proves nothing about what its Xtext
@@ -988,7 +1062,7 @@ public final class ProjectStateChecker
             for (IProject searchProject : searchProjects)
             {
                 String name = requiredProjectName(searchProject);
-                ProjectStateResult state = env.getProjectState(searchProject);
+                ProjectStateResult state = checkReadiness.apply(searchProject);
                 if (state == null || state.getState() == null
                     || readiness.put(name, state.getState()) != null)
                 {

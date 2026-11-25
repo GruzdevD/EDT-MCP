@@ -6,9 +6,8 @@ What the tool does
 find_references finds every place a top-level *metadata OBJECT* (addressed by its
 FQN, e.g. 'Catalog.Catalog', 'CommonModule.Calc') is used: in other metadata
 objects (Configuration containment, form attributes/items, produced-type usages,
-input-by-string, etc.) AND in BSL code. ResponseType is MARKDOWN, so the payload
-is in r.text (r.structured is None for the success path; the structured-error
-diversion still populates r.structured on isError).
+input-by-string, etc.) AND in BSL code. Legacy calls return Markdown in r.text.
+Opt-in calls use a structured job envelope whose nested result reports coverage.
 
 IMPORTANT — this is an OBJECT-level reference finder, NOT a method/symbol finder.
 The required params are projectName + objectFqn (plus an optional `limit`,
@@ -78,6 +77,7 @@ from harness import (
     assert_no_diff,
     e2e_test,
     PROJECT,
+    TESTS_PROJECT,
 )
 
 
@@ -174,6 +174,92 @@ def test_subsystem_single_configuration_reference():
     assert_contains(r.text, "Configuration - Subsystems - subsystems",
                     "the single Configuration subsystems reference must be listed")
     assert_no_diff("a read tool must not touch the project on disk")
+
+
+def _scoped_search(target_project, fqn, projects, paths=None):
+    source_scope = {"projectNames": projects}
+    if paths is not None:
+        source_scope["paths"] = paths
+    reply = call("find_references", {
+        "projectName": target_project,
+        "objectFqn": fqn,
+        "sourceScope": source_scope,
+        "waitSeconds": 0,
+    })
+    assert_ok(reply, "start scoped reference search")
+    snapshot = reply.structured
+    for _ in range(10):
+        if snapshot["status"] != "running":
+            break
+        reply = call("get_job_status", {"jobId": snapshot["jobId"], "waitSeconds": 5})
+        assert_ok(reply, "poll scoped reference search")
+        snapshot = reply.structured
+    assert snapshot["status"] == "done", snapshot
+    result = snapshot["result"]
+    assert result["complete"] and result["stopReason"] == "completed", result
+    return result
+
+
+@e2e_test(tool="find_references", kind="read")
+def test_async_scope_reports_unknown_project_or_missing_path_from_job():
+    cases = [
+        ({"projectNames": ["NoSuchProject_ZZZ_e2e"]}, "NoSuchProject_ZZZ_e2e", "list_projects"),
+        ({"projectNames": [PROJECT], "paths": ["NoSuchSource_e2e.bsl"]},
+         "NoSuchSource_e2e.bsl", "trailing slash"),
+    ]
+    for scope, bad_value, hint in cases:
+        reply = call("find_references", {
+            "projectName": PROJECT, "objectFqn": "Catalog.Catalog",
+            "sourceScope": scope, "waitSeconds": 0,
+        })
+        assert_ok(reply, "submit asynchronous scope validation")
+        job_id = reply.structured["jobId"]
+        for _ in range(10):
+            reply = call("get_job_status", {"jobId": job_id, "waitSeconds": 5})
+            assert_ok(reply, "poll asynchronous scope validation")
+            snapshot = reply.structured
+            if snapshot["status"] != "running":
+                break
+        assert snapshot["status"] == "failed", snapshot
+        assert_error_quality(snapshot["error"], names=[bad_value], suggests=[hint],
+                             ctx="background scope validation")
+    assert_no_diff("asynchronous validation must not modify the project")
+
+
+@e2e_test(tool="find_references", kind="read")
+def test_scoped_projects_partition_base_and_adopted_extension_usages():
+    extension = TESTS_PROJECT
+    fqn = "CommonModule.Calc"
+    base = _scoped_search(PROJECT, fqn, [PROJECT])
+    added = _scoped_search(PROJECT, fqn, [extension])
+    combined = _scoped_search(PROJECT, fqn, [PROJECT, extension])
+
+    base_ids = {r["id"] for r in base["references"]}
+    extension_ids = {r["id"] for r in added["references"]}
+    assert base_ids and extension_ids and not base_ids.intersection(extension_ids)
+    assert {r["id"] for r in combined["references"]} == base_ids.union(extension_ids)
+    assert extension not in base["bmSourceReads"]
+    assert extension not in base["bslSourceLoads"]
+    assert any(r["type"] == "bsl" and r["project"] == extension
+               and r["path"] == "CommonModules/tests_SampleTests/Module.bsl"
+               for r in added["references"]), added
+    assert_no_diff("scoped reference searches must be read-only")
+
+
+@e2e_test(tool="find_references", kind="read")
+def test_exact_rights_file_and_indexed_zero_hit_module():
+    extension = TESTS_PROJECT
+    rights_path = "Roles/tests_DefaultRole/Rights.rights"
+    rights = _scoped_search(extension, "Catalog.tests_ExtOnly", [extension], [rights_path])
+    assert rights["examinedResourceCount"] == 1, rights
+    assert len(rights["references"]) == 1, rights
+    reference = rights["references"][0]
+    assert reference["path"] == rights_path and reference["property"] == "object", rights
+
+    module = "CommonModules/OK/Module.bsl"
+    zero = _scoped_search(PROJECT, "Справочник.Catalog", [PROJECT], [module])
+    assert zero["examinedResourceCount"] == 1 and not zero["references"], zero
+    assert_no_diff("exact file searches must be read-only")
 
 
 @e2e_test(tool="find_references", kind="read")
