@@ -23,6 +23,31 @@ import com.google.gson.JsonObject;
 public class SnapshotSourcePolicyTest
 {
     @Test
+    public void reviewAccessSurvivesExecutionFlagChangesWhileJobsRequireCurrentGrant() throws IOException
+    {
+        var read = SnapshotSourcePolicy.grants(policy("C:\\tree\\Allowed"), "Allowed", List.of());
+        var original = read.get(0);
+        var execute = List.of(new SnapshotSourcePolicy.Grant(
+            original.name(), original.location(), original.extensions(), true));
+        SnapshotSourcePolicy.requireGrantScope(read, execute, false);
+        SnapshotSourcePolicy.requireGrantScope(execute, read, false);
+        SnapshotSourcePolicy.requireGrantScope(execute, execute, true);
+        assertThrows(IOException.class, () -> SnapshotSourcePolicy.requireGrantScope(execute, read, true));
+        var relocated = SnapshotSourcePolicy.grants(policy("C:\\other\\Allowed"), "Allowed", List.of());
+        assertThrows(IOException.class, () -> SnapshotSourcePolicy.requireGrantScope(read, relocated, false));
+    }
+    @Test
+    public void arbitrarySourceReadingDoesNotGrantTestExecution() throws IOException
+    {
+        String ordinary = policy("C:\\tree\\Allowed");
+        assertFalse(SnapshotSourcePolicy.grants(ordinary, "Allowed", List.of()).get(0).yaxunit());
+        String enabled = ordinary.replace("\"extensions\"", "\"yaxunit\":true,\"extensions\"");
+        assertTrue(SnapshotSourcePolicy.grants(enabled, "Allowed", List.of()).get(0).yaxunit());
+        assertThrows(IOException.class, () -> SnapshotSourcePolicy.grants(
+            enabled.replace("true", "\"true\""), "Allowed", List.of()));
+    }
+
+    @Test
     public void deniesByDefaultBeforeLookingUpWorkspace()
     {
         assertThrows(IOException.class, () -> SnapshotSourcePolicy.require(null, policy("C:\\tree\\Allowed"),

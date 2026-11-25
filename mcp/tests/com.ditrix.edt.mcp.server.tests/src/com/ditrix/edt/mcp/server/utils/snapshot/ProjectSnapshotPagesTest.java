@@ -88,6 +88,23 @@ public class ProjectSnapshotPagesTest
         assertEquals("inputLimit", delta.reason());
     }
 
+    @Test
+    public void comparesSnapshotsAcrossExecutionGrantChanges() throws IOException
+    {
+        String location = temp.newFolder().toString();
+        var time = Clock.systemUTC().instant();
+        var before = new Retained(UUID.randomUUID(), time,
+            List.of(new Grant("Configuration", location, Set.of("bsl"), false)), snapshot(new byte[] {1}));
+        var after = new Retained(UUID.randomUUID(), time,
+            List.of(new Grant("Configuration", location, Set.of("bsl"), true)), snapshot(new byte[] {2}));
+        var pages = new ProjectSnapshotPages();
+        assertEquals(1, pages.read(after, before, View.DIFF, null, null, 10).total());
+        assertEquals(1, pages.read(before, after, View.DIFF, null, null, 10).total());
+        var differentScope = new Retained(UUID.randomUUID(), time,
+            List.of(new Grant("Configuration", location, Set.of("mdo"), true)), after.snapshot());
+        assertThrows(IOException.class, () -> pages.read(differentScope, before, View.DIFF, null, null, 10));
+    }
+
     private static Snapshot snapshot(byte[] module)
     {
         Version head = new Version("before\n".getBytes(StandardCharsets.UTF_8));

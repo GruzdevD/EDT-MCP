@@ -7,10 +7,15 @@
 package com.ditrix.edt.mcp.server.utils.snapshot;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -47,17 +52,21 @@ public final class ProjectSnapshotService
     private record ProjectSummary(String projectName, String branch, String head, String sourceFingerprint,
         boolean rawDiskComparison) { }
 
-    public static ToolResult capture(String name, List<String> extensions) throws IOException
+    public static ToolResult capture(String name, List<String> extensions, boolean forYaxunit) throws IOException
     {
         long generation = GENERATION.get();
         Access access = SnapshotSourcePolicy.require(name, extensions);
+        if (forYaxunit && access.projects().stream().anyMatch(project -> !project.grant().yaxunit()))
+        {
+            throw SnapshotSourcePolicy.denied();
+        }
         if (!CAPTURES.tryAcquire())
         {
             throw new IOException("Snapshot capture is busy. Retry after the active captures finish.");
         }
         try
         {
-            Snapshot snapshot = ProjectSnapshotCapture.capture(name, extensions, access);
+            Snapshot snapshot = ProjectSnapshotCapture.capture(name, extensions, access, forYaxunit);
             List<Grant> scope = access.projects().stream().map(ScopedProject::grant).toList();
             Retained retained = retain(generation, access.client(), scope, snapshot);
             return describe(retained);
@@ -106,15 +115,129 @@ public final class ProjectSnapshotService
         }
     }
 
-    private static void requireCurrentAccess(Retained retained, AuthenticatedClient client) throws IOException
+    static BuildAdmission authorizeBuild(UUID id) throws IOException
     {
-        List<Grant> original = retained.scope();
-        Access current = SnapshotSourcePolicy.require(client, System.getProperty(SnapshotSourcePolicy.POLICY_PROPERTY),
-            original.get(0).name(), original.subList(1, original.size()).stream().map(Grant::name).toList());
-        if (!original.equals(current.projects().stream().map(ScopedProject::grant).toList()))
+        AuthenticatedClient client = McpProtocolHandler.currentAuthenticatedClient();
+        if (client == null || !client.isCurrent())
         {
             throw SnapshotSourcePolicy.denied();
         }
+        var lease = REGISTRY.acquire(client, id);
+        boolean admitted = false;
+        try
+        {
+            Retained retained = lease.retained();
+            BuildAuthorization authorization = new BuildAuthorization(id, client, retained.scope());
+            requireCurrentAccess(authorization.scope(), client, false);
+            if (!retained.snapshot().yaxunitReady())
+            {
+                throw new IOException("The snapshot has no YAxUnit build inputs. Capture it with forYaxunit=true.");
+            }
+            authorization.verify();
+            BuildAdmission admission = new BuildAdmission(authorization, lease);
+            admitted = true;
+            return admission;
+        }
+        finally
+        {
+            if (!admitted)
+            {
+                lease.close();
+            }
+        }
+    }
+
+    record BuildAuthorization(UUID id, AuthenticatedClient owner, List<Grant> scope)
+    {
+        boolean permitsCaller()
+        {
+            if (!owner.equals(McpProtocolHandler.currentAuthenticatedClient()))
+            {
+                return false;
+            }
+            try
+            {
+                verify();
+                return true;
+            }
+            catch (IOException | RuntimeException | LinkageError e)
+            {
+                return false;
+            }
+        }
+
+        void verify() throws IOException
+        {
+            requireCurrentAccess(scope, owner, true);
+        }
+    }
+
+    record BuildAdmission(BuildAuthorization authorization, ProjectSnapshotRegistry<AuthenticatedClient>.Lease lease)
+        implements AutoCloseable
+    {
+        BuildSource materialize(Path destination) throws IOException
+        {
+            try (lease)
+            {
+                authorization.verify();
+                Snapshot snapshot = lease.retained().snapshot();
+                List<Path> roots = new ArrayList<>();
+                for (Project project : snapshot.projects())
+                {
+                    Path root = Files.createDirectory(destination.resolve("project-" + roots.size()));
+                    roots.add(root);
+                    for (var descriptor : project.buildInputs().files().entrySet())
+                    {
+                        write(root, descriptor.getKey(), descriptor.getValue());
+                    }
+                    for (var entry : project.entries())
+                    {
+                        if (entry.disk() != null)
+                        {
+                            write(root, entry.path(), entry.disk());
+                        }
+                    }
+                }
+                return new BuildSource(List.copyOf(roots), snapshot.sourceFingerprints());
+            }
+        }
+
+        @Override
+        public void close()
+        {
+            lease.close();
+        }
+    }
+
+    record BuildSource(List<Path> projects, Map<String, String> fingerprints) { }
+
+    private static void write(Path root, String relative, ProjectSourceManifest.Version version) throws IOException
+    {
+        if (Thread.currentThread().isInterrupted())
+        {
+            throw new IOException("The snapshot build was interrupted.");
+        }
+        Path file = root.resolve(relative).normalize();
+        if (file.equals(root) || !file.startsWith(root))
+        {
+            throw SnapshotBuildInputs.unsupported();
+        }
+        Files.createDirectories(file.getParent());
+        Files.write(file, version.bytes(), StandardOpenOption.CREATE_NEW);
+    }
+
+    private static void requireCurrentAccess(Retained retained, AuthenticatedClient client) throws IOException
+    {
+        requireCurrentAccess(retained.scope(), client, false);
+    }
+
+    private static void requireCurrentAccess(List<Grant> original, AuthenticatedClient client, boolean execution)
+        throws IOException
+    {
+        Access current = SnapshotSourcePolicy.require(client, System.getProperty(SnapshotSourcePolicy.POLICY_PROPERTY),
+            original.get(0).name(), original.subList(1, original.size()).stream().map(Grant::name).toList());
+        SnapshotSourcePolicy.requireGrantScope(original, current.projects().stream().map(ScopedProject::grant).toList(),
+            execution);
     }
 
     private static ToolResult describe(Retained retained)
@@ -124,6 +247,7 @@ public final class ProjectSnapshotService
             .put("expiresAt", retained.expiresAt().toString())
             .put("modelStatus", snapshot.modelStatus().name().toLowerCase(Locale.ROOT))
             .put("verified", snapshot.verified())
+            .put("yaxunitReady", snapshot.yaxunitReady())
             .put("projects", snapshot.projects().stream().map(project -> summary(project, snapshot)).toList());
     }
 

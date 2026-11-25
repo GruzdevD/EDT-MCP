@@ -17,6 +17,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Objects;
@@ -97,31 +98,42 @@ final class ProjectSourceManifest
         }
     }
 
-    record Project(String name, String branch, String head, List<Entry> entries, boolean rawDiskComparison)
+    record Project(String name, String branch, String head, List<Entry> entries, boolean rawDiskComparison,
+        SnapshotBuildInputs buildInputs)
     {
+        Project(String name, String branch, String head, List<Entry> entries, boolean rawDiskComparison)
+        {
+            this(name, branch, head, entries, rawDiskComparison, null);
+        }
+
         Project
         {
             entries = List.copyOf(entries);
         }
     }
 
-    static List<Project> capture(Access access) throws IOException
+    static List<Project> capture(Access access, boolean forYaxunit) throws IOException
     {
         Budget budget = new Budget();
         List<Project> result = new ArrayList<>();
         for (ScopedProject project : access.projects())
         {
-            result.add(capture(project, access.tree(), budget));
+            result.add(capture(project, access.tree(), budget, forYaxunit));
+        }
+        if (forYaxunit)
+        {
+            SnapshotBuildInputs.validateScope(result);
         }
         return List.copyOf(result);
     }
 
     static Project capture(ScopedProject project, WindowsSourceTree local) throws IOException
     {
-        return capture(project, local, new Budget());
+        return capture(project, local, new Budget(), false);
     }
 
-    private static Project capture(ScopedProject project, WindowsSourceTree local, Budget budget) throws IOException
+    private static Project capture(ScopedProject project, WindowsSourceTree local, Budget budget, boolean forYaxunit)
+        throws IOException
     {
         try (Directory projectRoot = project.open(local))
         {
@@ -144,7 +156,7 @@ final class ProjectSourceManifest
                             }
                             checkMetadataEntries(refs, budget, 0, true);
                             checkMetadataEntries(packs, budget, 0, false);
-                            return captureWorkTree(project, local, projectRoot, root, git, budget);
+                            return captureWorkTree(project, local, projectRoot, root, git, budget, forYaxunit);
                         }
                     }
                 }
@@ -182,7 +194,7 @@ final class ProjectSourceManifest
     }
 
     private static Project captureWorkTree(ScopedProject project, WindowsSourceTree local, Directory projectRoot,
-        Path root, Directory git, Budget budget) throws IOException
+        Path root, Directory git, Budget budget, boolean forYaxunit) throws IOException
     {
         Repository repository;
         try
@@ -202,7 +214,7 @@ final class ProjectSourceManifest
                 prefix += "/";
             }
             GitEntries initial = readGitEntries(repository, reader, project, prefix, budget);
-            DiskWalk disk = new DiskWalk(project, initial.index().keySet(), initial.submodules(), budget);
+            DiskWalk disk = new DiskWalk(project, initial.index().keySet(), initial.submodules(), budget, forYaxunit);
             Rules rules = globalRules(repository, local, root, git);
             boolean ignored = false;
             Path ancestor = root;
@@ -246,7 +258,8 @@ final class ProjectSourceManifest
             {
                 rawComparison |= info != null && info.readIfPresent("attributes", MAX_RULE_BYTES) != null;
             }
-            return new Project(project.grant().name(), initial.branch(), initial.headId(), entries, rawComparison);
+            SnapshotBuildInputs inputs = forYaxunit ? SnapshotBuildInputs.read(project, projectRoot) : null;
+            return new Project(project.grant().name(), initial.branch(), initial.headId(), entries, rawComparison, inputs);
         }
     }
 
@@ -458,15 +471,17 @@ final class ProjectSourceManifest
         private final NavigableSet<String> tracked;
         private final Set<String> submodules;
         private final Budget budget;
+        private final boolean forYaxunit;
         private final Map<String, Version> versions = new HashMap<>();
         private boolean attributes;
 
-        DiskWalk(ScopedProject project, Set<String> tracked, Set<String> submodules, Budget budget)
+        DiskWalk(ScopedProject project, Set<String> tracked, Set<String> submodules, Budget budget, boolean forYaxunit)
         {
             this.project = project;
             this.tracked = new TreeSet<>(tracked);
             this.submodules = submodules;
             this.budget = budget;
+            this.forYaxunit = forYaxunit;
         }
 
         Rules controls(Directory directory, String prefix, Rules rules, boolean ignored) throws IOException
@@ -488,34 +503,57 @@ final class ProjectSourceManifest
             {
                 if (".git".equalsIgnoreCase(item.name()))
                 {
+                    if (forYaxunit)
+                    {
+                        throw SnapshotBuildInputs.unsupported();
+                    }
                     return;
                 }
             }
             Rules rules = controls(directory, repoPrefix + path, parent, parentIgnored);
+            Set<String> names = new HashSet<>();
             for (WindowsSourceTree.Entry item : contents)
             {
                 budget.checkEntries(++budget.diskEntries);
                 String name = item.name();
+                if (forYaxunit && (!names.add(name.toLowerCase(Locale.ROOT)) || item.reparsePoint()
+                    || !safeBuildComponent(name)))
+                {
+                    throw SnapshotBuildInputs.unsupported();
+                }
                 if (!WindowsSourceTree.isComponent(name) || name.charAt(0) == '.')
                 {
+                    if (forYaxunit && (item.directory() || !Set.of(".gitignore", ".gitattributes").contains(name)))
+                    {
+                        throw SnapshotBuildInputs.unsupported();
+                    }
                     continue;
                 }
                 String relative = path + name;
                 if (submodules.contains(relative) || project.isWorkspaceLink(relative, item.directory()))
                 {
+                    if (forYaxunit)
+                    {
+                        throw SnapshotBuildInputs.unsupported();
+                    }
                     continue;
                 }
                 boolean ignored = parentIgnored || rules != null && rules.ignores(repoPrefix + relative, item.directory());
-                if (item.directory() && (!ignored || hasTrackedChild(relative)))
+                if (item.directory() && (forYaxunit || !ignored || hasTrackedChild(relative)))
                 {
                     try (Directory child = directory.child(name))
                     {
                         scan(child, relative + "/", repoPrefix, rules, ignored, depth + 1);
                     }
                 }
-                else if (!item.directory() && project.grant().permits(relative) && (!ignored || tracked.contains(relative)))
+                else if (!item.directory() && project.grant().permits(relative)
+                    && (forYaxunit || !ignored || tracked.contains(relative)))
                 {
                     versions.put(relative, budget.keep(directory.read(name, budget.fileLimit())));
+                }
+                else if (forYaxunit)
+                {
+                    throw SnapshotBuildInputs.unsupported();
                 }
             }
         }
@@ -526,6 +564,17 @@ final class ProjectSourceManifest
             String next = tracked.ceiling(prefix);
             return next != null && next.startsWith(prefix);
         }
+    }
+
+    static boolean safeBuildComponent(String name)
+    {
+        if (!WindowsSourceTree.isComponent(name))
+        {
+            return false;
+        }
+        int dot = name.indexOf('.');
+        String stem = (dot < 0 ? name : name.substring(0, dot)).stripTrailing().toUpperCase(Locale.ROOT);
+        return !stem.matches("CON|CONIN\\$|CONOUT\\$|PRN|AUX|NUL|COM[1-9\u00B9\u00B2\u00B3]|LPT[1-9\u00B9\u00B2\u00B3]");
     }
 
     private static final class Budget

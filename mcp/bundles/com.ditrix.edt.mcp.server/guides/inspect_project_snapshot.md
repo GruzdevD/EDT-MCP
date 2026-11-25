@@ -8,6 +8,8 @@ Use `view:"manifest"` to read project-relative paths and the captured `head`, `i
 
 Use `view:"diff"` to read text patches. An optional `entryId` selects one entry from the same snapshot and comparison. A `diffs` item identifies the staged, unstaged, or comparison delta and its change kind. When `complete` is false, `reason` identifies an input, line, or output limit, non-UTF-8 text, or unconfirmed disk normalization.
 
+`yaxunitReady:true` identifies a capture made with `forYaxunit:true`. It can be passed to `run_yaxunit_tests` when the caller still has execution access. `modelStatus` continues to report the state observed in the live EDT model.
+
 Pass an older ID as `compareTo` to compare the captured disk versions of two snapshots from the same authorized scope. The direction is from `compareTo` to `snapshotId`. For comparison rows, `compareFrom` identifies the older disk version when that path existed.
 
 ## Pagination and expiry

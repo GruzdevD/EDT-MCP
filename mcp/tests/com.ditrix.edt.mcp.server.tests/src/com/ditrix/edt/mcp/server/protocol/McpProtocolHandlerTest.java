@@ -20,6 +20,7 @@ import com.ditrix.edt.mcp.server.UserSignal;
 import com.ditrix.edt.mcp.server.UserSignal.SignalType;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
+import com.ditrix.edt.mcp.server.utils.BackgroundJobs;
 import com.ditrix.edt.mcp.server.utils.OutputSizeGuard;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -37,6 +38,22 @@ public class McpProtocolHandlerTest
 {
     private McpProtocolHandler handler;
     private McpToolRegistry registry;
+
+    @Test
+    public void classifiesBoundCallsAndProtectedPollsForRedaction()
+    {
+        String bound = "{\"method\":\"tools/call\",\"params\":{\"name\":\"run_yaxunit_tests\","
+            + "\"arguments\":{\"snapshotId\":null}}}";
+        assertTrue(McpProtocolHandler.isSnapshotCall(bound));
+        assertFalse(McpProtocolHandler.isSnapshotCall(bound.replace("snapshotId", "projectName")));
+        var job = BackgroundJobs.shared().startProtected("test", 1000, Integer.MAX_VALUE, "test",
+            () -> false, progress -> "private");
+        for (String tool : List.of("get_job_status", "cancel_job"))
+        {
+            assertTrue(McpProtocolHandler.isSnapshotCall(GsonProvider.toJson(Map.of("method", "tools/call",
+                "params", Map.of("name", tool, "arguments", Map.of("jobId", " " + job.getId() + " "))))));
+        }
+    }
 
     @Before
     public void setUp()

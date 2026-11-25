@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -24,6 +25,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 
 /**
  * Small bounded registry for long-running MCP work whose result is polled by id.
@@ -352,6 +354,12 @@ public final class BackgroundJobs implements AutoCloseable
     {
         void add(String message);
 
+        /** Identifies the registry-owned job publishing this progress. */
+        default String jobId()
+        {
+            return null;
+        }
+
         /**
          * Takes the job past the point where it can still be abandoned, in ONE step with the
          * deadline: either this wins and the deadline can no longer publish a retryable
@@ -664,6 +672,32 @@ public final class BackgroundJobs implements AutoCloseable
     private JobSnapshot start(String owningTool, long timeoutMs, int maxRunning,
         String initialProgress, CancellationCapability cancellation, JobWork work)
     {
+        return start(owningTool, timeoutMs, maxRunning, initialProgress, cancellation, null, null, work);
+    }
+
+    /** Starts a job whose polling and cancellation require caller authorization. */
+    public JobSnapshot startProtected(String owningTool, long timeoutMs, int maxRunning,
+        String initialProgress, BooleanSupplier access, JobWork work)
+    {
+        return startProtected(owningTool, timeoutMs, maxRunning, initialProgress, access, null, work);
+    }
+
+    /**
+     * Arranges release of an admitted job's resource when work ends or is cancelled in the queue.
+     * The submitter releases it on refusal and may also release it sooner from the worker.
+     * The action must be idempotent because shutdown can reject an already admitted submission.
+     */
+    public JobSnapshot startProtected(String owningTool, long timeoutMs, int maxRunning,
+        String initialProgress, BooleanSupplier access, Runnable release, JobWork work)
+    {
+        return start(owningTool, timeoutMs, maxRunning, initialProgress, null,
+            Objects.requireNonNull(access), release, work);
+    }
+
+    private JobSnapshot start(String owningTool, long timeoutMs, int maxRunning,
+        String initialProgress, CancellationCapability cancellation,
+        BooleanSupplier access, Runnable release, JobWork work)
+    {
         if (owningTool == null || owningTool.isBlank())
         {
             throw new IllegalArgumentException("Background job owning tool must not be blank"); //$NON-NLS-1$
@@ -674,7 +708,7 @@ public final class BackgroundJobs implements AutoCloseable
         }
         long boundedTimeoutMs = Math.max(1L, timeoutMs);
         JobRecord record = new JobRecord(UUID.randomUUID().toString(), owningTool,
-            initialProgress, cancellation);
+            initialProgress, cancellation, access);
 
         synchronized (jobsLock)
         {
@@ -694,6 +728,20 @@ public final class BackgroundJobs implements AutoCloseable
                 throw new RejectedExecutionException("Background job registry is full with " //$NON-NLS-1$
                     + maxStoredJobs + " running jobs"); //$NON-NLS-1$
             }
+            // Install cleanup before publishing the record to cancellation or shutdown.
+            record.onSlotRelease(() -> {
+                try
+                {
+                    if (release != null)
+                    {
+                        release.run();
+                    }
+                }
+                finally
+                {
+                    inFlight.decrementAndGet();
+                }
+            });
             jobs.put(record.id, record);
             inFlight.incrementAndGet();
         }
@@ -702,8 +750,6 @@ public final class BackgroundJobs implements AutoCloseable
         // callable when it unwinds, or the cancelling side when the callable will never run.
         // Neither alone is enough - a callable that ignores interruption keeps its thread long
         // after cancellation, and a task cancelled in the queue never reaches its callable.
-        record.onSlotRelease(inFlight::decrementAndGet);
-
         FutureTask<Void> task = new FutureTask<>(() -> {
             if (record.beginWork())
             {
@@ -758,7 +804,17 @@ public final class BackgroundJobs implements AutoCloseable
         {
             record = jobs.get(jobId);
         }
-        return record != null ? record.snapshot() : null;
+        return record != null && record.permitsCaller() ? record.snapshot() : null;
+    }
+
+    /** Classifies job payloads for redaction without exposing job contents. */
+    public boolean isProtected(String jobId)
+    {
+        synchronized (jobsLock)
+        {
+            JobRecord record = jobs.get(jobId);
+            return record != null && record.access != null;
+        }
     }
 
     /**
@@ -775,12 +831,12 @@ public final class BackgroundJobs implements AutoCloseable
         {
             record = jobs.get(jobId);
         }
-        if (record == null)
+        if (record == null || !record.permitsCaller())
         {
             return null;
         }
         record.await(Math.max(0L, waitMs));
-        return record.snapshot();
+        return record.permitsCaller() ? record.snapshot() : null;
     }
 
     /**
@@ -805,7 +861,7 @@ public final class BackgroundJobs implements AutoCloseable
         {
             record = jobs.get(jobId);
         }
-        if (record == null)
+        if (record == null || !record.permitsCaller())
         {
             return null;
         }
@@ -820,7 +876,8 @@ public final class BackgroundJobs implements AutoCloseable
         {
             record.cancelWork();
         }
-        return new CancellationResult(attempt.outcome, record.snapshot(), attempt.detail);
+        return record.permitsCaller()
+            ? new CancellationResult(attempt.outcome, record.snapshot(), attempt.detail) : null;
     }
 
     private CancellationAttempt runCommittedCancellationHandler(JobRecord record,
@@ -986,6 +1043,12 @@ public final class BackgroundJobs implements AutoCloseable
                 }
 
                 @Override
+                public String jobId()
+                {
+                    return record.id;
+                }
+
+                @Override
                 public boolean tryCommit()
                 {
                     return record.tryCommit();
@@ -1075,6 +1138,7 @@ public final class BackgroundJobs implements AutoCloseable
         private final String id;
         private final String owningTool;
         private final CancellationCapability cancellation;
+        private final BooleanSupplier access;
         private final long startedAtMs = System.currentTimeMillis();
         private final long startedAtNanos = System.nanoTime();
         private final List<ProgressEntry> progress = new ArrayList<>();
@@ -1120,12 +1184,18 @@ public final class BackgroundJobs implements AutoCloseable
             new AtomicReference<>(WorkState.NOT_STARTED);
 
         JobRecord(String id, String owningTool, String initialProgress,
-            CancellationCapability cancellation)
+            CancellationCapability cancellation, BooleanSupplier access)
         {
             this.id = id;
             this.owningTool = owningTool;
             this.cancellation = cancellation;
+            this.access = access;
             addProgress(initialProgress);
+        }
+
+        boolean permitsCaller()
+        {
+            return access == null || access.getAsBoolean();
         }
 
         synchronized boolean isRunning()
@@ -1184,7 +1254,6 @@ public final class BackgroundJobs implements AutoCloseable
          */
         void releaseSlot()
         {
-            Runnable release;
             synchronized (this)
             {
                 if (slotReleased || slotRelease == null)
@@ -1192,13 +1261,20 @@ public final class BackgroundJobs implements AutoCloseable
                     return;
                 }
                 slotReleased = true;
-                if (status == Status.RUNNING && cancellationRequested)
+                Runnable release = slotRelease;
+                slotRelease = null;
+                try
                 {
-                    markCancelled(cancellationResult);
+                    release.run();
                 }
-                release = slotRelease;
+                finally
+                {
+                    if (status == Status.RUNNING && cancellationRequested)
+                    {
+                        markCancelled(cancellationResult);
+                    }
+                }
             }
-            release.run();
         }
 
         /**

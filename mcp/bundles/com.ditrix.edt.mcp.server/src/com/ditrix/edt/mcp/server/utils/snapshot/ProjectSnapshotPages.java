@@ -18,7 +18,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
-import java.util.HashSet;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -79,7 +80,7 @@ final class ProjectSnapshotPages
         {
             throw new IOException("Snapshot page limit must be between 1 and " + MAX_PAGE_SIZE + ".");
         }
-        if (previous != null && !new HashSet<>(current.scope()).equals(new HashSet<>(previous.scope())))
+        if (previous != null && !readScope(current).equals(readScope(previous)))
         {
             throw new IOException("Compare snapshots captured for the same project scope.");
         }
@@ -120,6 +121,12 @@ final class ProjectSnapshotPages
             end++;
         }
         return new Page(selected.size(), List.copyOf(rows), end < selected.size() ? encode(end, binding) : null);
+    }
+
+    private static Set<SnapshotSourcePolicy.ReadScope> readScope(Retained snapshot)
+    {
+        return snapshot.scope().stream().map(SnapshotSourcePolicy.Grant::readScope)
+            .collect(Collectors.toUnmodifiableSet());
     }
 
     private static List<Selection> select(Retained current, Retained previous)

@@ -34,7 +34,7 @@ public final class CaptureProjectSnapshotTool implements IMcpTool
     public String getDescription()
     {
         return "Capture HEAD, index, and disk versions of an authorized EDT project's sources for review without a local clone. "
-            + "Read the result with inspect_project_snapshot. Full parameters and examples: call get_tool_guide('"
+            + "Read it with inspect_project_snapshot or request build inputs with forYaxunit. Full parameters and examples: call get_tool_guide('"
             + NAME + "').";
     }
 
@@ -42,17 +42,19 @@ public final class CaptureProjectSnapshotTool implements IMcpTool
     public String getInputSchema()
     {
         return JsonSchemaBuilder.object().stringProperty("projectName", "Exact EDT project name enabled on the server.", true)
-            .stringArrayProperty("includedProjects", "Exact names of explicitly included EDT extension projects.").build();
+            .stringArrayProperty("includedProjects", "Exact names of explicitly included EDT extension projects.")
+            .booleanProperty("forYaxunit", "Retain complete disk inputs for an isolated YAxUnit build.").build();
     }
 
     @Override
     public String getOutputSchema()
     {
         return JsonSchemaBuilder.object().booleanProperty("success", "Whether capture succeeded.", true)
-            .stringProperty("snapshotId", "ID understood by inspect_project_snapshot.")
+            .stringProperty("snapshotId", "ID understood by inspect_project_snapshot and snapshot-bound run_yaxunit_tests.")
             .stringProperty("expiresAt", "Retention deadline in UTC.")
             .enumProperty("modelStatus", "Evidence that the EDT model matches the sources.", "verified", "diverged", "unknown")
             .booleanProperty("verified", "Whether the snapshot is eligible for dependent verification.")
+            .booleanProperty("yaxunitReady", "Whether the complete isolated-build inputs were retained.")
             .objectArrayProperty("projects", "Captured project names, Git revisions, and source fingerprints.").build();
     }
 
@@ -84,7 +86,8 @@ public final class CaptureProjectSnapshotTool implements IMcpTool
         }
         try
         {
-            return ProjectSnapshotService.capture(project, extensions).toJson();
+            boolean forYaxunit = JsonUtils.extractBooleanArgument(params, "forYaxunit", false);
+            return ProjectSnapshotService.capture(project, extensions, forYaxunit).toJson();
         }
         catch (IOException e)
         {

@@ -37,6 +37,7 @@ import org.junit.rules.TemporaryFolder;
 
 import com.ditrix.edt.mcp.server.utils.snapshot.ProjectSourceManifest.Entry;
 import com.ditrix.edt.mcp.server.utils.snapshot.ProjectSourceManifest.Version;
+import com.ditrix.edt.mcp.server.utils.snapshot.SnapshotSourcePolicy.Access;
 import com.ditrix.edt.mcp.server.utils.snapshot.SnapshotSourcePolicy.Grant;
 import com.ditrix.edt.mcp.server.utils.snapshot.SnapshotSourcePolicy.ScopedProject;
 
@@ -49,6 +50,49 @@ public class ProjectSourceManifestTest
     public void requireWindows()
     {
         assumeTrue(System.getProperty("os.name").startsWith("Windows"));
+    }
+
+    @Test
+    public void buildKeepsAuthorizedIgnoredFilesWhileReviewHonorsGitIgnore() throws Exception
+    {
+        Path project = temp.newFolder("build-project").toPath();
+        try (Git git = Git.init().setDirectory(project.toFile()).call())
+        {
+            write(project, ".project", """
+                <projectDescription><name>Allowed</name><projects/>
+                <buildSpec><buildCommand><name>org.eclipse.xtext.ui.shared.xtextBuilder</name>
+                <arguments/></buildCommand></buildSpec><natures>
+                <nature>org.eclipse.xtext.ui.shared.xtextNature</nature>
+                <nature>com._1c.g5.v8.dt.core.V8ConfigurationNature</nature>
+                </natures></projectDescription>
+                """);
+            write(project, "DT-INF/PROJECT.PMF", "Manifest-Version: 1.0\nRuntime-Version: 8.5.1\n");
+            write(project, "src/Configuration/Configuration.mdo", """
+                <m:Configuration xmlns:m="http://g5.1c.ru/v8/dt/metadata/mdclass"
+                uuid="38ecdf43-3c5f-49b7-b0aa-26d365a57ee6"><name>Allowed</name></m:Configuration>
+                """);
+            write(project, ".gitignore", "src/generated/\n");
+            write(project, ".git/info/exclude", "local.bsl\n");
+            write(project, "src/generated/extra.bsl", "ignored directory\n");
+            write(project, "src/local.bsl", "ignored file\n");
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("fixture").setAuthor("Fixture", "fixture@example.invalid")
+                .setCommitter("Fixture", "fixture@example.invalid").call();
+
+            Grant grant = new Grant("Allowed", project.toString(), Set.of("bsl", "mdo"), true);
+            ScopedProject scope = new ScopedProject(mock(IProject.class, RETURNS_DEEP_STUBS), grant, project);
+            Access access = new Access(null, WindowsSourceTree.load(), List.of(scope));
+            var review = ProjectSourceManifest.capture(access, false).get(0);
+            assertEquals(List.of("src/Configuration/Configuration.mdo"), review.entries().stream().map(Entry::path).toList());
+            var build = ProjectSourceManifest.capture(access, true).get(0);
+            Map<String, Entry> entries = build.entries().stream().collect(Collectors.toMap(Entry::path, Function.identity()));
+            assertEquals("ignored directory\n", text(entries.get("src/generated/extra.bsl").disk()));
+            assertEquals("ignored file\n", text(entries.get("src/local.bsl").disk()));
+            assertNull(entries.get("src/local.bsl").index());
+
+            write(project, "src/generated/private.txt", "unsupported file\n");
+            assertThrows(IOException.class, () -> ProjectSourceManifest.capture(access, true));
+        }
     }
 
     @Test

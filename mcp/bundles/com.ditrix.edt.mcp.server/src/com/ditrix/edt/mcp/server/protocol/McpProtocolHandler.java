@@ -26,6 +26,7 @@ import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
 import com.ditrix.edt.mcp.server.tools.impl.CaptureProjectSnapshotTool;
 import com.ditrix.edt.mcp.server.tools.impl.InspectProjectSnapshotTool;
 import com.ditrix.edt.mcp.server.transport.HttpTransport.AuthenticatedClient;
+import com.ditrix.edt.mcp.server.utils.BackgroundJobs;
 import com.ditrix.edt.mcp.server.utils.DcsXmlCodec;
 import com.ditrix.edt.mcp.server.utils.GuideRenderer;
 import com.ditrix.edt.mcp.server.utils.InfobaseAuthDialogSuppressor;
@@ -184,6 +185,10 @@ public class McpProtocolHandler
         // returns null, and dispatch() treats a null request as an invalid request —
         // exactly as before, when the parse happened inside dispatch.
         JsonRpcRequest request = parse(requestBody);
+        String method = request != null ? request.getMethod() : null;
+        String toolName = request != null && McpConstants.METHOD_TOOLS_CALL.equals(method)
+            ? request.getToolName() : null;
+        boolean snapshot = isSnapshotTool(request, toolName);
         String response = null;
         try
         {
@@ -200,10 +205,6 @@ public class McpProtocolHandler
             try
             {
                 long durationMs = (System.nanoTime() - startNanos) / 1_000_000L;
-                String method = request != null ? request.getMethod() : null;
-                String toolName = (request != null && McpConstants.METHOD_TOOLS_CALL.equals(method))
-                    ? request.getToolName() : null;
-                boolean snapshot = isSnapshotTool(toolName);
                 recordToHistory(method, toolName, snapshot ? null : requestBody, snapshot ? null : response, durationMs);
             }
             catch (Exception recordingFailure) // NOSONAR: history recording must never break a call
@@ -234,7 +235,7 @@ public class McpProtocolHandler
         {
             JsonRpcRequest request = GsonProvider.fromJson(body, JsonRpcRequest.class);
             return request != null && McpConstants.METHOD_TOOLS_CALL.equals(request.getMethod())
-                && isSnapshotTool(request.getToolName());
+                && isSnapshotTool(request, request.getToolName());
         }
         catch (RuntimeException e)
         {
@@ -242,9 +243,30 @@ public class McpProtocolHandler
         }
     }
 
-    private static boolean isSnapshotTool(String name)
+    private static boolean isSnapshotTool(JsonRpcRequest request, String name)
     {
-        return CaptureProjectSnapshotTool.NAME.equals(name) || InspectProjectSnapshotTool.NAME.equals(name);
+        if (CaptureProjectSnapshotTool.NAME.equals(name) || InspectProjectSnapshotTool.NAME.equals(name))
+        {
+            return true;
+        }
+        Map<String, Object> arguments = request == null ? null : request.getArguments();
+        if (arguments == null)
+        {
+            return false;
+        }
+        if (isBoundYaxunit(name, arguments))
+        {
+            return true;
+        }
+        return ("get_job_status".equals(name) || "cancel_job".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
+            && arguments.get("jobId") instanceof String id //$NON-NLS-1$
+            && BackgroundJobs.shared().isProtected(id.trim());
+    }
+
+    private static boolean isBoundYaxunit(String name, Map<String, Object> arguments)
+    {
+        return ("run_yaxunit_tests".equals(name) || "debug_yaxunit_tests".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
+            && arguments.containsKey("snapshotId"); //$NON-NLS-1$
     }
 
     /**
@@ -474,7 +496,7 @@ public class McpProtocolHandler
         }
         
         // Execute the tool (timed + logged + status-bar cleared in one place).
-        String result = executeToolTimed(tool, params, server);
+        String result = executeToolTimed(tool, params, server, isSnapshotTool(request, toolName));
 
         // PII redaction (#242): the single wire-serialization choke point.
         // A no-op unless redaction is enabled AND the tool is flagged returnsInfobaseData -
@@ -510,10 +532,11 @@ public class McpProtocolHandler
      * @param tool the resolved tool to run
      * @param params the extracted tool params
      * @param server the MCP server (may be {@code null} during a shutdown race)
+     * @param sensitive whether error details are excluded from logs
      * @return the raw tool result payload (may be {@code null} only if {@code execute} returned
      *         {@code null})
      */
-    private String executeToolTimed(IMcpTool tool, Map<String, String> params, McpServer server)
+    private String executeToolTimed(IMcpTool tool, Map<String, String> params, McpServer server, boolean sensitive)
     {
         String result = null;
         long startNanos = System.nanoTime();
@@ -566,7 +589,7 @@ public class McpProtocolHandler
             // response and would otherwise leave no server-side trace of WHY it
             // failed. Log the extracted message once (WARNING) alongside the
             // outcome=error completion line so an operator can see the cause.
-            if (isError)
+            if (isError && !sensitive)
             {
                 Log.warning(formatErrorLogLine(tool.getName(), extractErrorMessage(result)));
             }
@@ -969,6 +992,7 @@ public class McpProtocolHandler
         }
         
         // Convert all arguments to strings
+        boolean boundYaxunit = isBoundYaxunit(request.getToolName(), arguments);
         for (Map.Entry<String, Object> entry : arguments.entrySet())
         {
             Object value = entry.getValue();
@@ -983,6 +1007,11 @@ public class McpProtocolHandler
                 {
                     params.put(entry.getKey(), value.toString());
                 }
+            }
+            else if (boundYaxunit)
+            {
+                // Preserve invalid null arguments so an explicit snapshotId can never select a live launch.
+                params.put(entry.getKey(), "");
             }
         }
         

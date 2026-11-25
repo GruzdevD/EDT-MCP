@@ -52,6 +52,7 @@ public final class InspectProjectSnapshotTool implements IMcpTool
             .stringProperty("snapshotId", "Retained snapshot ID.").stringProperty("expiresAt", "Retention deadline in UTC.")
             .enumProperty("modelStatus", "Evidence that the EDT model matches the sources.", "verified", "diverged", "unknown")
             .booleanProperty("verified", "Whether the snapshot is eligible for dependent verification.")
+            .booleanProperty("yaxunitReady", "Whether the snapshot retains inputs for a bound YAxUnit run.")
             .objectArrayProperty("projects", "Captured project revisions and source fingerprints.")
             .enumProperty("view", "Returned page type.", "manifest", "diff")
             .integerProperty("total", "Number of entries matching the query.")

@@ -135,6 +135,13 @@ final class ProjectSnapshotRegistry<Owner>
         for (Project project : snapshot.projects())
         {
             size += 512;
+            if (project.buildInputs() != null)
+            {
+                for (Version descriptor : project.buildInputs().files().values())
+                {
+                    size += size(descriptor);
+                }
+            }
             for (Entry entry : project.entries())
             {
                 size += 256 + 2L * entry.path().length() + size(entry.head()) + size(entry.index()) + size(entry.disk());

@@ -13,12 +13,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
@@ -50,6 +53,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.BackgroundJobPolling;
+import com.ditrix.edt.mcp.server.utils.snapshot.SnapshotYaxunitRunner;
 import com.ditrix.edt.mcp.server.utils.BackgroundJobRenderer;
 import com.ditrix.edt.mcp.server.utils.BackgroundJobs;
 import com.ditrix.edt.mcp.server.utils.BackgroundJobs.JobSnapshot;
@@ -205,12 +209,11 @@ public class RunYaxunitTestsTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Run YAXUnit tests as a named background job and return a JUnit Markdown report. "  //$NON-NLS-1$
+        return "Run YAXUnit tests from a live EDT launch or a snapshot built in a temporary file infobase. " //$NON-NLS-1$
             + "The start call waits up to `timeout` (default and maximum " + MAX_TIMEOUT_SECONDS  //$NON-NLS-1$
             + "s): a short run returns the report in that call, otherwise Pending returns a jobId "  //$NON-NLS-1$
-            + "to poll with get_job_status. Address a known run by jobId, NOT by repeating the "  //$NON-NLS-1$
-            + "arguments - a repeated start attaches only while that job is still running, and "  //$NON-NLS-1$
-            + "otherwise launches a second run. Parameters and examples: "  //$NON-NLS-1$
+            + "to poll with get_job_status. Each snapshot submission starts a separate job. " //$NON-NLS-1$
+            + "A repeated live start attaches only while the matching job is running. Parameters and examples: " //$NON-NLS-1$
             + "get_tool_guide('run_yaxunit_tests')."; //$NON-NLS-1$
     }
 
@@ -218,11 +221,13 @@ public class RunYaxunitTestsTool implements IMcpTool
     public String getInputSchema()
     {
         return JsonSchemaBuilder.object()
+            .stringProperty("snapshotId", "Build and test a YAxUnit-ready capture in its own temporary Windows " //$NON-NLS-1$ //$NON-NLS-2$
+                + "file infobase. Supply only selectors and timeout with this argument.") //$NON-NLS-1$
             .stringProperty("launchConfigurationName", //$NON-NLS-1$
                 "Exact runtime-client launch config name (preferred; from list_configurations).") //$NON-NLS-1$
-            .stringProperty("projectName", "EDT project name (required if launchConfigurationName is omitted).") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("projectName", "Live EDT project name (required for a live run without launchConfigurationName).") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("applicationId", //$NON-NLS-1$
-                "Application ID from get_applications (required if launchConfigurationName is omitted).") //$NON-NLS-1$
+                "Application ID from get_applications (required for a live run without launchConfigurationName).") //$NON-NLS-1$
             .stringArrayProperty(KEY_EXTENSIONS, "Extension names to filter tests (array; a comma-separated string is also accepted).") //$NON-NLS-1$
             .stringArrayProperty(KEY_MODULES, "Module names to filter tests (array; a comma-separated string is also accepted).") //$NON-NLS-1$
             .stringArrayProperty(KEY_TESTS, "Test names in Module.Method format (array; a comma-separated string is also accepted).") //$NON-NLS-1$
@@ -469,6 +474,10 @@ public class RunYaxunitTestsTool implements IMcpTool
     /** Shared implementation that preserves the actual surface which created the named job. */
     String executeAs(Map<String, String> params, String owningTool)
     {
+        if (hasSnapshotId(params))
+        {
+            return startSnapshotRun(params, owningTool);
+        }
         String configName = JsonUtils.extractStringArgument(params, "launchConfigurationName"); //$NON-NLS-1$
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String applicationId = JsonUtils.extractStringArgument(params, "applicationId"); //$NON-NLS-1$
@@ -524,6 +533,55 @@ public class RunYaxunitTestsTool implements IMcpTool
             modules, tests, tags, timeout, updateBeforeLaunch, updateScope, externalChanges,
             portConflict, debug);
         return startOrAttach(request, owningTool);
+    }
+
+    static boolean hasSnapshotId(Map<String, String> params)
+    {
+        return params.containsKey("snapshotId"); //$NON-NLS-1$
+    }
+
+    private String startSnapshotRun(Map<String, String> params, String owningTool)
+    {
+        if (!NAME.equals(owningTool) || !Set.of("snapshotId", "timeout", KEY_EXTENSIONS, KEY_MODULES, //$NON-NLS-1$ //$NON-NLS-2$
+            KEY_TESTS, KEY_TAGS).containsAll(params.keySet()))
+        {
+            return ToolResult.error("snapshotId accepts only test selectors and timeout.").toJson(); //$NON-NLS-1$
+        }
+        String raw = JsonUtils.extractStringArgument(params, "snapshotId"); //$NON-NLS-1$
+        if (raw == null || !raw.matches("[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}")) //$NON-NLS-1$
+        {
+            return ToolResult.error("snapshotId must be a UUID from capture_project_snapshot.").toJson(); //$NON-NLS-1$
+        }
+        Map<String, List<String>> selectors = new LinkedHashMap<>();
+        for (String name : List.of(KEY_EXTENSIONS, KEY_MODULES, KEY_TESTS, KEY_TAGS))
+        {
+            String joined = joinList(JsonUtils.extractArrayArgument(params, name));
+            List<String> values = joined == null ? List.of() : splitToList(joined);
+            if (!values.isEmpty())
+            {
+                selectors.put(name, values);
+            }
+        }
+        int wait = clampTimeout(JsonUtils.extractIntArgument(params, "timeout", DEFAULT_TIMEOUT)); //$NON-NLS-1$
+        try
+        {
+            JobSnapshot job = SnapshotYaxunitRunner.start(jobs, NAME, UUID.fromString(raw), selectors);
+            if (job == null)
+            {
+                return ToolResult.error("Snapshot YAxUnit execution is busy. Retry after the active job finishes.").toJson(); //$NON-NLS-1$
+            }
+            JobSnapshot latest = BackgroundJobPolling.await(jobs, job.getId(), wait);
+            return latest == null ? ToolResult.error("Snapshot YAxUnit job is unavailable.").toJson() //$NON-NLS-1$
+                : renderStartResult(latest);
+        }
+        catch (IOException e)
+        {
+            return ToolResult.error(e.getMessage()).toJson();
+        }
+        catch (RejectedExecutionException e)
+        {
+            return ToolResult.error("Snapshot YAxUnit execution is unavailable. Retry when the server is ready.").toJson(); //$NON-NLS-1$
+        }
     }
 
     /**

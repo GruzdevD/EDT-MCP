@@ -27,10 +27,12 @@ public class CaptureProjectSnapshotToolTest
     public void describesExactProjectNamesAndTheReturnedId()
     {
         JsonObject schema = json(tool.getInputSchema());
-        assertEquals(Set.of("projectName", "includedProjects"), schema.getAsJsonObject("properties").keySet());
+        assertEquals(Set.of("projectName", "includedProjects", "forYaxunit"),
+            schema.getAsJsonObject("properties").keySet());
         assertEquals("projectName", schema.getAsJsonArray("required").get(0).getAsString());
         assertEquals(ResponseType.JSON, tool.getResponseType());
         assertTrue(json(tool.getOutputSchema()).getAsJsonObject("properties").has("snapshotId"));
+        assertTrue(json(tool.getOutputSchema()).getAsJsonObject("properties").has("yaxunitReady"));
     }
 
     @Test

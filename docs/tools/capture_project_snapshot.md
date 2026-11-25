@@ -1,12 +1,13 @@
 # capture_project_snapshot
 
-Capture HEAD, index, and disk versions of an authorized EDT project's sources for review without a local clone. Read the result with inspect_project_snapshot. Full parameters and examples: call get_tool_guide('capture_project_snapshot').
+Capture HEAD, index, and disk versions of an authorized EDT project's sources for review without a local clone. Read it with inspect_project_snapshot or request build inputs with forYaxunit. Full parameters and examples: call get_tool_guide('capture_project_snapshot').
 
 ## Parameters
 | Parameter | Required | Type | Description |
 | --- | --- | --- | --- |
 | projectName | yes | string | Exact EDT project name enabled on the server. |
 | includedProjects | — | array | Exact names of explicitly included EDT extension projects. |
+| forYaxunit | — | boolean | Retain complete disk inputs for an isolated YAxUnit build. |
 
 ## Guide
 ## Capture project sources
@@ -19,6 +20,10 @@ Use `capture_project_snapshot` to record the HEAD, index, and working-tree versi
 
 `includedProjects` is optional. The server authorizes each exact EDT project name independently and pins its configured location. Capture covers allowed extensions under `src/` and preserves staged and unstaged changes independently.
 
+To prepare a capture for `run_yaxunit_tests`, pass `"forYaxunit":true` and include the EDT projects for the configuration extensions the tests need. The capture then requires the full supported source tree and the EDT project descriptors. A successful result includes `yaxunitReady:true`. Use that snapshot ID to run the exact captured disk sources.
+
+The build capture retains permitted files under `src/` even when Git ignores them. It checks `Configuration.mdo` and the declared metadata files, including nested subsystems. A capture for review follows the Git ignore rules for untracked files.
+
 ## Server setup
 
 Use a dedicated Windows EDT installation with local working trees. Configure a token on the loopback MCP listener and require authentication on the protected route used by the client. Set the JVM property `edt.mcp.snapshots.policy` to a JSON object keyed by exact EDT project name.
@@ -26,6 +31,8 @@ Use a dedicated Windows EDT installation with local working trees. Configure a t
 ```json
 {"Example":{"location":"C:\\Dev\\Example","extensions":["mdo","bsl"]}}
 ```
+
+Add `"yaxunit":true` to each project grant that may be executed. Include all source file types used by those projects in the respective `extensions` allowlists. Use the execution grant for project code trusted to run as the EDT server account.
 
 Use the work tree's local `.git` directory. The source reader uses Windows handles and refuses reparse points in the capture scope. Keep the token and real policy locations in the stand's private configuration.
 
@@ -35,7 +42,9 @@ Use the work tree's local `.git` directory. The source reader uses Windows handl
 
 - `verified` means EDT has confirmed the captured inputs against the model.
 - `diverged` means EDT has a dirty editor in scope or supplied evidence of different inputs.
-- `unknown` means EDT supplied no matching model evidence. Use the snapshot for review. Dependent verification requires `verified:true`.
+- `unknown` means EDT supplied no matching model evidence.
+
+`yaxunitReady` describes the retained disk inputs. It is independent of the live model status. Unsaved edits in EDT remain outside the capture.
 
 Capture fails if its source observations disagree or a capture limit is reached. It reads source files without saving editors or resynchronizing the project.
 

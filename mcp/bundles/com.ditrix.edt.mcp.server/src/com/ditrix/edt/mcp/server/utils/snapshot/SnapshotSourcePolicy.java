@@ -140,7 +140,12 @@ final class SnapshotSourcePolicy
                 {
                     throw denied();
                 }
-                result.add(new Grant(name, location, Set.copyOf(extensions)));
+                JsonElement runner = item.get("yaxunit");
+                if (runner != null && (!runner.isJsonPrimitive() || !runner.getAsJsonPrimitive().isBoolean()))
+                {
+                    throw denied();
+                }
+                result.add(new Grant(name, location, Set.copyOf(extensions), runner != null && runner.getAsBoolean()));
             }
             return List.copyOf(result);
         }
@@ -155,8 +160,34 @@ final class SnapshotSourcePolicy
         return new IOException("Snapshot access is unavailable for this caller or project scope."); //$NON-NLS-1$
     }
 
-    record Grant(String name, String location, Set<String> extensions)
+    static void requireGrantScope(List<Grant> original, List<Grant> current, boolean execution) throws IOException
     {
+        if (original.size() != current.size())
+        {
+            throw denied();
+        }
+        for (int i = 0; i < original.size(); i++)
+        {
+            Grant grant = current.get(i);
+            if (!original.get(i).readScope().equals(grant.readScope()) || execution && !grant.yaxunit())
+            {
+                throw denied();
+            }
+        }
+    }
+
+    record Grant(String name, String location, Set<String> extensions, boolean yaxunit)
+    {
+        Grant(String name, String location, Set<String> extensions)
+        {
+            this(name, location, extensions, false);
+        }
+
+        ReadScope readScope()
+        {
+            return new ReadScope(name, location, extensions);
+        }
+
         boolean permits(String projectRelative)
         {
             if (!projectRelative.startsWith(SOURCE_DIRECTORY + "/")) //$NON-NLS-1$
@@ -191,6 +222,8 @@ final class SnapshotSourcePolicy
             return permits(relative) ? relative : null;
         }
     }
+
+    record ReadScope(String name, String location, Set<String> extensions) { }
 
     record ScopedProject(IProject project, Grant grant, Path location)
     {

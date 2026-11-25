@@ -220,9 +220,12 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Capture HEAD, index, and disk versions of an authorized EDT project's sources for review without a local clone. Read the result with inspect_project_snapshot. Full parameters and examples: call get_tool_guide('capture_project_snapshot').",
+    "description": "Capture HEAD, index, and disk versions of an authorized EDT project's sources for review without a local clone. Read it with inspect_project_snapshot or request build inputs with forYaxunit. Full parameters and examples: call get_tool_guide('capture_project_snapshot').",
     "inputSchema": {
       "properties": {
+        "forYaxunit": {
+          "type": "boolean"
+        },
         "includedProjects": {
           "items": {
             "type": "string"
@@ -265,6 +268,9 @@
           "type": "boolean"
         },
         "verified": {
+          "type": "boolean"
+        },
+        "yaxunitReady": {
           "type": "boolean"
         }
       },
@@ -3100,6 +3106,9 @@
             "diff"
           ],
           "type": "string"
+        },
+        "yaxunitReady": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -4153,11 +4162,11 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Run YAXUnit tests as a named background job and return a JUnit Markdown report. The start call waits up to `timeout` (default and maximum 45s): a short run returns the report in that call, otherwise Pending returns a jobId to poll with get_job_status. Address a known run by jobId, NOT by repeating the arguments - a repeated start attaches only while that job is still running, and otherwise launches a second run. Parameters and examples: get_tool_guide('run_yaxunit_tests').",
+    "description": "Run YAXUnit tests from a live EDT launch or a snapshot built in a temporary file infobase. The start call waits up to `timeout` (default and maximum 45s): a short run returns the report in that call, otherwise Pending returns a jobId to poll with get_job_status. Each snapshot submission starts a separate job. A repeated live start attaches only while the matching job is running. Parameters and examples: get_tool_guide('run_yaxunit_tests').",
     "inputSchema": {
       "properties": {
         "applicationId": {
-          "description": "Application ID from get_applications (required if launchConfigurationName is omitted).",
+          "description": "Application ID from get_applications (required for a live run without launchConfigurationName).",
           "type": "string"
         },
         "debug": {
@@ -4185,7 +4194,10 @@
           "type": "array"
         },
         "projectName": {
-          "description": "EDT project name (required if launchConfigurationName is omitted).",
+          "description": "Live EDT project name (required for a live run without launchConfigurationName).",
+          "type": "string"
+        },
+        "snapshotId": {
           "type": "string"
         },
         "standaloneServerPortConflict": {

@@ -64,6 +64,11 @@ final class ProjectSnapshotCapture
         {
             return modelStatus == ModelStatus.VERIFIED;
         }
+
+        boolean yaxunitReady()
+        {
+            return !projects.isEmpty() && projects.get(0).buildInputs() != null;
+        }
     }
 
     record ModelObservation(boolean dirty, Map<String, String> confirmedInputs)
@@ -86,7 +91,7 @@ final class ProjectSnapshotCapture
     {
     }
 
-    static Snapshot capture(String project, List<String> extensions, Access access) throws IOException
+    static Snapshot capture(String project, List<String> extensions, Access access, boolean forYaxunit) throws IOException
     {
         Set<IProject> projects = Set.copyOf(access.projects().stream().map(ScopedProject::project).toList());
         IWorkspace workspace = ResourcesPlugin.getWorkspace();
@@ -106,12 +111,16 @@ final class ProjectSnapshotCapture
             | IResourceChangeEvent.PRE_DELETE);
         try
         {
-            Snapshot snapshot = readStable(() -> ProjectSourceManifest.capture(access), () -> model(projects), changed::get);
+            Snapshot snapshot = readStable(() -> ProjectSourceManifest.capture(access, forYaxunit),
+                () -> model(projects), changed::get);
             Access current = SnapshotSourcePolicy.require(project, extensions);
-            if (changed.get() || !access.projects().equals(current.projects()) || !access.client().equals(current.client()))
+            if (changed.get() || !access.client().equals(current.client())
+                || !projects.equals(Set.copyOf(current.projects().stream().map(ScopedProject::project).toList())))
             {
                 throw changed();
             }
+            SnapshotSourcePolicy.requireGrantScope(access.projects().stream().map(ScopedProject::grant).toList(),
+                current.projects().stream().map(ScopedProject::grant).toList(), forYaxunit);
             return snapshot;
         }
         finally
@@ -203,6 +212,14 @@ final class ProjectSnapshotCapture
                     frame(digest, entry.path());
                     frame(digest, entry.disk().contentId());
                 }
+            }
+            if (project.buildInputs() != null)
+            {
+                project.buildInputs().files().entrySet().stream().sorted(Map.Entry.comparingByKey())
+                    .forEach(file -> {
+                        frame(digest, file.getKey());
+                        frame(digest, file.getValue().contentId());
+                    });
             }
             result.put(project.name(), HexFormat.of().formatHex(digest.digest()));
         }
