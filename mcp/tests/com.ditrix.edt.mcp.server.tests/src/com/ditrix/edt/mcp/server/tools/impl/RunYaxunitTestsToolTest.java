@@ -57,6 +57,20 @@ import com.e1c.g5.dt.applications.IApplicationManager;
 public class RunYaxunitTestsToolTest
 {
     @Test
+    public void snapshotRunRejectsLiveTargetsAndRequiresAuthentication()
+    {
+        var tool = new RunYaxunitTestsTool();
+        String id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        for (String name : java.util.List.of("projectName", "applicationId", "launchConfigurationName",
+            "debug", "updateBeforeLaunch", "updateScope", "externalInfobaseChanges", "standaloneServerPortConflict"))
+        {
+            assertTrue(tool.execute(Map.of("snapshotId", id, name, "false")).contains("only test selectors"));
+        }
+        assertTrue(tool.execute(Map.of("snapshotId", "")).contains("must be a UUID"));
+        assertTrue(tool.execute(Map.of("snapshotId", id)).contains("unavailable for this caller"));
+    }
+
+    @Test
     public void testToolName()
     {
         IMcpTool tool = new RunYaxunitTestsTool();

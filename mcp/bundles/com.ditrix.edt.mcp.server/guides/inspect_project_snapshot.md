@@ -1,0 +1,19 @@
+## Read a retained snapshot
+
+```json
+{"snapshotId":"<capture ID>","view":"manifest","limit":1}
+```
+
+Use `view:"manifest"` to read project-relative paths and the captured `head`, `index`, and `disk` content IDs. An omitted version means the path was absent in that version. Each entry has separate `staged` and `unstaged` flags. Ambiguous renames appear as separate additions and removals.
+
+Use `view:"diff"` to read text patches. An optional `entryId` selects one entry from the same snapshot and comparison. A `diffs` item identifies the staged, unstaged, or comparison delta and its change kind. When `complete` is false, `reason` identifies an input, line, or output limit, non-UTF-8 text, or unconfirmed disk normalization.
+
+`yaxunitReady:true` identifies a capture made with `forYaxunit:true`. It can be passed to `run_yaxunit_tests` when the caller still has execution access. `modelStatus` continues to report the state observed in the live EDT model.
+
+Pass an older ID as `compareTo` to compare the captured disk versions of two snapshots from the same authorized scope. The direction is from `compareTo` to `snapshotId`. For comparison rows, `compareFrom` identifies the older disk version when that path existed.
+
+## Pagination and expiry
+
+`limit` accepts 1–20 entries. The defaults are ten for manifest and three for diff. Large entries can shorten a page. To continue, send its `nextCursor` unchanged with the same IDs, view, entry ID, and limit. The absence of `nextCursor` marks the last page.
+
+You must authenticate on each call. A snapshot expires ten minutes after capture. Capture again when an ID is unavailable. Retained pages read their original bytes even if the working tree has changed.

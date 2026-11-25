@@ -1,13 +1,14 @@
 # run_yaxunit_tests
 
-Run YAXUnit tests as a named background job and return a JUnit Markdown report. The start call waits up to `timeout` (default and maximum 45s): a short run returns the report in that call, otherwise Pending returns a jobId to poll with get_job_status. Address a known run by jobId, NOT by repeating the arguments - a repeated start attaches only while that job is still running, and otherwise launches a second run. Parameters and examples: get_tool_guide('run_yaxunit_tests').
+Run YAXUnit tests from a live EDT launch or a snapshot built in a temporary file infobase. The start call waits up to `timeout` (default and maximum 45s): a short run returns the report in that call, otherwise Pending returns a jobId to poll with get_job_status. Each snapshot submission starts a separate job. A repeated live start attaches only while the matching job is running. Parameters and examples: get_tool_guide('run_yaxunit_tests').
 
 ## Parameters
 | Parameter | Required | Type | Description |
 | --- | --- | --- | --- |
+| snapshotId | — | string | Build and test a YAxUnit-ready capture in its own temporary Windows file infobase. Supply only selectors and timeout with this argument. |
 | launchConfigurationName | — | string | Exact runtime-client launch config name (preferred; from list_configurations). |
-| projectName | — | string | EDT project name (required if launchConfigurationName is omitted). |
-| applicationId | — | string | Application ID from get_applications (required if launchConfigurationName is omitted). |
+| projectName | — | string | Live EDT project name (required for a live run without launchConfigurationName). |
+| applicationId | — | string | Application ID from get_applications (required for a live run without launchConfigurationName). |
 | extensions | — | array | Extension names to filter tests (array; a comma-separated string is also accepted). |
 | modules | — | array | Module names to filter tests (array; a comma-separated string is also accepted). |
 | tests | — | array | Test names in Module.Method format (array; a comma-separated string is also accepted). |
@@ -20,15 +21,42 @@ Run YAXUnit tests as a named background job and return a JUnit Markdown report. 
 | debug | — | boolean | true launches in DEBUG mode so breakpoints fire: a short start returns the launch handle and you call wait_for_break next, while Pending returns a jobId for get_job_status. Default false polls and returns the report. |
 
 ## Guide
-Starts a named background job that launches the 1C:Enterprise application with the `RunUnitTests` startup parameter, waits for the launch to terminate, parses the JUnit XML report, and retains that report by `jobId`. A short run still returns its Markdown report directly from the start call. The full report is also written to `report.md` next to `junit.xml`.
+Starts a named background job that runs YAXUnit and retains the JUnit Markdown report by `jobId`. A short run returns the report directly from the start call. Live launches also write `report.md` next to `junit.xml`.
+
+## Run from a snapshot
+
+On a configured Windows EDT server, capture the base project and its test extensions with `capture_project_snapshot` and `forYaxunit:true`. Use the authenticated loopback connection for capture, start, polling, and cancellation.
+
+```json
+{"snapshotId":"<snapshotId>","tests":["tests_SampleTests.CallsBaseConfigCalcModule"],"timeout":5}
+```
+
+With `snapshotId`, the arguments are limited to `extensions`, `modules`, `tests`, `tags`, and `timeout`. Each accepted submission creates a new job. After the capture, subsequent source edits are picked up by making a new capture. The server exports the retained sources through a private EDT workspace, loads them into a temporary file infobase with YAXUnit, and removes the job directory after stopping the processes. The report identifies the snapshot, the job, the source fingerprints, the filters, and the executed test count. Assertion failures appear in the report. An empty report, missing report, cancelled job, or failed build does not provide test evidence.
+
+### Windows server configuration
+
+Set `yaxunit:true` for the base project and every included extension in `edt.mcp.snapshots.policy`. Set the JVM property `edt.mcp.yaxunit.sandbox` to a JSON object containing these values.
+
+| Key | Value |
+|---|---|
+| `root` | Existing local directory reserved for the server's temporary jobs. Keep it writable by the server account and private from other users. |
+| `edtCli` | Absolute path to the compatible Windows `1cedtcli.exe`. |
+| `javaHome` | Absolute path to the JDK required by this EDT CLI. |
+| `platformDir` | Directory with the compatible Designer `1cv8.exe` and thin client `1cv8c.exe`. |
+| `seed` | Absolute path to a closed, dedicated `1Cv8.1CD` file containing only the compatible YAXUnit engine and any language prerequisites. |
+| `seedSha256` | SHA-256 of that template file as 64 hexadecimal digits. |
+
+Provision the template in a new file infobase with the desired YAXUnit release and required language metadata. Verify it contains only the engine extension, close Designer and any clients, then compute the digest. The server verifies it before copying it into a job. Run the engine and the project code under the trusted EDT server account. The temporary infobase isolates test data from the live infobase, while the process uses the permissions of that account.
+
+An accepted job has a five-minute server-side deadline. The current server admits one bound run when its background worker is available. A busy call can be retried. Use `get_job_status` and `cancel_job` with that job ID while the original credential and grants remain current.
 
 ## When to use
 
-Use after writing or changing test code to verify it. Prerequisites: an existing runtime-client launch configuration for the project/application, and the YAXUnit extension installed in the target infobase. Without YAXUnit no JUnit XML is produced and the tool returns an error.
+Use after writing or changing test code to verify it. A live run requires a runtime-client launch configuration for the project/application and YAXUnit in the target infobase. A snapshot run uses the server configuration above.
 
 ## Parameter details
 
-Two ways to identify the launch:
+Two ways to identify a live launch follow.
 
 - `launchConfigurationName` (preferred) — the exact runtime-client config name from `list_configurations`. When set, `projectName` and `applicationId` are derived from it.
 - `projectName` + `applicationId` — required together when `launchConfigurationName` is omitted. Get the application id from `get_applications`.

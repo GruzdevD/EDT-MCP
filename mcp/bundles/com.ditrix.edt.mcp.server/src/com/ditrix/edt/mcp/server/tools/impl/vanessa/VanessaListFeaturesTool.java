@@ -60,6 +60,17 @@ public class VanessaListFeaturesTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the operation succeeded.", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("root", "Directory scanned for feature files.") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("count", "Number of features returned.") //$NON-NLS-1$ //$NON-NLS-2$
+            .objectArrayProperty("features", "Features with paths, names, and tags.") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public ResponseType getResponseType()
     {
         return ResponseType.JSON;

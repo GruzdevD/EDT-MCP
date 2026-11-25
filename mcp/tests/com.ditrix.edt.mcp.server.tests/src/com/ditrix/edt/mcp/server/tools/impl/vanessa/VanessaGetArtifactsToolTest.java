@@ -96,21 +96,21 @@ public class VanessaGetArtifactsToolTest
         assertTrue(o.get("success").getAsBoolean()); //$NON-NLS-1$
         assertEquals(3, o.get("count").getAsInt()); //$NON-NLS-1$
         JsonArray artifacts = o.getAsJsonArray("artifacts");
-        assertEquals("junit", kindOf(artifacts, "junit.xml")); //$NON-NLS-1$
-        assertEquals("allure", kindOf(artifacts, "allure/shot.png")); //$NON-NLS-1$
-        assertEquals("log", kindOf(artifacts, "BDD.log")); //$NON-NLS-1$
+        assertEquals("junit", kindOf(artifacts, out.resolve("junit.xml"))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals("allure", kindOf(artifacts, out.resolve("allure").resolve("shot.png"))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertEquals("log", kindOf(artifacts, out.resolve("BDD.log"))); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    private static String kindOf(JsonArray artifacts, String suffix)
+    private static String kindOf(JsonArray artifacts, Path expectedPath)
     {
         for (int i = 0; i < artifacts.size(); i++)
         {
             JsonObject item = artifacts.get(i).getAsJsonObject();
-            if (item.get("path").getAsString().endsWith(suffix)) //$NON-NLS-1$
+            if (expectedPath.equals(Path.of(item.get("path").getAsString()))) //$NON-NLS-1$
             {
                 return item.get("kind").getAsString(); //$NON-NLS-1$
             }
         }
-        return "none"; //$NON-NLS-1$
+        throw new AssertionError("Missing artifact: " + expectedPath); //$NON-NLS-1$
     }
 }

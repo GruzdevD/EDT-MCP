@@ -7,6 +7,7 @@
 package com.ditrix.edt.mcp.server.utils;
 
 import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
 
 import javax.xml.XMLConstants;
@@ -27,6 +28,8 @@ import org.w3c.dom.NodeList;
 public final class JUnitXmlParser
 {
     private static final String MESSAGE = "message"; //$NON-NLS-1$
+    private static final String[] COUNT_ATTRIBUTES = {"tests", "failures", "errors", "skipped"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    private static final String[] OUTCOMES = {"failure", "error", "skipped"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
     private JUnitXmlParser()
     {
@@ -51,6 +54,92 @@ public final class JUnitXmlParser
         DocumentBuilder builder = newSecureBuilder();
         Document doc = builder.parse(in);
         return parseDocument(doc);
+    }
+
+    /** Requires actual testcase evidence from a complete, flat YAxUnit JUnit report. */
+    public static JUnitTestResults parseYaxunitReport(File junitXml) throws Exception
+    {
+        Document document = newSecureBuilder().parse(junitXml);
+        Element root = document.getDocumentElement();
+        boolean wrapped = "testsuites".equals(root.getTagName()); //$NON-NLS-1$
+        if (!wrapped && !"testsuite".equals(root.getTagName())) //$NON-NLS-1$
+        {
+            throw invalidReport();
+        }
+        NodeList suites = document.getElementsByTagName("testsuite"); //$NON-NLS-1$
+        if (suites.getLength() == 0)
+        {
+            throw invalidReport();
+        }
+        for (String name : OUTCOMES)
+        {
+            NodeList nodes = document.getElementsByTagName(name);
+            for (int i = 0; i < nodes.getLength(); i++)
+            {
+                if (!(nodes.item(i).getParentNode() instanceof Element test) || !"testcase".equals(test.getTagName())) //$NON-NLS-1$
+                {
+                    throw invalidReport();
+                }
+            }
+        }
+        NodeList cases = document.getElementsByTagName("testcase"); //$NON-NLS-1$
+        for (int i = 0; i < cases.getLength(); i++)
+        {
+            Element test = (Element)cases.item(i);
+            if (!(test.getParentNode() instanceof Element suite) || !"testsuite".equals(suite.getTagName()) //$NON-NLS-1$
+                || test.getAttribute("name").isBlank()) //$NON-NLS-1$
+            {
+                throw invalidReport();
+            }
+            int outcomes = 0;
+            for (String name : OUTCOMES)
+            {
+                outcomes += test.getElementsByTagName(name).getLength();
+            }
+            if (outcomes > 1)
+            {
+                throw invalidReport();
+            }
+        }
+        JUnitTestResults results = new JUnitTestResults();
+        for (int i = 0; i < suites.getLength(); i++)
+        {
+            Element suite = (Element)suites.item(i);
+            if (wrapped ? suite.getParentNode() != root : suite != root)
+            {
+                throw invalidReport();
+            }
+            int[] counts = countSuiteCases(suite, results);
+            requireCounts(suite, counts);
+            results.addToTotals(counts[0], counts[1], counts[2], counts[3]);
+        }
+        if (wrapped)
+        {
+            requireCounts(root, new int[] {results.getTotal(), results.getFailures(), results.getErrors(),
+                results.getSkipped()});
+        }
+        if (results.getTotal() <= results.getSkipped())
+        {
+            throw invalidReport();
+        }
+        return results;
+    }
+
+    private static void requireCounts(Element element, int[] counts) throws IOException
+    {
+        for (int i = 0; i < COUNT_ATTRIBUTES.length; i++)
+        {
+            String name = COUNT_ATTRIBUTES[i];
+            if (element.hasAttribute(name) && getIntAttr(element, name, -1) != counts[i])
+            {
+                throw invalidReport();
+            }
+        }
+    }
+
+    private static IOException invalidReport()
+    {
+        return new IOException("The YAxUnit report has no executed tests or has an invalid structure or counts."); //$NON-NLS-1$
     }
 
     private static JUnitTestResults parseDocument(Document doc)

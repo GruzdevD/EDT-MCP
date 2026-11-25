@@ -68,6 +68,20 @@ public class VanessaGetLogTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the operation succeeded.", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("path", "Path to the run log.") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("totalLines", "Number of lines in the full log.") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("offset", "Zero-based offset of the returned window.") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("returned", "Number of lines in the returned window.") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("more", "Whether more lines follow the returned window.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringArrayProperty("lines", "Log lines in the requested window.") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public ResponseType getResponseType()
     {
         return ResponseType.JSON;

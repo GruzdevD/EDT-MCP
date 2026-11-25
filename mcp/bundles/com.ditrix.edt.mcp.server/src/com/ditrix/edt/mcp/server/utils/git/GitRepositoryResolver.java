@@ -358,6 +358,13 @@ public final class GitRepositoryResolver
         return builder.build();
     }
 
+    /** Opens the conventional .git directory of a work tree already checked by the snapshot reader. */
+    public static Repository openSnapshotWorkTree(File workTree) throws IOException
+    {
+        return new FileRepositoryBuilder().setGitDir(new File(workTree, ".git")) //$NON-NLS-1$
+            .setWorkTree(workTree).setMustExist(true).build();
+    }
+
     private static Resolution failed(String errorJson)
     {
         return new Resolution(null, null, false, errorJson);

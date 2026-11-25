@@ -38,6 +38,31 @@ import com.ditrix.edt.mcp.server.utils.BackgroundJobs.Status;
 /** Focused lifecycle and capacity tests for {@link BackgroundJobs}. */
 public class BackgroundJobsTest
 {
+    @Test
+    public void protectedJobRequiresAccessForStatusAndCancellation()
+    {
+        try (BackgroundJobs jobs = new BackgroundJobs(10, 1))
+        {
+            var authorized = new AtomicBoolean(true);
+            var block = new CountDownLatch(1);
+            JobSnapshot job = jobs.startProtected("test", 10_000, 1, "accepted",
+                authorized::get, progress -> {
+                    block.await();
+                    return progress.jobId();
+                });
+            String id = job.getId();
+            authorized.set(false);
+            assertTrue(jobs.isProtected(id));
+            assertNull(jobs.get(id));
+            assertNull(jobs.await(id, 0));
+            assertNull(jobs.cancel(id));
+            authorized.set(true);
+            assertEquals(Status.RUNNING, jobs.get(id).getStatus());
+            assertNotNull(jobs.cancel(id));
+            assertEquals(Status.CANCELLED, jobs.await(id, 1000).getStatus());
+        }
+    }
+
     /**
      * Admission has to happen INSIDE the same lock as insertion. A caller that counts first
      * and starts afterwards has a window where several concurrent starts all see room, which

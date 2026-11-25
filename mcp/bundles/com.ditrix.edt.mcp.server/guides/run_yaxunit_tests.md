@@ -1,12 +1,39 @@
-Starts a named background job that launches the 1C:Enterprise application with the `RunUnitTests` startup parameter, waits for the launch to terminate, parses the JUnit XML report, and retains that report by `jobId`. A short run still returns its Markdown report directly from the start call. The full report is also written to `report.md` next to `junit.xml`.
+Starts a named background job that runs YAXUnit and retains the JUnit Markdown report by `jobId`. A short run returns the report directly from the start call. Live launches also write `report.md` next to `junit.xml`.
+
+## Run from a snapshot
+
+On a configured Windows EDT server, capture the base project and its test extensions with `capture_project_snapshot` and `forYaxunit:true`. Use the authenticated loopback connection for capture, start, polling, and cancellation.
+
+```json
+{"snapshotId":"<snapshotId>","tests":["tests_SampleTests.CallsBaseConfigCalcModule"],"timeout":5}
+```
+
+With `snapshotId`, the arguments are limited to `extensions`, `modules`, `tests`, `tags`, and `timeout`. Each accepted submission creates a new job. After the capture, subsequent source edits are picked up by making a new capture. The server exports the retained sources through a private EDT workspace, loads them into a temporary file infobase with YAXUnit, and removes the job directory after stopping the processes. The report identifies the snapshot, the job, the source fingerprints, the filters, and the executed test count. Assertion failures appear in the report. An empty report, missing report, cancelled job, or failed build does not provide test evidence.
+
+### Windows server configuration
+
+Set `yaxunit:true` for the base project and every included extension in `edt.mcp.snapshots.policy`. Set the JVM property `edt.mcp.yaxunit.sandbox` to a JSON object containing these values.
+
+| Key | Value |
+|---|---|
+| `root` | Existing local directory reserved for the server's temporary jobs. Keep it writable by the server account and private from other users. |
+| `edtCli` | Absolute path to the compatible Windows `1cedtcli.exe`. |
+| `javaHome` | Absolute path to the JDK required by this EDT CLI. |
+| `platformDir` | Directory with the compatible Designer `1cv8.exe` and thin client `1cv8c.exe`. |
+| `seed` | Absolute path to a closed, dedicated `1Cv8.1CD` file containing only the compatible YAXUnit engine and any language prerequisites. |
+| `seedSha256` | SHA-256 of that template file as 64 hexadecimal digits. |
+
+Provision the template in a new file infobase with the desired YAXUnit release and required language metadata. Verify it contains only the engine extension, close Designer and any clients, then compute the digest. The server verifies it before copying it into a job. Run the engine and the project code under the trusted EDT server account. The temporary infobase isolates test data from the live infobase, while the process uses the permissions of that account.
+
+An accepted job has a five-minute server-side deadline. The current server admits one bound run when its background worker is available. A busy call can be retried. Use `get_job_status` and `cancel_job` with that job ID while the original credential and grants remain current.
 
 ## When to use
 
-Use after writing or changing test code to verify it. Prerequisites: an existing runtime-client launch configuration for the project/application, and the YAXUnit extension installed in the target infobase. Without YAXUnit no JUnit XML is produced and the tool returns an error.
+Use after writing or changing test code to verify it. A live run requires a runtime-client launch configuration for the project/application and YAXUnit in the target infobase. A snapshot run uses the server configuration above.
 
 ## Parameter details
 
-Two ways to identify the launch:
+Two ways to identify a live launch follow.
 
 - `launchConfigurationName` (preferred) — the exact runtime-client config name from `list_configurations`. When set, `projectName` and `applicationId` are derived from it.
 - `projectName` + `applicationId` — required together when `launchConfigurationName` is omitted. Get the application id from `get_applications`.

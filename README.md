@@ -198,13 +198,13 @@ set VER_EDT=2025.2.3+30
 | **Errors & Problems** | Ошибки, валидация, маркеры | `get_problem_summary`, `get_project_errors`, `get_markers`, `apply_quick_fix`, `validate_xdto_package` |
 | **Code Intelligence** | Content assist, документация, метаданные, ссылки | `get_content_assist`, `get_platform_documentation`, `get_metadata_objects`, `get_metadata_details`, `list_subsystems`, `find_references`, `list_common_pictures` … |
 | **Tags** | Теги метаданных | `get_tags`, `get_objects_by_tags` |
-| **Applications & Testing** | ИБ, сборка внешних объектов, запуск, тесты, фоновые задания | `get_applications`, `update_database`, `launch`, `terminate_launch`, `run_yaxunit_tests`, `get_job_status`, `cancel_job`, `build_external_objects`, `set_infobase_credentials` … |
+| **Applications & Testing** | ИБ, сборка внешних объектов, запуск, тесты, фоновые задания | `get_applications`, `update_database`, `launch`, `terminate_launch`, `list_yaxunit_tests`, `run_yaxunit_tests`, `get_job_status`, `cancel_job`, `build_external_objects`, `set_infobase_credentials` … |
 | **Debugging** | Точки останова, шаги, переменные, профилирование | `set_breakpoint`, `get_variables`, `set_variable`, `step`, `resume`, `evaluate_expression`, `debug_yaxunit_tests`, `start/stop_profiling` … |
 | **BSL Code** | Чтение/запись модулей, структура, поиск, иерархия вызовов, формы | `read/write_module_source`, `get_module_structure`, `list_modules`, `search_in_code`, `go_to_definition`, `get_symbol_info`, `get_form_screenshot`, `validate_query` … |
 | **Refactoring** | Создание, переименование, удаление, свойства метаданных и СКД | `rename_metadata_object`, `delete_metadata`, `create_metadata`, `modify_metadata`, `adopt_metadata_object` |
 | **Translation** | Синхронизация переводов (LanguageTool) | `generate_translation_strings`, `translate_configuration`, `get_translation_project_info` |
-| **Comparison** | Трёхстороннее сравнение конфигураций | `compare_configurations`, `get_comparison_node`, `merge_rules` |
-| **Vanessa / BDD** *(форк)* | Запуск и анализ Vanessa Automation + провижининг | `vanessa_run_feature`, `vanessa_get_execution_status`, `vanessa_get_test_report`, `vanessa_list_launches`, `vanessa_doctor`, `vanessa_setup` |
+| **Comparison** | Трёхстороннее сравнение конфигураций и снимки исходников | `compare_configurations`, `get_comparison_node`, `merge_rules`, `capture_project_snapshot`, `inspect_project_snapshot` |
+| **Vanessa / BDD** *(форк)* | Запуск и анализ Vanessa Automation + провижининг | `vanessa_run_feature`, `vanessa_get_execution_status`, `vanessa_get_test_report`, `vanessa_open_allure_report`, `vanessa_list_launches`, `vanessa_doctor`, `vanessa_setup` |
 | **Self-update** *(форк)* | Самообновление плагина | `plugin_check_for_update`, `plugin_update` |
 
 Включение/отключение — во вкладке **Tools** (**Window → Preferences → MCP Server**). Отключённые инструменты исключаются из `tools/list`; при прямом вызове через `tools/call` сервер сообщит, что инструмент отключён.

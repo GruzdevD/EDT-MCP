@@ -56,6 +56,19 @@ public class VanessaGetFeatureTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the operation succeeded.", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("path", "Path to the feature file.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("feature", "Feature name.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringArrayProperty("tags", "Feature tags.") //$NON-NLS-1$ //$NON-NLS-2$
+            .objectArrayProperty("scenarios", "Scenarios with names, tags, and steps.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("raw", "Original Gherkin text.") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public ResponseType getResponseType()
     {
         return ResponseType.JSON;

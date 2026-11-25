@@ -86,6 +86,20 @@ public class VanessaOpenAllureReportTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the operation succeeded.", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("outDir", "Absolute path of the run output directory.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("resultsDir", "Absolute path of the raw Allure results.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("reportDir", "Absolute path of the generated report.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("url", "Loopback URL serving the report.") //$NON-NLS-1$ //$NON-NLS-2$
+            .integerProperty("port", "Loopback report server port.") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("detached", "Whether the report opened in the OS browser.") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public ResponseType getResponseType()
     {
         return ResponseType.JSON;

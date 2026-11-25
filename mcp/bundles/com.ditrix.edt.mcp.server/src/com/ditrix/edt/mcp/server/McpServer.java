@@ -25,6 +25,7 @@ import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
 import com.ditrix.edt.mcp.server.transport.HealthHandler;
 import com.ditrix.edt.mcp.server.transport.InterruptibleToolExecutor;
 import com.ditrix.edt.mcp.server.transport.McpHttpHandler;
+import com.ditrix.edt.mcp.server.utils.snapshot.ProjectSnapshotService;
 import com.sun.net.httpserver.HttpServer;
 
 /**
@@ -186,6 +187,7 @@ public class McpServer
             server.stop(1);
             server = null;
             running = false;
+            ProjectSnapshotService.invalidate();
             if (mainExecutor != null)
             {
                 mainExecutor.shutdownNow();
@@ -220,6 +222,12 @@ public class McpServer
     public boolean isRunning()
     {
         return running;
+    }
+
+    /** Whether this listener was actually bound to loopback, regardless of later preference edits. */
+    public synchronized boolean isLoopbackListener()
+    {
+        return running && server != null && server.getAddress().getAddress().isLoopbackAddress();
     }
 
     /**

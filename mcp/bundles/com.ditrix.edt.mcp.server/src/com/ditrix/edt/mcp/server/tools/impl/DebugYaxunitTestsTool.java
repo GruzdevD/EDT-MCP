@@ -144,6 +144,10 @@ public class DebugYaxunitTestsTool implements IMcpTool // NOSONAR intentional re
     @Override
     public String execute(Map<String, String> params)
     {
+        if (RunYaxunitTestsTool.hasSnapshotId(params))
+        {
+            return delegate.executeAs(params, NAME);
+        }
         // Deprecated alias: forward the accepted arguments to the merged tool in
         // DEBUG mode. Each key is copied by its literal name so this forwarding
         // shim still satisfies schema/execute parity (rule #6), and the explicit

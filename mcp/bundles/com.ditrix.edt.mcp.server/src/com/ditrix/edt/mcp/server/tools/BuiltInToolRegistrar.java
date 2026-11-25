@@ -17,6 +17,8 @@ import com.ditrix.edt.mcp.server.tools.impl.BuildExternalObjectsTool;
 import com.ditrix.edt.mcp.server.tools.impl.CancelJobTool;
 import com.ditrix.edt.mcp.server.tools.impl.CleanProjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.CompareConfigurationsTool;
+import com.ditrix.edt.mcp.server.tools.impl.CaptureProjectSnapshotTool;
+import com.ditrix.edt.mcp.server.tools.impl.InspectProjectSnapshotTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateGitBranchTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateInfobaseTool;
 import com.ditrix.edt.mcp.server.tools.impl.SetInfobaseCredentialsTool;
@@ -256,6 +258,8 @@ public final class BuiltInToolRegistrar
         catalogue.add(new CompareConfigurationsTool());
         catalogue.add(new GetComparisonNodeTool());
         catalogue.add(new MergeRulesTool());
+        catalogue.add(new CaptureProjectSnapshotTool());
+        catalogue.add(new InspectProjectSnapshotTool());
 
         // LanguageTool translation tools
         catalogue.add(new GenerateTranslationStringsTool());

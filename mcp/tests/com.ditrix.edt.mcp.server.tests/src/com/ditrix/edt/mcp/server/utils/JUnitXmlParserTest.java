@@ -9,11 +9,13 @@ package com.ditrix.edt.mcp.server.utils;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 
 import org.junit.Test;
 
@@ -22,6 +24,75 @@ import org.junit.Test;
  */
 public class JUnitXmlParserTest
 {
+    @Test
+    public void snapshotReportRequiresExecutedTestcaseEvidence() throws Exception
+    {
+        var file = Files.createTempFile("snapshot-yaxunit-report-", ".xml");
+        try
+        {
+            for (String invalid : new String[] {"<testsuites/>", "<testsuite tests=\"1\"/>",
+                "<testsuite><testcase name=\"skip\"><skipped/></testcase></testsuite>"})
+            {
+                Files.writeString(file, invalid);
+                assertThrows(java.io.IOException.class, () -> JUnitXmlParser.parseYaxunitReport(file.toFile()));
+            }
+            Files.writeString(file, "<testsuite tests=\"2\" failures=\"1\"><testcase name=\"pass\"/>"
+                + "<testcase name=\"fail\"><failure message=\"Expected 5, got 12\"/></testcase></testsuite>");
+            JUnitTestResults parsed = JUnitXmlParser.parseYaxunitReport(file.toFile());
+            assertEquals(2, parsed.getTotal());
+            assertEquals(1, parsed.getPassed());
+            assertEquals(1, parsed.getFailures());
+            assertEquals("Expected 5, got 12", parsed.getFailureDetails().get(0).message);
+        }
+        finally
+        {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
+    public void snapshotReportRejectsMisplacedCasesOutcomesAndInconsistentCounts() throws Exception
+    {
+        var file = Files.createTempFile("snapshot-yaxunit-structure-", ".xml");
+        try
+        {
+            for (String outcome : new String[] {"failure", "error", "skipped"})
+            {
+                String bare = "<testsuites><testcase name=\"x\"><" + outcome + "/></testcase></testsuites>";
+                Files.writeString(file, bare);
+                assertThrows(java.io.IOException.class, () -> JUnitXmlParser.parseYaxunitReport(file.toFile()));
+                assertEquals("legacy parser still accepts standalone cases", 1, parseXml(bare).getTotal());
+            }
+            for (String invalid : new String[] {
+                "<testsuites><wrapper><testsuite><testcase name=\"x\"/></testsuite></wrapper></testsuites>",
+                "<testsuite><testcase name=\"x\"/><failure/></testsuite>",
+                "<testsuite><testcase name=\"x\"><properties><failure/></properties></testcase></testsuite>",
+                "<testsuite><testcase name=\"x\"><failure/><error/></testcase></testsuite>",
+                "<testsuite failures=\"0\"><testcase name=\"x\"><failure/></testcase></testsuite>",
+                "<testsuites tests=\"2\"><testsuite><testcase name=\"x\"/></testsuite></testsuites>",
+                "<testsuite><testcase/></testsuite>"})
+            {
+                Files.writeString(file, invalid);
+                assertThrows(java.io.IOException.class, () -> JUnitXmlParser.parseYaxunitReport(file.toFile()));
+            }
+            Files.writeString(file, """
+                <testsuites tests="4" failures="1" errors="1" skipped="1">
+                  <testsuite><testcase name="ok"/><testcase name="skip"><skipped/></testcase></testsuite>
+                  <testsuite><testcase name="bad"><failure/></testcase><testcase name="err"><error/></testcase></testsuite>
+                </testsuites>
+                """);
+            var valid = JUnitXmlParser.parseYaxunitReport(file.toFile());
+            assertEquals(1, valid.getPassed());
+            assertEquals(1, valid.getFailures());
+            assertEquals(1, valid.getErrors());
+            assertEquals(1, valid.getSkipped());
+        }
+        finally
+        {
+            Files.deleteIfExists(file);
+        }
+    }
+
     private static JUnitTestResults parseXml(String xml) throws Exception
     {
         return JUnitXmlParser.parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));

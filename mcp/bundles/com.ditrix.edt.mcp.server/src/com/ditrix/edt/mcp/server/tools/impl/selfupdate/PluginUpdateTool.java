@@ -56,6 +56,21 @@ public class PluginUpdateTool implements IMcpTool
     }
 
     @Override
+    public String getOutputSchema()
+    {
+        return JsonSchemaBuilder.object()
+            .booleanProperty("success", "Whether the operation succeeded.", true) //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("installedVersion", "Previously running bundle version, or unknown if unavailable.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("newVersion", "Version of the installed update.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("jar", "Filename of the installed bundle.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("target", "Absolute path of the installed bundle.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("bundlesInfo", "Outcome of updating the EDT bundle registry.") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("restartRequired", "Whether EDT must restart to load the update.") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("message", "Update status message.") //$NON-NLS-1$ //$NON-NLS-2$
+            .build();
+    }
+
+    @Override
     public ResponseType getResponseType()
     {
         return ResponseType.JSON;

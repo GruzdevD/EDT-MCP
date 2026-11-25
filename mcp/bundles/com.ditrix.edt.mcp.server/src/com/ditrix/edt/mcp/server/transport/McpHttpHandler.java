@@ -21,6 +21,7 @@ import com.ditrix.edt.mcp.server.McpServer;
 import com.ditrix.edt.mcp.server.SseStreamRegistry;
 import com.ditrix.edt.mcp.server.protocol.McpConstants;
 import com.ditrix.edt.mcp.server.protocol.McpProtocolHandler;
+import com.ditrix.edt.mcp.server.utils.Log;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.tools.impl.GetEdtVersionTool;
 import com.sun.net.httpserver.HttpExchange;
@@ -69,7 +70,8 @@ public class McpHttpHandler implements HttpHandler
 
         // Optional shared-token auth — applies to every method, including SSE GET.
         // No-op when PREF_AUTH_TOKEN is empty (default), preserving prior behavior.
-        if (!HttpTransport.isAuthorized(exchange))
+        HttpTransport.Admission admission = HttpTransport.authorize(exchange);
+        if (!admission.allowed())
         {
             try
             {
@@ -133,7 +135,7 @@ public class McpHttpHandler implements HttpHandler
 
             if ("POST".equals(method)) //$NON-NLS-1$
             {
-                handleMcpRequest(exchange);
+                handleMcpRequest(exchange, admission.client());
             }
             else if ("DELETE".equals(method)) //$NON-NLS-1$
             {
@@ -258,7 +260,8 @@ public class McpHttpHandler implements HttpHandler
         }
     }
 
-    private void handleMcpRequest(HttpExchange exchange) throws IOException
+    private void handleMcpRequest(HttpExchange exchange, HttpTransport.AuthenticatedClient client)
+        throws IOException
     {
         // The request counter is incremented by McpProtocolHandler, not here: calls also
         // arrive through the in-process bridge, and counting at the transport left the
@@ -288,7 +291,11 @@ public class McpHttpHandler implements HttpHandler
             return;
         }
 
-        Activator.logDebug("MCP request body: " + requestBody); //$NON-NLS-1$
+        boolean traceBodies = Log.isDebugEnabled() && !McpProtocolHandler.isSnapshotCall(requestBody);
+        if (traceBodies)
+        {
+            Activator.logDebug("MCP request body: " + requestBody); //$NON-NLS-1$
+        }
 
         String response;
         boolean isInitialize = requestBody.contains("\"" + McpConstants.METHOD_INITIALIZE + "\""); //$NON-NLS-1$ //$NON-NLS-2$
@@ -299,7 +306,7 @@ public class McpHttpHandler implements HttpHandler
             if (isToolCall)
             {
                 // Handle tool calls with interruptible execution
-                response = interruptibleExecutor.execute(exchange, requestBody);
+                response = interruptibleExecutor.execute(exchange, requestBody, client);
                 if (response == null)
                 {
                     // Response was already sent (user interrupted)
@@ -308,7 +315,7 @@ public class McpHttpHandler implements HttpHandler
             }
             else
             {
-                response = protocolHandler.processRequest(requestBody);
+                response = protocolHandler.processRequest(requestBody, client);
             }
 
             // null response means notification (no response needed)
@@ -319,7 +326,10 @@ public class McpHttpHandler implements HttpHandler
                 return;
             }
 
-            Activator.logDebug("MCP response: " + response.substring(0, Math.min(200, response.length())) + "..."); //$NON-NLS-1$ //$NON-NLS-2$
+            if (traceBodies)
+            {
+                Activator.logDebug("MCP response: " + response.substring(0, Math.min(200, response.length())) + "..."); //$NON-NLS-1$ //$NON-NLS-2$
+            }
         }
         catch (Exception e)
         {

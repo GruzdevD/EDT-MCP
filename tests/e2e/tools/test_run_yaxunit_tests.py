@@ -100,15 +100,65 @@ Fixture inventory used (TestConfiguration, English Names): the project itself
 (YAXUnit needs an infobase, not a module). No launch configuration registered.
 """
 
+import os
+import re
+import time
+
 from harness import (
     call,
     assert_error,
     assert_error_quality,
     assert_no_diff,
+    assert_ok,
     e2e_test,
+    E2ESkip,
     PROJECT,
     TESTS_PROJECT,
 )
+
+
+@e2e_test(tool="run_yaxunit_tests", kind="read")
+def test_snapshot_run_rejects_live_options_and_an_unknown_capture():
+    snapshot_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    for argument, value in [("projectName", PROJECT), ("debug", False), ("updateBeforeLaunch", None)]:
+        result = call("run_yaxunit_tests", {"snapshotId": snapshot_id, argument: value})
+        assert "only test selectors" in assert_error(result)
+    assert "must be a UUID" in assert_error(call("run_yaxunit_tests", {"snapshotId": None}))
+    result = call("run_yaxunit_tests", {"snapshotId": snapshot_id, "timeout": 1})
+    assert "unavailable" in assert_error(result)
+    assert_no_diff("rejecting a snapshot-bound run must leave the project untouched")
+
+
+@e2e_test(tool="run_yaxunit_tests", kind="read")
+def test_snapshot_run_reports_retained_project_fingerprints():
+    if os.environ.get("EDT_MCP_SNAPSHOT_YAXUNIT_ACCEPTANCE") != "1":
+        raise E2ESkip("dedicated authenticated Windows snapshot YAXUnit stand required")
+    captured = call("capture_project_snapshot", {
+        "projectName": PROJECT, "includedProjects": [TESTS_PROJECT], "forYaxunit": True,
+    })
+    assert_ok(captured)
+    value = captured.structured or {}
+    assert value.get("yaxunitReady")
+    selector = "tests_SampleTests.CallsBaseConfigCalcModule"
+    result = call("run_yaxunit_tests", {
+        "snapshotId": value["snapshotId"], "tests": [selector], "timeout": 1,
+    })
+    assert_ok(result)
+    if "Pending" in result.text:
+        job_id = re.search(r'jobId="([a-f0-9-]{36})"', result.text).group(1)
+        deadline = time.monotonic() + 310
+        while time.monotonic() < deadline:
+            result = call("get_job_status", {"jobId": job_id, "waitSeconds": 15})
+            assert_ok(result)
+            if "# Background job: running" not in result.text:
+                break
+    assert "## Snapshot run provenance" in result.text
+    assert "Result: PASSED" in result.text
+    assert value["snapshotId"] in result.text
+    assert selector in result.text
+    for project in value["projects"]:
+        assert project["sourceFingerprint"] in result.text
+    assert_no_diff("a bound YAXUnit run must leave the project unchanged")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

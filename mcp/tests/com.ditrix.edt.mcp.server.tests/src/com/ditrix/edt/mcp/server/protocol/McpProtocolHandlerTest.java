@@ -20,6 +20,7 @@ import com.ditrix.edt.mcp.server.UserSignal;
 import com.ditrix.edt.mcp.server.UserSignal.SignalType;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
+import com.ditrix.edt.mcp.server.utils.BackgroundJobs;
 import com.ditrix.edt.mcp.server.utils.OutputSizeGuard;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -37,6 +38,22 @@ public class McpProtocolHandlerTest
 {
     private McpProtocolHandler handler;
     private McpToolRegistry registry;
+
+    @Test
+    public void classifiesBoundCallsAndProtectedPollsForRedaction()
+    {
+        String bound = "{\"method\":\"tools/call\",\"params\":{\"name\":\"run_yaxunit_tests\","
+            + "\"arguments\":{\"snapshotId\":null}}}";
+        assertTrue(McpProtocolHandler.isSnapshotCall(bound));
+        assertFalse(McpProtocolHandler.isSnapshotCall(bound.replace("snapshotId", "projectName")));
+        var job = BackgroundJobs.shared().startProtected("test", 1000, Integer.MAX_VALUE, "test",
+            () -> false, progress -> "private");
+        for (String tool : List.of("get_job_status", "cancel_job"))
+        {
+            assertTrue(McpProtocolHandler.isSnapshotCall(GsonProvider.toJson(Map.of("method", "tools/call",
+                "params", Map.of("name", tool, "arguments", Map.of("jobId", " " + job.getId() + " "))))));
+        }
+    }
 
     @Before
     public void setUp()
@@ -1249,6 +1266,23 @@ public class McpProtocolHandlerTest
         assertEquals("an unparseable request must record exactly once", 7, spy.recordCount());
         assertNull("an unparseable request records a null method", spy.methods.get(6));
         assertNull("an unparseable request records a null tool name", spy.toolNames.get(6));
+    }
+
+    @Test
+    public void testSnapshotPayloadsStayOutOfHistoryButReachTheCaller()
+    {
+        String name = "inspect_project_snapshot";
+        registry.register(new StubJsonTool(name, "{\"patch\":\"synthetic private source\"}"));
+        RecordingSpyHandler handler = new RecordingSpyHandler();
+        String result = handler.processRequest(buildToolCallRequest(1, name, null));
+        assertTrue(result.contains("synthetic private source"));
+        assertEquals(name, handler.toolNames.get(0));
+        assertNull(handler.requests.get(0));
+        assertNull(handler.responses.get(0));
+        assertTrue(McpProtocolHandler.isSnapshotCall(buildToolCallRequest(2, "capture_project_snapshot", null)));
+        String escaped = buildToolCallRequest(2, name, null).replace("inspect_", "inspect\\u005f");
+        assertTrue(McpProtocolHandler.isSnapshotCall(escaped));
+        assertFalse(McpProtocolHandler.isSnapshotCall(buildToolCallRequest(3, "list_projects", null)));
     }
 
     @Test
