@@ -93,6 +93,71 @@ final class ProjectCommitPolicy
         }
     }
 
+    static void requireStageNormalization(Repository repository, Plan plan, DirCache index) throws IOException
+    {
+        var config = repository.getConfig();
+        String crlf = config.getString("core", null, "autocrlf");
+        if (defaultUserAttributesPresent(repository) || (crlf != null && !"false".equalsIgnoreCase(crlf)) || config.getString("core", null, "attributesfile") != null
+            || !config.getSubsections("filter").isEmpty() || !absent(repository.getDirectory().toPath().resolve("info/attributes")))
+        {
+            throw ProjectCommitPlan.stale();
+        }
+        requireSystemAttributes(repository, plan);
+        var root = repository.getWorkTree().toPath();
+        var checked = new java.util.HashSet<Path>();
+        for (var change : plan.changes())
+        {
+            for (Path parent = root.resolve(change.selected().gitPath()).getParent();
+                parent != null && parent.startsWith(root) && checked.add(parent); parent = parent.getParent())
+            {
+                Path attributes = parent.resolve(".gitattributes");
+                String gitPath = root.relativize(attributes).toString().replace(java.io.File.separatorChar, '/');
+                if (!absent(attributes) || index.getEntry(gitPath) != null) { throw ProjectCommitPlan.stale(); }
+            }
+        }
+    }
+
+    private static void requireSystemAttributes(Repository repo, Plan plan) throws IOException
+    {
+        String disabled = System.getenv("GIT_ATTR_NOSYSTEM");
+        if (disabled != null && List.of("true","yes","on","1").contains(disabled.toLowerCase(java.util.Locale.ROOT))) { return; }
+        var systemConfig = repo.getFS().getGitSystemConfig();
+        if (systemConfig == null) { return; }
+        Path file = systemConfig.toPath().resolveSibling("gitattributes");
+        if (absent(file)) { return; }
+        // Git for Windows ships diff drivers here. They never transform bytes on check-in.
+        // Accept only trivially harmless lines without interpreting Git's quoted patterns or macros.
+        int limit = 256 * 1024;
+        byte[] bytes;
+        try (var input = Files.newInputStream(file)) { bytes = input.readNBytes(limit + 1); }
+        if (bytes.length > limit) { throw ProjectCommitPlan.stale(); }
+        var content = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+        for (String line : content.lines().toList())
+        {
+            String stripped = line.strip();
+            if (stripped.isEmpty() || stripped.startsWith("#")) { continue; }
+            String[] parts = stripped.split("\\s+",2);
+            if (parts.length == 2 && parts[1].matches("diff=[A-Za-z0-9_.-]+") && !parts[0].startsWith("[attr]")) { continue; }
+            // JGit matches ordinary Git path patterns. Unknown syntax and macros fail closed.
+            if (parts.length == 2 && parts[0].matches("[A-Za-z0-9_./*?-]+"))
+            {
+                var pattern = new org.eclipse.jgit.attributes.AttributesRule(
+                    parts[0].toLowerCase(java.util.Locale.ROOT), parts[1]);
+                if (plan.changes().stream().noneMatch(change -> pattern.isMatch(
+                    change.selected().gitPath().toLowerCase(java.util.Locale.ROOT),false))) { continue; }
+            }
+            throw ProjectCommitPlan.stale();
+        }
+    }
+
+    static boolean defaultUserAttributesPresent(Repository repo)
+    {
+        String xdg = System.getenv("XDG_CONFIG_HOME");
+        var home = repo.getFS().userHome();
+        Path config = xdg != null && !xdg.isBlank() ? Path.of(xdg) : home == null ? null : home.toPath().resolve(".config");
+        return config != null && !absent(config.resolve("git/attributes"));
+    }
+
     private static boolean absent(Path file)
     {
         return Files.notExists(file, LinkOption.NOFOLLOW_LINKS);

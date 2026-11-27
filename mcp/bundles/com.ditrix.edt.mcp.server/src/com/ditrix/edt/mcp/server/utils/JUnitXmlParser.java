@@ -225,6 +225,7 @@ public final class JUnitXmlParser
             }
 
             NodeList skippedNodes = testCase.getElementsByTagName("skipped"); //$NON-NLS-1$
+            if (skippedNodes.getLength() == 0) { results.executed(fullName); }
             if (skippedNodes.getLength() > 0)
             {
                 nodeSkipped++;

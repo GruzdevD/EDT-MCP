@@ -66,8 +66,36 @@ public final class SnapshotYaxunitRunner
     public static JobSnapshot start(BackgroundJobs jobs, String tool, UUID snapshotId,
         Map<String, List<String>> selectors) throws IOException
     {
-        BuildAdmission admission = ProjectSnapshotService.authorizeBuild(snapshotId);
+        return start(jobs,tool,ProjectSnapshotService.authorizeBuild(snapshotId),selectors,null);
+    }
+
+    public static JobSnapshot startCandidate(BackgroundJobs jobs,String tool,UUID plan,
+        Map<String,List<String>> selectors,String retention) throws IOException
+    {
+        return start(jobs,tool,ProjectSnapshotService.authorizeCandidate(plan),selectors,retention);
+    }
+
+    public static JobSnapshot startCommit(BackgroundJobs jobs,String tool,String source,Map<String,List<String>> selectors,String retention) throws IOException
+    {
+        CommitSource request = GsonProvider.fromJson(source,CommitSource.class);
+        if (request == null || request.commitSha() == null || !org.eclipse.jgit.lib.ObjectId.isId(request.commitSha())
+            || request.dependencies() != null && request.dependencies().size() > 15)
+        {
+            throw new IOException("Expected a branch-scoped commit and pinned dependencies.");
+        }
+        var base = new BuildReview.Dependency(request.repoId(),request.projectName(),request.branch(),request.commitSha());
+        var admission = ProjectSnapshotService.authorizeCommitRun(base,request.dependencies() == null ? List.of() : request.dependencies());
+        return start(jobs,tool,admission,selectors,retention);
+    }
+
+    private record CommitSource(String repoId,String projectName,String branch,String commitSha,List<BuildReview.Dependency> dependencies) { }
+
+    private static JobSnapshot start(BackgroundJobs jobs,String tool,BuildAdmission admission,
+        Map<String,List<String>> selectors,String retention) throws IOException
+    {
         JobSnapshot job = null;
+        ReviewEvidenceStore.Job reserved = null;
+        UUID id = UUID.randomUUID();
         try
         {
             BuildAuthorization authorization = admission.authorization();
@@ -81,9 +109,52 @@ public final class SnapshotYaxunitRunner
             {
                 throw new IOException("The snapshot YAxUnit job root must be separate from the captured projects.");
             }
-            job = jobs.startProtected(tool, TIME_LIMIT_MS, 1, "Accepted the snapshot YAxUnit request.",
-                authorization::permitsCaller, admission::close,
-                progress -> execute(admission, configuration, selectors, progress));
+            Map<String,String> environmentId = admission.identity() == null ? Map.of() : configuration.identity();
+            String initial = admission.identity() == null ? "Accepted the snapshot YAxUnit request."
+                : GsonProvider.toJson(Map.of("source",admission.identity(),"environment",environmentId,"selectors",selectors));
+            if (retention != null)
+            {
+                reserved = ReviewEvidence.reserve(id,admission,retention,environmentId,selectors);
+                initial = GsonProvider.toJson(Map.of("source",admission.identity(),"environment",environmentId,
+                    "selectors",selectors,"jobId",id,"retainUntil",java.time.Instant.ofEpochMilli(reserved.retainUntil()).toString()));
+            }
+            job = jobs.startReserved(id,tool, TIME_LIMIT_MS, 1, initial,
+                authorization::permitsCaller, () -> {
+                    admission.close();
+                    if (retention != null)
+                    {
+                        try { cancelEvidence(id); }
+                        catch (IOException e) { throw new java.io.UncheckedIOException(e); }
+                    }
+                },
+                progress -> {
+                    String result;
+                    var outcome = new java.util.concurrent.atomic.AtomicReference<String>();
+                    try
+                    {
+                        result = execute(admission, configuration, selectors, environmentId, progress,outcome);
+                    }
+                    catch (InterruptedException e)
+                    {
+                        if (retention != null) { cancelEvidence(id); }
+                        throw e;
+                    }
+                    catch (IOException e)
+                    {
+                        if (retention != null)
+                        {
+                            if (Thread.currentThread().isInterrupted()) { cancelEvidence(id); }
+                            else { ReviewEvidence.store().finish(id,"BROKEN",e.getMessage(),null); }
+                        }
+                        throw e;
+                    }
+                    if (retention != null)
+                    {
+                        if (!progress.tryCommit()) { throw new InterruptedException("Job cancelled before publishing evidence."); }
+                        ReviewEvidence.store().finish(id,outcome.get(),"completed",result);
+                    }
+                    return result;
+                });
             return job;
         }
         finally
@@ -91,12 +162,21 @@ public final class SnapshotYaxunitRunner
             if (job == null)
             {
                 admission.close();
+                if (reserved != null) { ReviewEvidence.store().discard(id); }
             }
         }
     }
 
+    private static void cancelEvidence(UUID id) throws IOException
+    {
+        // FileChannel.lock is interruptible. Preserve cancellation across durable publication.
+        boolean interrupted = Thread.interrupted();
+        try { ReviewEvidence.store().finish(id,"CANCELLED","cancelled",null); }
+        finally { if (interrupted) { Thread.currentThread().interrupt(); } }
+    }
+
     private static String execute(BuildAdmission admission, Toolchain configuration,
-        Map<String, List<String>> selectors, ProgressReporter progress) throws IOException, InterruptedException
+        Map<String, List<String>> selectors, Map<String,String> environmentId, ProgressReporter progress, java.util.concurrent.atomic.AtomicReference<String> outcome) throws IOException, InterruptedException
     {
         BuildAuthorization authorization = admission.authorization();
         String phase = "sandbox preparation";
@@ -177,6 +257,15 @@ public final class SnapshotYaxunitRunner
                 phase = "JUnit verification";
                 JUnitTestResults results = readReport(report);
                 phase = "sandbox cleanup";
+                if (admission.identity() != null)
+                {
+                    if (!environmentId.equals(configuration.identity())) { throw new IOException("Toolchain changed during run."); }
+                    outcome.set(results.isPassed() ? "PASSED" : "FAILED");
+                    String data = GsonProvider.toJson(Map.of("source",admission.identity(),"jobId",progress.jobId(),
+                        "environment",environmentId,"selectors",selectors,"executedTests",results.getExecutedNames(),
+                        "outcome",results.isPassed() ? "PASSED" : "FAILED"));
+                    return data.replace("`","\\u0060") + "\n\n" + JUnitMarkdownFormatter.format(results);
+                }
                 return evidence(authorization.id(), progress.jobId(), source.fingerprints(), selectors, results);
             }
         }
@@ -470,6 +559,25 @@ public final class SnapshotYaxunitRunner
             {
                 throw new IOException("Snapshot YAxUnit requires a valid local Windows toolchain and pinned engine template.");
             }
+        }
+
+        Map<String,String> identity() throws IOException
+        {
+            return Map.of("seedSha256",HexFormat.of().formatHex(digest),"platformBuild",designer.getParent().getParent().getFileName().toString(),
+                "edtCliSha256",fileDigest(cli),"designerSha256",fileDigest(designer),"clientSha256",fileDigest(thinClient),
+                "javaReleaseSha256",fileDigest(javaHome.resolve("release")));
+        }
+
+        private static String fileDigest(Path file) throws IOException
+        {
+            try (var input = Files.newInputStream(file))
+            {
+                var hash = java.security.MessageDigest.getInstance("SHA-256");
+                byte[] buffer = new byte[65536];
+                for (int n; (n = input.read(buffer)) != -1;) { hash.update(buffer,0,n); }
+                return HexFormat.of().formatHex(hash.digest());
+            }
+            catch (java.security.NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
         }
 
         private static Path localPath(String value) throws IOException

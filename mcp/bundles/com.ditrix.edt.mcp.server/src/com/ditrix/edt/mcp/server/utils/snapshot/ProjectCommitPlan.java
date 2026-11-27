@@ -46,7 +46,13 @@ final class ProjectCommitPlan
     static final int MAX_ENTRIES = 100;
     static final int MAX_MESSAGE_BYTES = 8192;
 
-    record SelectedEntry(UUID id, Project project, Grant grant, Entry source, String gitPath) { }
+    record SelectedEntry(UUID id, Project project, Grant grant, Entry source, String gitPath, boolean artifact)
+    {
+        SelectedEntry(UUID id, Project project, Grant grant, Entry source, String gitPath)
+        {
+            this(id, project, grant, source, gitPath, false);
+        }
+    }
 
     record Selection(Path workTree, String branch, ObjectId parent, ModelStatus modelStatus,
         List<SelectedEntry> entries, Map<UUID, String> renamePeers) { }

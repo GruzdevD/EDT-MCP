@@ -73,6 +73,49 @@ final class ProjectCommitExecution
 
     enum Recovery { COMMITTED, RECOVERY_REQUIRED }
 
+    record Staged(String path, String indexBlob, String diskBlob) { }
+
+    static List<Staged> stage(Repository repository, Plan plan, Runnable releaseIndexPin, PinSources sources,
+        Check verifyAccess) throws IOException
+    {
+        try (var locks = Locks.acquire(repository); SourceGuard pinned = sources.pin())
+        {
+            repository.getRefDatabase().refresh();
+            ProjectCommitPolicy.requireRepository(repository, plan.selection());
+            ProjectCommitPolicy.requireIndex(locks.index, plan);
+            try (var inserter = repository.newObjectInserter())
+            {
+                writeBlobs(inserter, plan);
+                inserter.flush();
+            }
+            ProjectCommitPlan.apply(locks.index, plan.edits());
+            List<Staged> receipt = new ArrayList<>();
+            for (var change : plan.changes())
+            {
+                var index = locks.index.getEntry(change.selected().gitPath());
+                var disk = change.blob();
+                if (!Objects.equals(disk, index == null ? null : index.getObjectId()))
+                {
+                    throw ProjectCommitPlan.stale();
+                }
+                receipt.add(new Staged(change.selected().gitPath(), index == null ? null : index.getObjectId().name(),
+                    disk == null ? null : disk.name()));
+            }
+            locks.index.write();
+            verifyAccess.run();
+            pinned.checkDeletedPaths();
+            repository.getRefDatabase().refresh();
+            ProjectCommitPolicy.requireRepository(repository, plan.selection());
+            ProjectCommitPolicy.requireStageNormalization(repository, plan, locks.index);
+            releaseIndexPin.run();
+            if (!locks.index.commit())
+            {
+                throw new IOException("The verified index could not be published.");
+            }
+            return List.copyOf(receipt);
+        }
+    }
+
     static Prepared commit(Repository repository, Plan plan, Runnable releaseIndexPin, PinSources sources,
         Check verifyAccess, Journal journal) throws IOException
     {
@@ -218,17 +261,7 @@ final class ProjectCommitExecution
         try (var revisions = new RevWalk(repository); var inserter = repository.newObjectInserter())
         {
             var tree = ProjectCommitPlan.readTree(revisions, plan.selection().parent());
-            for (var change : plan.changes())
-            {
-                if (change.blob() != null)
-                {
-                    ObjectId blob = inserter.insert(Constants.OBJ_BLOB, change.selected().source().disk().bytes());
-                    if (!blob.equals(change.blob()))
-                    {
-                        throw ProjectCommitPlan.stale();
-                    }
-                }
-            }
+            writeBlobs(inserter, plan);
             ProjectCommitPlan.apply(tree, plan.edits());
             if (!plan.tree().equals(tree.writeTree(inserter)))
             {
@@ -259,6 +292,18 @@ final class ProjectCommitExecution
             }
         }
         return List.copyOf(values);
+    }
+
+    private static void writeBlobs(org.eclipse.jgit.lib.ObjectInserter inserter, Plan plan) throws IOException
+    {
+        for (var change : plan.changes())
+        {
+            if (change.blob() != null
+                && !change.blob().equals(inserter.insert(Constants.OBJ_BLOB, change.selected().source().disk().bytes())))
+            {
+                throw ProjectCommitPlan.stale();
+            }
+        }
     }
 
     private static IndexValue indexValue(DirCache index, String path)

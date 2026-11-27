@@ -36,13 +36,21 @@ final class ProjectCommitJournal implements AutoCloseable
 
     enum Phase { PREPARED, PUBLISHED, COMMITTED }
 
-    record Scope(String workTree, List<Grant> grants, List<Grant> selected) { }
+    record Scope(String workTree, List<Grant> grants, List<Grant> selected, BuildReview build)
+    {
+        Scope(String workTree, List<Grant> grants, List<Grant> selected)
+        {
+            this(workTree, grants, selected, null);
+        }
+
+        Duration retention() { return build == null ? RESULT_TTL : Duration.ofDays(7); }
+    }
 
     record Receipt(String owner, Scope scope, Prepared prepared, Phase phase, long expiresAt)
     {
         Receipt transition(Phase next, Clock clock)
         {
-            return new Receipt(owner, scope, prepared, next, clock.instant().plus(RESULT_TTL).toEpochMilli());
+            return new Receipt(owner, scope, prepared, next, clock.instant().plus(scope.retention()).toEpochMilli());
         }
     }
 
@@ -124,6 +132,41 @@ final class ProjectCommitJournal implements AutoCloseable
         return receipt;
     }
 
+    java.util.List<Object> discover(ReviewEvidence.Request query,
+        com.ditrix.edt.mcp.server.transport.HttpTransport.AuthenticatedClient client) throws IOException
+    {
+        var rows = new java.util.ArrayList<Object>();
+        byte[] secret = ownershipSecret();
+        try (var files = Files.newDirectoryStream(root,"*.json"))
+        {
+            for (Path file : files)
+            {
+                var receipt = read(file);
+                if (receipt == null || expired(receipt) || receipt.scope().build() == null) { continue; }
+                var build = receipt.scope().build();
+                var prepared = receipt.prepared();
+                if (!build.repoId().equals(query.repoId()) || !build.projectName().equals(query.projectName())
+                    || !build.changeId().equals(query.changeId()) || !prepared.branch().equals(query.branch())) { continue; }
+                String filename = file.getFileName().toString();
+                UUID id = UUID.fromString(filename.substring(0,filename.length()-5));
+                if (receipt.owner().equals(client.journalOwnerTag(secret,id)))
+                {
+                    var scope = receipt.scope();
+                    var current = ProjectSnapshotService.requireCurrentAccess(scope.grants(),client,false);
+                    var grant = current.projects().stream().filter(p -> build.projectName().equals(p.grant().name()))
+                        .findFirst().orElseThrow(SnapshotSourcePolicy::denied).grant().review();
+                    if (grant == null) { throw SnapshotSourcePolicy.denied(); }
+                    grant.require(query.repoId(), Path.of(scope.workTree()), prepared.branch());
+                    ChangeArtifacts.require(grant,query.changeId(),"evidence");
+                    ChangeArtifacts.require(grant,query.changeId(),"read");
+                    rows.add(java.util.Map.of("planId",id,"parent",prepared.parent(),"treeId",prepared.tree(),
+                        "commitSha",prepared.commit(),"phase",receipt.phase(),"retainUntil",java.time.Instant.ofEpochMilli(receipt.expiresAt()).toString()));
+                }
+            }
+        }
+        return rows;
+    }
+
     void finish(UUID id, Receipt receipt) throws IOException
     {
         save(id, receipt.transition(Phase.COMMITTED, clock));
@@ -144,7 +187,7 @@ final class ProjectCommitJournal implements AutoCloseable
             public void prepare(Prepared prepared) throws IOException
             {
                 receipt = new Receipt(owner, scope, prepared, Phase.PREPARED,
-                    clock.instant().plus(RESULT_TTL).toEpochMilli());
+                    clock.instant().plus(scope.retention()).toEpochMilli());
                 save(id, receipt);
             }
 

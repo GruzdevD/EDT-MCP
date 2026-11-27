@@ -188,10 +188,10 @@ public final class Toolsets
 
         assign(COMPARISON,
             "compare_configurations", "get_comparison_node", "merge_rules", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "capture_project_snapshot", "inspect_project_snapshot"); //$NON-NLS-1$ //$NON-NLS-2$
+            "capture_project_snapshot", "inspect_project_snapshot", "inspect_project_version", "inspect_change_evidence", "read_change_artifact", "resolve_project_review"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 
         assign(GIT,
-            "git", "preview_project_commit", "confirm_project_commit"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "git", "preview_project_commit", "confirm_project_commit", "write_change_artifact", "stage_verified_entries"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private Toolsets()

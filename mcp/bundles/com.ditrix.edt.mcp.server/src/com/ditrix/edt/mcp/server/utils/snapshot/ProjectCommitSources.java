@@ -93,7 +93,7 @@ final class ProjectCommitSources implements ProjectCommitExecution.SourceGuard
 
     private Directory parent(SelectedEntry entry, String[] parts, List<Handle> handles) throws IOException
     {
-        Directory directory = tree.openProject(entry.grant().location());
+        Directory directory = tree.openProject(entry.artifact() ? entry.project().workTree().toString() : entry.grant().location());
         handles.add(directory);
         for (int position = 0; position < parts.length - 1; position++)
         {
@@ -103,6 +103,7 @@ final class ProjectCommitSources implements ProjectCommitExecution.SourceGuard
             }
             directory = directory.child(parts[position]);
             handles.add(directory);
+            if (entry.artifact()) { directory.requireNoRepository(); }
         }
         return directory;
     }

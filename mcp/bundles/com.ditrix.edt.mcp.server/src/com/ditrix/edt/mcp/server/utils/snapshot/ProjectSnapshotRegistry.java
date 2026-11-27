@@ -142,7 +142,7 @@ final class ProjectSnapshotRegistry<Owner>
                     size += size(descriptor);
                 }
             }
-            for (Entry entry : project.entries())
+            for (Entry entry : project.allReviewEntries())
             {
                 size += 256 + 2L * entry.path().length() + size(entry.head()) + size(entry.index()) + size(entry.disk());
             }

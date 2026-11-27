@@ -213,7 +213,7 @@ final class ProjectSnapshotPages
         return Objects.equals(a == null ? null : a.contentId(), b == null ? null : b.contentId());
     }
 
-    private static Delta patch(String kind, Version before, Version after, boolean raw) throws IOException
+    static Delta patch(String kind, Version before, Version after, boolean raw) throws IOException
     {
         String change = before == null ? "added" : after == null ? "deleted" : "modified";
         if (size(before) + size(after) > MAX_DIFF_INPUT)
@@ -277,13 +277,13 @@ final class ProjectSnapshotPages
             .getBytes(StandardCharsets.UTF_8));
     }
 
-    private String encode(int offset, String binding)
+    String encode(int offset, String binding)
     {
         byte[] result = ByteBuffer.allocate(CURSOR_BYTES).putInt(offset).put(sign(offset, binding)).array();
         return Base64.getUrlEncoder().withoutPadding().encodeToString(result);
     }
 
-    private int decode(String cursor, String binding) throws IOException
+    int decode(String cursor, String binding) throws IOException
     {
         if (cursor.length() != 48)
         {

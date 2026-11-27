@@ -115,6 +115,42 @@ final class WindowsSourceTree
         return openDirectory(path, true);
     }
 
+    Directory openRepositoryDirectory(java.nio.file.Path root, java.nio.file.Path target,
+        boolean create, boolean allowMissing) throws IOException
+    {
+        if (!target.normalize().equals(target) || !target.startsWith(root)) { throw unavailable(); }
+        Directory current = openProject(root.toString());
+        boolean transferred = false;
+        try
+        {
+            java.nio.file.Path path = root;
+            for (var component : root.relativize(target))
+            {
+                String name = component.toString();
+                if (name.isEmpty()) { continue; }
+                path = path.resolve(component);
+                Directory child = current.childIfPresent(name);
+                if (child == null && create)
+                {
+                    try { java.nio.file.Files.createDirectory(path); }
+                    catch (java.nio.file.FileAlreadyExistsException e) { /* Verify the winning directory below. */ }
+                    child = current.child(name);
+                }
+                if (child == null)
+                {
+                    if (allowMissing) { return null; }
+                    throw unavailable();
+                }
+                child.parentToClose = current;
+                current = child;
+                current.requireNoRepository();
+            }
+            transferred = true;
+            return current;
+        }
+        finally { if (!transferred) { current.close(); } }
+    }
+
     private Directory openDirectory(String path, boolean allowMissing) throws IOException
     {
         if (!isDrivePath(path) || path.length() <= 3)
@@ -182,6 +218,58 @@ final class WindowsSourceTree
         byte[] read(int maxBytes) throws IOException;
     }
 
+    @FunctionalInterface
+    interface Replacement
+    {
+        byte[] apply(byte[] previous) throws IOException;
+    }
+
+    /** Compare and replace through one exclusive transacted handle, including rollback on failure. */
+    byte[] replace(Directory parent, String name, boolean create, int limit, Replacement replacement) throws IOException
+    {
+        if (!isComponent(name)) { throw unavailable(); }
+        char[] path = new char[32768];
+        int length = kernel.GetFinalPathNameByHandleW(parent.opened.handle, path, path.length, 1);
+        if (length < 1 || length >= path.length) { throw unavailable(); }
+        WString target = new WString(new String(path, 0, length) + "\\" + name);
+        Ktm manager = Native.load("KtmW32", Ktm.class);
+        Pointer transaction = manager.CreateTransaction(null, null, 0, 0, 0, 15000, null);
+        if (transaction == null || Pointer.nativeValue(transaction) == -1) { throw unavailable(); }
+        boolean committed = false;
+        try
+        {
+            Pointer handle = kernel.CreateFileTransactedW(target, 0xc0000000, 0, null, create ? 1 : OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT, null, transaction, null, null);
+            if (handle == null || Pointer.nativeValue(handle) == -1)
+            {
+                throw new IOException("Artifact conflict or exclusive transactional access unavailable.");
+            }
+            byte[] result;
+            try (Opened file = check(handle, false, parent.opened.volume))
+            {
+                result = replacement.apply(create ? null : file.read(limit));
+                IntByReference count = new IntByReference();
+                if (result.length > limit || !kernel.SetFilePointerEx(handle, 0L, null, 0)
+                    || !kernel.WriteFile(handle, result, result.length, count, null) || count.getValue() != result.length
+                    || !kernel.SetEndOfFile(handle))
+                {
+                    throw unavailable();
+                }
+            }
+            if (!manager.CommitTransaction(transaction))
+            {
+                throw new IOException("Artifact transaction could not be committed.");
+            }
+            committed = true;
+            return result;
+        }
+        finally
+        {
+            if (!committed) { manager.RollbackTransaction(transaction); }
+            kernel.CloseHandle(transaction);
+        }
+    }
+
     final class Directory implements Handle
     {
         private Opened opened;
@@ -200,6 +288,15 @@ final class WindowsSourceTree
         Directory childIfPresent(String name) throws IOException
         {
             return child(name, true);
+        }
+
+        void requireNoRepository() throws IOException
+        {
+            // A gitfile, inaccessible entry or reparse point also fails this directory-only open.
+            try (var nested = childIfPresent(".git"))
+            {
+                if (nested != null) { throw SnapshotSourcePolicy.denied(); }
+            }
         }
 
         Directory gitWriteDirectory() throws IOException
@@ -480,6 +577,12 @@ final class WindowsSourceTree
 
     interface Kernel32 extends StdCallLibrary
     {
+        int GetFinalPathNameByHandleW(Pointer handle, char[] path, int size, int flags);
+        Pointer CreateFileTransactedW(WString path, int access, int share, Pointer security, int disposition,
+            int flags, Pointer template, Pointer transaction, Pointer miniVersion, Pointer extension);
+        boolean WriteFile(Pointer handle, byte[] data, int size, IntByReference written, Pointer overlapped);
+        boolean SetFilePointerEx(Pointer handle, long position, Pointer newPosition, int method);
+        boolean SetEndOfFile(Pointer handle);
         int GetDriveTypeW(WString root);
         boolean GetVolumeNameForVolumeMountPointW(WString root, char[] volume, int length);
         Pointer CreateFileW(WString name, int access, int share, Pointer security, int disposition, int flags,
@@ -489,5 +592,13 @@ final class WindowsSourceTree
         boolean GetFileInformationByHandleEx(Pointer handle, int informationClass, Pointer information, int size);
         boolean ReadFile(Pointer handle, byte[] bytes, int size, IntByReference read, Pointer overlapped);
         boolean CloseHandle(Pointer handle);
+    }
+
+    interface Ktm extends StdCallLibrary
+    {
+        Pointer CreateTransaction(Pointer security, Pointer id, int options, int isolation, int flags, int timeout,
+            WString description);
+        boolean CommitTransaction(Pointer transaction);
+        boolean RollbackTransaction(Pointer transaction);
     }
 }

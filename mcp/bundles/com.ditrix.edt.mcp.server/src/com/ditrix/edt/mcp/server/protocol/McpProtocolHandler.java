@@ -26,6 +26,12 @@ import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
 import com.ditrix.edt.mcp.server.tools.impl.CaptureProjectSnapshotTool;
 import com.ditrix.edt.mcp.server.tools.impl.ConfirmProjectCommitTool;
 import com.ditrix.edt.mcp.server.tools.impl.InspectProjectSnapshotTool;
+import com.ditrix.edt.mcp.server.tools.impl.InspectProjectVersionTool;
+import com.ditrix.edt.mcp.server.tools.impl.InspectChangeEvidenceTool;
+import com.ditrix.edt.mcp.server.tools.impl.WriteChangeArtifactTool;
+import com.ditrix.edt.mcp.server.tools.impl.ReadChangeArtifactTool;
+import com.ditrix.edt.mcp.server.tools.impl.StageVerifiedEntriesTool;
+import com.ditrix.edt.mcp.server.tools.impl.ResolveProjectReviewTool;
 import com.ditrix.edt.mcp.server.tools.impl.PreviewProjectCommitTool;
 import com.ditrix.edt.mcp.server.transport.HttpTransport.AuthenticatedClient;
 import com.ditrix.edt.mcp.server.utils.BackgroundJobs;
@@ -248,6 +254,12 @@ public class McpProtocolHandler
     private static boolean isSnapshotTool(JsonRpcRequest request, String name)
     {
         if (CaptureProjectSnapshotTool.NAME.equals(name) || InspectProjectSnapshotTool.NAME.equals(name)
+            || InspectProjectVersionTool.NAME.equals(name)
+            || InspectChangeEvidenceTool.NAME.equals(name)
+            || WriteChangeArtifactTool.NAME.equals(name)
+            || ReadChangeArtifactTool.NAME.equals(name)
+            || StageVerifiedEntriesTool.NAME.equals(name)
+            || ResolveProjectReviewTool.NAME.equals(name)
             || PreviewProjectCommitTool.NAME.equals(name) || ConfirmProjectCommitTool.NAME.equals(name))
         {
             return true;
@@ -269,7 +281,7 @@ public class McpProtocolHandler
     private static boolean isBoundYaxunit(String name, Map<String, Object> arguments)
     {
         return ("run_yaxunit_tests".equals(name) || "debug_yaxunit_tests".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
-            && arguments.containsKey("snapshotId"); //$NON-NLS-1$
+            && (arguments.containsKey("snapshotId") || arguments.containsKey("candidateInputsId") || arguments.containsKey("commitSource")); //$NON-NLS-1$
     }
 
     /**

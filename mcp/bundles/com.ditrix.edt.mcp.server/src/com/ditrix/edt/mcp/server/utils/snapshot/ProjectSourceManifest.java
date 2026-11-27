@@ -100,8 +100,17 @@ final class ProjectSourceManifest
     }
 
     record Project(String name, String branch, String head, List<Entry> entries, boolean rawDiskComparison,
-        SnapshotBuildInputs buildInputs, Path workTree)
+        SnapshotBuildInputs buildInputs, Path workTree, List<Entry> perimeter)
     {
+        Project(String name,String branch,String head,List<Entry> entries,boolean rawDiskComparison,
+            SnapshotBuildInputs buildInputs,Path workTree)
+        {
+            this(name,branch,head,entries,rawDiskComparison,buildInputs,workTree,List.of());
+        }
+        List<Entry> allReviewEntries()
+        {
+            return java.util.stream.Stream.concat(entries.stream(),perimeter.stream()).toList();
+        }
         Project(String name, String branch, String head, List<Entry> entries, boolean rawDiskComparison)
         {
             this(name, branch, head, entries, rawDiskComparison, null, null);
@@ -116,6 +125,7 @@ final class ProjectSourceManifest
         Project
         {
             entries = List.copyOf(entries);
+            perimeter = List.copyOf(perimeter);
         }
     }
 
@@ -153,6 +163,22 @@ final class ProjectSourceManifest
             Repository repository = GitRepositoryResolver.openSnapshotWorkTree(root.toFile()))
         {
             return action.operate(repository, pins::releaseIndex);
+        }
+    }
+
+    @FunctionalInterface
+    interface RepositoryRead<T>
+    {
+        T read(Repository repository) throws IOException;
+    }
+
+    static <T> T readRepository(WindowsSourceTree tree, Path root, RepositoryRead<T> action) throws IOException
+    {
+        try (Directory workTree = tree.openProject(root.toString()); Directory git = workTree.child(".git");
+            MetadataPins pins = new MetadataPins(git, new Budget());
+            Repository repository = GitRepositoryResolver.openSnapshotWorkTree(root.toFile()))
+        {
+            return action.read(repository);
         }
     }
 
@@ -330,7 +356,8 @@ final class ProjectSourceManifest
                 throw new IOException("Git HEAD or index changed during snapshot capture. Retry the capture.");
             }
             String autoCrlf = repository.getConfig().getString("core", null, "autocrlf");
-            boolean rawComparison = disk.attributes || repository.getConfig().getString("core", null, "attributesfile") != null
+            boolean rawComparison = disk.attributes || ProjectCommitPolicy.defaultUserAttributesPresent(repository)
+                || repository.getConfig().getString("core", null, "attributesfile") != null
                 || autoCrlf != null && !"false".equalsIgnoreCase(autoCrlf)
                 || !repository.getConfig().getSubsections("filter").isEmpty();
             try (Directory info = git.childIfPresent("info"))
@@ -339,7 +366,50 @@ final class ProjectSourceManifest
             }
             SnapshotBuildInputs inputs = forYaxunit ? SnapshotBuildInputs.read(project, projectRoot) : null;
             return new Project(project.grant().name(), initial.branch(), initial.headId(), entries, rawComparison, inputs,
-                root);
+                root, perimeter(repository,local,root,initial,project,budget));
+        }
+    }
+
+    private static List<Entry> perimeter(Repository repo,WindowsSourceTree local,Path root,GitEntries state,
+        ScopedProject project,Budget budget) throws IOException
+    {
+        var grant = project.grant().review();
+        if (grant == null || grant.perimeterPaths().isEmpty() || !Path.of(grant.workTree()).equals(root)
+            || !grant.branches().contains(state.branch())) { return List.of(); }
+        var entries = new ArrayList<Entry>();
+        var index = repo.readDirCache();
+        try (var walk = new RevWalk(repo); var dir = local.openProject(root.toString()))
+        {
+            var tree = state.headId() == null ? null : walk.parseCommit(ObjectId.fromString(state.headId())).getTree();
+            for (String path : grant.perimeterPaths().stream().sorted().toList())
+            {
+                Version head = null;
+                try (var tw = tree == null ? null : TreeWalk.forPath(repo,path,tree))
+                {
+                    if (tw != null) { head = perimeterBlob(repo,tw.getFileMode(0),tw.getObjectId(0),budget); }
+                }
+                var entry = index.getEntry(path);
+                if (entry != null && entry.getStage() != 0) { throw new IOException("Unresolved perimeter index."); }
+                Version staged = entry == null ? null : perimeterBlob(repo,entry.getFileMode(),entry.getObjectId(),budget);
+                byte[] disk = perimeterDisk(dir,path.split("/"),0,budget.fileLimit());
+                entries.add(new Entry(path,head,staged,disk == null ? null : budget.keep(disk)));
+            }
+        }
+        return entries;
+    }
+
+    private static Version perimeterBlob(Repository repo,FileMode mode,ObjectId id,Budget budget) throws IOException
+    {
+        if (mode != FileMode.REGULAR_FILE && mode != FileMode.EXECUTABLE_FILE) { throw new IOException("Unsupported perimeter mode."); }
+        return budget.keep(repo.open(id,Constants.OBJ_BLOB).getCachedBytes(budget.fileLimit()));
+    }
+
+    private static byte[] perimeterDisk(Directory dir,String[] parts,int index,int limit) throws IOException
+    {
+        if (index+1 == parts.length) { return dir.readIfPresent(parts[index],limit); }
+        try (var child = dir.childIfPresent(parts[index]))
+        {
+            return child == null ? null : perimeterDisk(child,parts,index+1,limit);
         }
     }
 
@@ -692,7 +762,7 @@ final class ProjectSourceManifest
         }
     }
 
-    private static String contentIdOf(byte[] bytes)
+    static String contentIdOf(byte[] bytes)
     {
         try
         {

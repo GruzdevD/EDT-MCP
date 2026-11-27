@@ -126,7 +126,7 @@ public class SnapshotBuildInputsTest
             """.formatted(type, name, contents, type);
     }
 
-    private static Map<String, Version> descriptors(String extra, String builder)
+    static Map<String, Version> descriptors(String extra, String builder)
     {
         String project = """
             <projectDescription>

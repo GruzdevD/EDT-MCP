@@ -253,3 +253,9 @@ the server in state STARTED although the launch that owned it has ended, it refu
 start ("Can only start server that is stopped but current server state is 2"). The server is then
 stopped through EDT's own application lifecycle and the run is retried ONCE — see the
 `update_database` guide.
+
+## Candidate and committed builds
+
+Pass exactly one of candidateInputsId (an unexpired preview) or commitSource (repoId, projectName, branch, commitSha and ordered dependencies). Each call creates a new background job and a private infobase. Poll the returned jobId. The result records the ordered source manifest, descriptors, seed, tool identities, requested selectors and executed test names.
+
+To keep a review baseline, add retainCycle with repoId, projectName, branch, changeId, cycle, testProjects and revisions. Obtain the exact revisions for proposal, design, tasks and every delta/<capability> from read_change_artifact. The server reserves space before accepting the job and retains the first failed or broken run for seven days. Recover results and compare them using inspect_change_evidence.

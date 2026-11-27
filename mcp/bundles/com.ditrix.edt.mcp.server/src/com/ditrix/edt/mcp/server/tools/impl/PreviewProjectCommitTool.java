@@ -17,6 +17,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.snapshot.ProjectSnapshotService;
+import com.ditrix.edt.mcp.server.utils.snapshot.BuildReview;
 import com.google.gson.JsonParser;
 
 /** Previews a selected commit from a retained project source snapshot. */
@@ -43,6 +44,7 @@ public final class PreviewProjectCommitTool implements IMcpTool
     {
         return JsonSchemaBuilder.object().stringProperty("snapshotId", "ID returned by capture_project_snapshot.", true)
             .stringArrayProperty("entryIds", "1 to 100 distinct changed entry IDs from the snapshot.", true)
+            .objectProperty("buildReview", "Build scope: repoId, projectName, changeId, optional exact artifacts and pinned dependencies.")
             .stringProperty("message", "Final commit message, up to 8192 UTF-8 bytes.", true).build();
     }
 
@@ -56,6 +58,10 @@ public final class PreviewProjectCommitTool implements IMcpTool
             .stringProperty("branch", "Full local branch ref.")
             .stringProperty("parentSha", "Expected parent commit.")
             .stringProperty("treeId", "Exact Git tree to commit.")
+            .objectProperty("buildReview", "Build coordinates, selected artifact revisions and project pins.")
+            .stringProperty("candidateInputsId", "Retained build inputs for this plan.")
+            .stringProperty("manifestId", "Digest of ordered full project fingerprints.")
+            .objectArrayProperty("inputs", "Ordered project revisions, trees and fingerprints.")
             .stringProperty("message", "Commit message retained in the plan.")
             .objectArrayProperty("entries", "Selected paths and content IDs, with both paths for identified renames.")
             .stringProperty("error", "Reason the plan was refused.").build();
@@ -76,27 +82,11 @@ public final class PreviewProjectCommitTool implements IMcpTool
             return error;
         }
         UUID snapshotId;
-        List<UUID> entryIds = new ArrayList<>();
+        List<UUID> entryIds;
         try
         {
             snapshotId = UUID.fromString(JsonUtils.extractStringArgument(params, "snapshotId"));
-            String encoded = JsonUtils.extractStringArgument(params, "entryIds");
-            if (encoded.length() > 8192)
-            {
-                throw new IllegalArgumentException();
-            }
-            for (var item : JsonParser.parseString(encoded).getAsJsonArray())
-            {
-                if (!item.isJsonPrimitive() || !item.getAsJsonPrimitive().isString())
-                {
-                    throw new IllegalArgumentException();
-                }
-                entryIds.add(UUID.fromString(item.getAsString()));
-            }
-            if (entryIds.isEmpty() || entryIds.size() > 100 || entryIds.stream().distinct().count() != entryIds.size())
-            {
-                throw new IllegalArgumentException();
-            }
+            entryIds = entryIds(params);
         }
         catch (RuntimeException e)
         {
@@ -105,7 +95,7 @@ public final class PreviewProjectCommitTool implements IMcpTool
         try
         {
             return ProjectSnapshotService.previewCommit(snapshotId, entryIds,
-                JsonUtils.extractStringArgument(params, "message")).toJson();
+                JsonUtils.extractStringArgument(params, "message"), BuildReview.parse(JsonUtils.extractStringArgument(params, "buildReview"))).toJson();
         }
         catch (IOException e)
         {
@@ -116,5 +106,28 @@ public final class PreviewProjectCommitTool implements IMcpTool
             return ToolResult.error("Project commit preview is unavailable. Check the authenticated Windows EDT server.")
                 .toJson();
         }
+    }
+
+    static List<UUID> entryIds(Map<String, String> params)
+    {
+        List<UUID> entryIds = new ArrayList<>();
+        String encoded = JsonUtils.extractStringArgument(params, "entryIds");
+        if (encoded.length() > 8192)
+        {
+            throw new IllegalArgumentException();
+        }
+        for (var item : JsonParser.parseString(encoded).getAsJsonArray())
+        {
+            if (!item.isJsonPrimitive() || !item.getAsJsonPrimitive().isString())
+            {
+                throw new IllegalArgumentException();
+            }
+            entryIds.add(UUID.fromString(item.getAsString()));
+        }
+        if (entryIds.isEmpty() || entryIds.size() > 100 || entryIds.stream().distinct().count() != entryIds.size())
+        {
+            throw new IllegalArgumentException();
+        }
+        return entryIds;
     }
 }

@@ -46,7 +46,8 @@ final class ProjectCommitRequests<Owner>
         String indexContentId, String diskContentId, String renamePeer) { }
 
     record Review(UUID id, UUID snapshotId, Instant expiresAt, List<Grant> scope, List<Grant> selectedGrants, Path workTree,
-        String branch, String parent, String tree, String message, ModelStatus modelStatus, List<FileVersion> files)
+        String branch, String parent, String tree, String message, ModelStatus modelStatus, List<FileVersion> files,
+        BuildReview build, GitBuildInputs.Contents candidate)
     {
         void requireCurrent(Snapshot snapshot) throws IOException
         {
@@ -73,6 +74,7 @@ final class ProjectCommitRequests<Owner>
             }
             for (FileVersion version : files)
             {
+                if (isArtifact(version)) { continue; }
                 Entry entry = selected.getOrDefault(version.projectName(), Map.of()).get(version.path());
                 if (entry == null || !Objects.equals(version.headContentId(), contentId(entry.head()))
                     || !Objects.equals(version.indexContentId(), contentId(entry.index()))
@@ -86,6 +88,12 @@ final class ProjectCommitRequests<Owner>
         List<String> selectedProjectNames()
         {
             return selectedGrants.stream().map(Grant::name).toList();
+        }
+
+        boolean isArtifact(FileVersion version)
+        {
+            return build != null && version.gitPath().startsWith("openspec/changes/" + build.changeId() + "/")
+                && version.path().equals(version.gitPath());
         }
     }
 
@@ -109,8 +117,18 @@ final class ProjectCommitRequests<Owner>
 
     synchronized Review retain(Owner owner, Retained snapshot, Plan plan) throws IOException
     {
+        return retain(owner, snapshot, plan, null, null);
+    }
+
+    synchronized Review retain(Owner owner, Retained snapshot, Plan plan, BuildReview build, GitBuildInputs.Contents candidate) throws IOException
+    {
         Instant now = clock.instant();
         reviews.values().removeIf(owned -> !now.isBefore(owned.review().expiresAt()));
+        if (candidate != null && candidate.bytes() + reviews.values().stream().map(slot -> slot.review().candidate())
+            .filter(Objects::nonNull).mapToLong(GitBuildInputs.Contents::bytes).sum() > 192L * 1024 * 1024)
+        {
+            throw new IOException("Candidate input quota exceeded. Wait for existing plans to expire.");
+        }
         if (reviews.size() >= MAX_PLANS || !now.isBefore(snapshot.expiresAt()))
         {
             throw new IOException("No project commit plan slot is available. Retry after the active plans expire.");
@@ -126,7 +144,7 @@ final class ProjectCommitRequests<Owner>
             entry.project().name(), entry.source().path(), entry.gitPath(), contentId(entry.source().head()),
             contentId(entry.source().index()), contentId(entry.source().disk()), selection.renamePeers().get(entry.id()))).toList();
         var review = new Review(UUID.randomUUID(), snapshot.id(), expire, snapshot.scope(), scopes, selection.workTree(),
-            selection.branch(), selection.parent().name(), plan.tree().name(), plan.message(), selection.modelStatus(), files);
+            selection.branch(), selection.parent().name(), plan.tree().name(), plan.message(), selection.modelStatus(), files, build, candidate);
         reviews.put(review.id(), new OwnedReview<>(owner, review));
         return review;
     }

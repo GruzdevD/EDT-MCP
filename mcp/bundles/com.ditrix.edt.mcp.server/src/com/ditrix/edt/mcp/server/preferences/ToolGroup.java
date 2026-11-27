@@ -91,7 +91,7 @@ public enum ToolGroup
         "Three-way configuration comparison: start one against two git revisions, expand a node," //$NON-NLS-1$
             + " read or author merge rules, and inspect retained project sources", //$NON-NLS-1$
         "compare_configurations", "get_comparison_node", "merge_rules", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "capture_project_snapshot", "inspect_project_snapshot"), //$NON-NLS-1$ //$NON-NLS-2$
+        "capture_project_snapshot", "inspect_project_snapshot", "inspect_project_version", "inspect_change_evidence", "read_change_artifact", "resolve_project_review"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 
     /**
      * Git tools. The {@code git} command tool ships DISABLED by default, and this tree is the UI its
@@ -107,7 +107,7 @@ public enum ToolGroup
         "Git operations: the 'git' command tool (disabled by default), branch listing/switching" //$NON-NLS-1$
             + ", the branch-to-infobase binding, and reviewed project commits", //$NON-NLS-1$
         "git", "list_git_branches", "switch_git_branch", "create_git_branch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "set_branch_infobase", "preview_project_commit", "confirm_project_commit"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "set_branch_infobase", "preview_project_commit", "confirm_project_commit", "write_change_artifact", "stage_verified_entries"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
     private final String id;
     private final String displayName;

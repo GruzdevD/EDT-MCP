@@ -143,7 +143,7 @@ final class SnapshotSourcePolicy
                     throw denied();
                 }
                 result.add(new Grant(name, location, Set.copyOf(extensions), enabled(item, "yaxunit"),
-                    commitBranches(item.get("commitBranches")), enabled(item, "commit")));
+                    commitBranches(item.get("commitBranches")), enabled(item, "commit"), ReviewScope.configured(item)));
             }
             return List.copyOf(result);
         }
@@ -167,7 +167,7 @@ final class SnapshotSourcePolicy
         return value.getAsBoolean();
     }
 
-    private static Set<String> commitBranches(JsonElement value) throws IOException
+    static Set<String> commitBranches(JsonElement value) throws IOException
     {
         if (value == null)
         {
@@ -216,8 +216,14 @@ final class SnapshotSourcePolicy
     }
 
     record Grant(String name, String location, Set<String> extensions, boolean yaxunit, Set<String> commitBranches,
-        boolean commit)
+        boolean commit, ReviewScope review)
     {
+        Grant(String name, String location, Set<String> extensions, boolean yaxunit, Set<String> commitBranches,
+            boolean commit)
+        {
+            this(name, location, extensions, yaxunit, commitBranches, commit, null);
+        }
+
         Grant(String name, String location, Set<String> extensions)
         {
             this(name, location, extensions, false);

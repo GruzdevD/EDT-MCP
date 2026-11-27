@@ -19,3 +19,10 @@ The authenticated Windows EDT server reads the project grant from `edt.mcp.snaps
 ```
 
 Review the selected `entries`, `parentSha`, `treeId`, and `message`, then pass `planId` to `confirm_project_commit`. An expired snapshot or a changed Git state calls for a new capture and preview.
+# Build verification
+
+Add buildReview with repoId, changeId and projectName for a build preview. Include checked-out projects in snapshot order, base first. Optional artifacts contain kind, itemId (for nested types) and the revision from read_change_artifact. Enable the change's include and read grants to select documents. dependencies lists additional read-only projects in extension order, each with projectName, repoId, full branch and full commitSha.
+
+Preview applies the selected source and document revisions to the parent tree. candidateInputsId identifies the retained inputs until expiresAt. inputs records each project, its tree, revision and fingerprint. manifestId binds their order and all source and descriptor bytes. Use inspect_project_version with planId, treeId and projectName to page through the actual build files. Verify again after changing a selected file, document or HEAD.
+
+The base project can identify the build even when only a captured extension has selected source changes.

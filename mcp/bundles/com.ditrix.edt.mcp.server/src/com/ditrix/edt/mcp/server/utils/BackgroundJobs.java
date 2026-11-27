@@ -698,6 +698,20 @@ public final class BackgroundJobs implements AutoCloseable
         String initialProgress, CancellationCapability cancellation,
         BooleanSupplier access, Runnable release, JobWork work)
     {
+        return start(UUID.randomUUID(),owningTool,timeoutMs,maxRunning,initialProgress,cancellation,access,release,work);
+    }
+
+    /** Uses the server-reserved evidence ID for a protected job. */
+    public JobSnapshot startReserved(UUID id,String owningTool,long timeoutMs,int maxRunning,String initialProgress,
+        BooleanSupplier access,Runnable release,JobWork work)
+    {
+        return start(id,owningTool,timeoutMs,maxRunning,initialProgress,null,Objects.requireNonNull(access),release,work);
+    }
+
+    private JobSnapshot start(UUID id,String owningTool, long timeoutMs, int maxRunning,
+        String initialProgress, CancellationCapability cancellation,
+        BooleanSupplier access, Runnable release, JobWork work)
+    {
         if (owningTool == null || owningTool.isBlank())
         {
             throw new IllegalArgumentException("Background job owning tool must not be blank"); //$NON-NLS-1$
@@ -707,12 +721,13 @@ public final class BackgroundJobs implements AutoCloseable
             throw new IllegalArgumentException("Background job work must not be null"); //$NON-NLS-1$
         }
         long boundedTimeoutMs = Math.max(1L, timeoutMs);
-        JobRecord record = new JobRecord(UUID.randomUUID().toString(), owningTool,
+        JobRecord record = new JobRecord(id.toString(), owningTool,
             initialProgress, cancellation, access);
 
         synchronized (jobsLock)
         {
             ensureOpen();
+            if (jobs.containsKey(record.id)) { throw new IllegalArgumentException("Duplicate background job ID."); }
             // The running limit is checked FIRST, before anything is discarded: eviction makes
             // room for a job that is about to be stored, and a start rejected here stores
             // nothing. Evicting on the way to a refusal would throw away a completed job's

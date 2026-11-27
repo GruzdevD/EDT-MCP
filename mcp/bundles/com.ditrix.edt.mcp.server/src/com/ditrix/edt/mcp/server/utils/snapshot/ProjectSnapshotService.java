@@ -121,7 +121,135 @@ public final class ProjectSnapshotService
         }
     }
 
+    public static ToolResult inspectCandidate(UUID planId, String treeId, ProjectVersionReader.Query query) throws IOException
+    {
+        var caller = currentClient();
+        var review = COMMITS.require(caller,planId);
+        if (review.candidate() == null || !review.tree().equals(treeId)) { throw SnapshotSourcePolicy.denied(); }
+        var inputs = review.candidate();
+        int index = -1;
+        for (int i = 0; i < inputs.inputs().size(); i++)
+        {
+            var input = inputs.inputs().get(i);
+            if (input.projectName().equals(query.projectName()) && input.repoId().equals(query.repoId())) { index = i; break; }
+        }
+        if (index < 0) { throw SnapshotSourcePolicy.denied(); }
+        var project = inputs.snapshot().projects().get(index);
+        var current = requireCurrentAccess(inputs.scope(),caller,false);
+        requireReviewGrant(grants(current),query.repoId(),project);
+        List<ProjectSourceManifest.Entry> entries;
+        if ("diff".equals(query.view()))
+        {
+            try (var lease = REGISTRY.acquire(caller, review.snapshotId()))
+            {
+                var paths = review.files().stream().filter(f -> project.name().equals(f.projectName()) && !review.isArtifact(f))
+                    .map(ProjectCommitRequests.FileVersion::path).collect(java.util.stream.Collectors.toSet());
+                entries = candidateDiff(lease.retained().snapshot(), project.name(), paths);
+            }
+        }
+        else
+        {
+            entries = new ArrayList<>(project.entries());
+            project.buildInputs().files().forEach((path,file) -> entries.add(new ProjectSourceManifest.Entry(path,null,null,file)));
+        }
+        var readable = new Project(project.name(),project.branch(),project.head(),entries,false);
+        var result = ProjectVersionReader.read(PAGES,query,readable,treeId);
+        requireReviewGrant(grants(requireCurrentAccess(inputs.scope(),caller,false)),query.repoId(),project);
+        return result.put("treeId",treeId).put("manifestId",inputs.manifestId()).put("expiresAt",review.expiresAt().toString());
+    }
+
+    static List<ProjectSourceManifest.Entry> candidateDiff(Snapshot captured, String projectName, java.util.Set<String> selected)
+    {
+        return captured.projects().stream().filter(p -> p.name().equals(projectName)).flatMap(p -> p.entries().stream())
+            .filter(e -> selected.contains(e.path())).toList();
+    }
+
+    public static ToolResult inspectVersion(ProjectVersionReader.Query query) throws IOException
+    {
+        if (query.commitSha() != null)
+        {
+            return ProjectCommitVersion.inspect(PAGES, query);
+        }
+        if (query.snapshotId() == null || query.baseSha() != null || query.branch() != null
+            || !List.of("head","index","disk").contains(query.side()))
+        {
+            throw new IOException("Expected one snapshot side or one branch-scoped commit.");
+        }
+        AuthenticatedClient client = currentClient();
+        try (var lease = REGISTRY.acquire(client, query.snapshotId()))
+        {
+            Retained retained = lease.retained();
+            Project project = retained.snapshot().projects().stream()
+                .filter(item -> item.name().equals(query.projectName())).findFirst()
+                .orElseThrow(SnapshotSourcePolicy::denied);
+            requireVersionAccess(retained, client, query.repoId(), project);
+            ToolResult result = ProjectVersionReader.read(PAGES, query, project);
+            requireVersionAccess(retained, client, query.repoId(), project);
+            return result.put("expiresAt", retained.expiresAt().toString());
+        }
+    }
+
+    private static void requireVersionAccess(Retained retained, AuthenticatedClient client, String repoId,
+        Project project) throws IOException
+    {
+        Access current = requireCurrentAccess(retained.scope(), client, false);
+        var original = retained.scope().stream().filter(g -> g.name().equals(project.name())).findFirst().orElseThrow();
+        var now = grants(current).stream().filter(g -> g.name().equals(project.name())).findFirst().orElseThrow();
+        if (!java.util.Objects.equals(original.review(),now.review())) { throw SnapshotSourcePolicy.denied(); }
+        requireReviewGrant(retained.scope(), repoId, project);
+        requireReviewGrant(grants(current), repoId, project);
+    }
+
+    static void requireReviewGrant(List<Grant> grants, String repoId, Project project) throws IOException
+    {
+        ReviewScope review = grants.stream().filter(grant -> grant.name().equals(project.name()))
+            .map(Grant::review).filter(java.util.Objects::nonNull).findFirst().orElseThrow(SnapshotSourcePolicy::denied);
+        review.require(repoId, project.workTree(), project.branch());
+    }
+
+    public static ToolResult stage(UUID snapshotId, String repoId, List<UUID> entryIds) throws IOException
+    {
+        var caller = currentClient();
+        try (var lease = REGISTRY.acquire(caller, snapshotId))
+        {
+            var retained = lease.retained();
+            var selection = ProjectCommitPlan.select(retained, entryIds);
+            var access = requireCurrentAccess(retained.scope(), caller, false);
+            requireStage(selection, retained.scope(), repoId);
+            requireStage(selection, grants(access), repoId);
+            var entries = ProjectSourceManifest.withCommitRepository(access.tree(), selection.workTree(), (repo, release) -> {
+                var plan = ProjectCommitPlan.build(repo, selection, "Stage verified sources");
+                return ProjectCommitExecution.stage(repo, plan, release, () -> new ProjectCommitSources(access.tree(), plan.changes()),
+                    () -> {
+                        var current = requireCurrentAccess(retained.scope(), caller, false);
+                        requireStage(selection, grants(current), repoId);
+                        ProjectSnapshotCapture.requireNoObservedDivergence(current);
+                    });
+            });
+            return ToolResult.success().put("repoId", repoId).put("snapshotId", snapshotId.toString())
+                .put("parentSha", selection.parent().name()).put("branch", selection.branch()).put("entries", entries);
+        }
+    }
+
+    private static void requireStage(ProjectCommitPlan.Selection selection, List<Grant> grants, String repoId) throws IOException
+    {
+        for (var project : selection.entries().stream().map(ProjectCommitPlan.SelectedEntry::project).distinct().toList())
+        {
+            requireReviewGrant(grants, repoId, project);
+            if (grants.stream().noneMatch(g -> g.name().equals(project.name()) && g.review() != null
+                && g.review().stageBranches().contains(selection.branch())))
+            {
+                throw SnapshotSourcePolicy.denied();
+            }
+        }
+    }
+
     public static ToolResult previewCommit(UUID snapshotId, List<UUID> entryIds, String message) throws IOException
+    {
+        return previewCommit(snapshotId, entryIds, message, null);
+    }
+
+    public static ToolResult previewCommit(UUID snapshotId, List<UUID> entryIds, String message, BuildReview build) throws IOException
     {
         AuthenticatedClient client = currentClient();
         long generation = GENERATION.get();
@@ -130,8 +258,12 @@ public final class ProjectSnapshotService
             Retained snapshot = lease.retained();
             Access access = requireCurrentAccess(snapshot.scope(), client, false);
             var selection = ProjectCommitPlan.select(snapshot, entryIds);
-            var plan = ProjectSourceManifest.withCommitRepository(access.tree(), selection.workTree(), (repository, release) ->
-                ProjectCommitPolicy.preview(repository, selection, grants(access), message));
+            record Preview(ProjectCommitPlan.Plan plan, GitBuildInputs.Contents inputs) { }
+            var preview = ProjectSourceManifest.withCommitRepository(access.tree(), selection.workTree(), (repository, release) -> {
+                var plan = ProjectCommitPolicy.preview(repository, build == null ? selection
+                    : build.attach(selection, repository, access.tree(), snapshotId, grants(access), snapshot.snapshot().projects()), grants(access), message);
+                return new Preview(plan, build == null ? null : GitBuildInputs.candidate(repository, plan, access, build));
+            });
             Access current = requireCurrentAccess(snapshot.scope(), client, false);
             ProjectCommitPolicy.requireGrants(selection, grants(current), false);
             synchronized (ProjectSnapshotService.class)
@@ -140,11 +272,17 @@ public final class ProjectSnapshotService
                 {
                     throw ProjectSnapshotRegistry.unavailable();
                 }
-                Review review = COMMITS.retain(client, snapshot, plan);
-                return ToolResult.success().put("planId", review.id().toString()).put("expiresAt", review.expiresAt().toString())
+                Review review = COMMITS.retain(client, snapshot, preview.plan(), build, preview.inputs());
+                ToolResult result = ToolResult.success().put("planId", review.id().toString()).put("expiresAt", review.expiresAt().toString())
                     .put("modelStatus", review.modelStatus().name().toLowerCase(Locale.ROOT))
                     .put("branch", review.branch()).put("parentSha", review.parent()).put("treeId", review.tree())
                     .put("message", review.message()).put("entries", review.files());
+                if (build != null)
+                {
+                    result.put("buildReview", build).put("candidateInputsId",review.id().toString())
+                        .put("manifestId",review.candidate().manifestId()).put("inputs",review.candidate().inputs());
+                }
+                return result;
             }
         }
     }
@@ -180,15 +318,23 @@ public final class ProjectSnapshotService
                 return repeatCommit(journal, caller, planId, previous);
             }
             Review review = authorizeCommit(planId);
-            var scope = new ProjectCommitJournal.Scope(review.workTree().toString(), review.scope(), review.selectedGrants());
+            var scope = new ProjectCommitJournal.Scope(review.workTree().toString(), review.scope(), review.selectedGrants(), review.build());
             var recorder = journal.begin(planId, owner, scope);
             try (var lease = REGISTRY.acquire(caller, review.snapshotId()))
             {
                 Access access = requireCommitAccess(caller, scope, review.branch());
                 var selection = ProjectCommitPlan.select(lease.retained(),
-                    review.files().stream().map(ProjectCommitRequests.FileVersion::entryId).toList());
+                    review.files().stream().filter(file -> !review.isArtifact(file)).map(ProjectCommitRequests.FileVersion::entryId).toList());
                 var committed = ProjectSourceManifest.withCommitRepository(access.tree(), review.workTree(), (repository, release) -> {
-                    var plan = ProjectCommitPlan.build(repository, selection, review.message());
+                    var selectedInputs = review.build() == null ? selection
+                        : review.build().attach(selection, repository, access.tree(), review.snapshotId(), grants(access), lease.retained().snapshot().projects());
+                    var plan = ProjectCommitPlan.build(repository, selectedInputs, review.message());
+                    for (var choice : selectedInputs.entries())
+                    {
+                        if (choice.artifact() && review.files().stream().noneMatch(f -> choice.id().equals(f.entryId())
+                            && java.util.Objects.equals(f.indexContentId(), choice.source().index() == null
+                                ? null : choice.source().index().contentId()))) { throw ProjectCommitPlan.stale(); }
+                    }
                     if (!plan.tree().name().equals(review.tree()))
                     {
                         throw ProjectCommitPlan.stale();
@@ -249,6 +395,7 @@ public final class ProjectSnapshotService
     {
         Access access = requireCurrentAccess(scope.grants(), caller, false);
         ProjectCommitPolicy.requireGrants(scope.selected(), branch, grants(access), true);
+        if (scope.build() != null) { scope.build().require(grants(access), branch, Path.of(scope.workTree())); }
         return access;
     }
 
@@ -264,7 +411,7 @@ public final class ProjectSnapshotService
     {
         List<String> names = review.files().stream().limit(10).map(ProjectCommitRequests.FileVersion::gitPath).toList();
         ConsentPreview summary = new ConsentPreview("Confirm project commit",
-            review.branch() + " | tree " + review.tree(), review.files().size(), names);
+            review.branch() + " | parent " + review.parent() + " | tree " + review.tree(), review.files().size(), names);
         var decision = DestructiveConsentGate.getInstance().requireConsent(CONFIRM_COMMIT_TOOL, summary);
         if (decision != DestructiveConsentGate.ConsentDecision.ALLOW)
         {
@@ -304,6 +451,31 @@ public final class ProjectSnapshotService
         return client;
     }
 
+    static BuildAdmission authorizeCandidate(UUID id) throws IOException
+    {
+        var client = currentClient();
+        var review = COMMITS.require(client,id);
+        if (review.candidate() == null) { throw SnapshotSourcePolicy.denied(); }
+        return admitVersion(id,client,review.candidate(),"candidate",review.tree(),review.build().changeId());
+    }
+
+    static BuildAdmission authorizeCommitRun(BuildReview.Dependency base, List<BuildReview.Dependency> other) throws IOException
+    {
+        var client = currentClient();
+        var inputs = GitBuildInputs.committed(base,other);
+        return admitVersion(UUID.randomUUID(),client,inputs,"commit",inputs.inputs().get(0).treeId(),null);
+    }
+
+    private static BuildAdmission admitVersion(UUID id, AuthenticatedClient client, GitBuildInputs.Contents contents,
+        String kind, String treeId, String changeId) throws IOException
+    {
+        var auth = new BuildAuthorization(id,client,contents.scope(),contents.inputs());
+        auth.verify();
+        return new BuildAdmission(auth,null,contents.snapshot(),new BuildIdentity(kind,id,treeId,contents.manifestId(),contents.inputs(),changeId));
+    }
+
+    record BuildIdentity(String source, UUID id, String treeId, String manifestId, List<GitBuildInputs.Input> inputs, String changeId) { }
+
     static BuildAdmission authorizeBuild(UUID id) throws IOException
     {
         AuthenticatedClient client = McpProtocolHandler.currentAuthenticatedClient();
@@ -316,14 +488,14 @@ public final class ProjectSnapshotService
         try
         {
             Retained retained = lease.retained();
-            BuildAuthorization authorization = new BuildAuthorization(id, client, retained.scope());
+            BuildAuthorization authorization = new BuildAuthorization(id, client, retained.scope(), List.of());
             requireCurrentAccess(authorization.scope(), client, false);
             if (!retained.snapshot().yaxunitReady())
             {
                 throw new IOException("The snapshot has no YAxUnit build inputs. Capture it with forYaxunit=true.");
             }
             authorization.verify();
-            BuildAdmission admission = new BuildAdmission(authorization, lease);
+            BuildAdmission admission = new BuildAdmission(authorization, lease, retained.snapshot(),null);
             admitted = true;
             return admission;
         }
@@ -336,7 +508,7 @@ public final class ProjectSnapshotService
         }
     }
 
-    record BuildAuthorization(UUID id, AuthenticatedClient owner, List<Grant> scope)
+    record BuildAuthorization(UUID id, AuthenticatedClient owner, List<Grant> scope, List<GitBuildInputs.Input> inputs)
     {
         boolean permitsCaller()
         {
@@ -357,11 +529,19 @@ public final class ProjectSnapshotService
 
         void verify() throws IOException
         {
-            requireCurrentAccess(scope, owner, true);
+            var access = requireCurrentAccess(scope, owner, true);
+            for (int i = 0; i < inputs.size(); i++)
+            {
+                var input = inputs.get(i);
+                var current = access.projects().get(i).grant().review();
+                if (current == null) { throw SnapshotSourcePolicy.denied(); }
+                current.require(input.repoId(),Path.of(scope.get(i).review().workTree()),input.branch());
+            }
         }
     }
 
-    record BuildAdmission(BuildAuthorization authorization, ProjectSnapshotRegistry<AuthenticatedClient>.Lease lease)
+    record BuildAdmission(BuildAuthorization authorization, ProjectSnapshotRegistry<AuthenticatedClient>.Lease lease,
+        Snapshot snapshot, BuildIdentity identity)
         implements AutoCloseable
     {
         BuildSource materialize(Path destination) throws IOException
@@ -369,7 +549,6 @@ public final class ProjectSnapshotService
             try (lease)
             {
                 authorization.verify();
-                Snapshot snapshot = lease.retained().snapshot();
                 List<Path> roots = new ArrayList<>();
                 for (Project project : snapshot.projects())
                 {
@@ -394,7 +573,7 @@ public final class ProjectSnapshotService
         @Override
         public void close()
         {
-            lease.close();
+            if (lease != null) { lease.close(); }
         }
     }
 
@@ -420,7 +599,7 @@ public final class ProjectSnapshotService
         requireCurrentAccess(retained.scope(), client, false);
     }
 
-    private static Access requireCurrentAccess(List<Grant> original, AuthenticatedClient client, boolean execution)
+    static Access requireCurrentAccess(List<Grant> original, AuthenticatedClient client, boolean execution)
         throws IOException
     {
         Access current = SnapshotSourcePolicy.require(client, System.getProperty(SnapshotSourcePolicy.POLICY_PROPERTY),

@@ -173,14 +173,16 @@ final class ProjectSnapshotCapture
             if (!left.name().equals(right.name()) || !Objects.equals(left.head(), right.head())
                 || !Objects.equals(left.branch(), right.branch()) || left.rawDiskComparison() != right.rawDiskComparison()
                 || !Objects.equals(left.workTree(), right.workTree())
-                || left.entries().size() != right.entries().size())
+                || left.entries().size() != right.entries().size() || left.perimeter().size() != right.perimeter().size())
             {
                 return false;
             }
-            for (int entryIndex = 0; entryIndex < left.entries().size(); entryIndex++)
+            var leftEntries = left.allReviewEntries();
+            var rightEntries = right.allReviewEntries();
+            for (int entryIndex = 0; entryIndex < leftEntries.size(); entryIndex++)
             {
-                Entry x = left.entries().get(entryIndex);
-                Entry y = right.entries().get(entryIndex);
+                Entry x = leftEntries.get(entryIndex);
+                Entry y = rightEntries.get(entryIndex);
                 if (!x.path().equals(y.path()) || !Objects.equals(id(x.head()), id(y.head()))
                     || !Objects.equals(id(x.index()), id(y.index())) || !Objects.equals(id(x.disk()), id(y.disk())))
                 {

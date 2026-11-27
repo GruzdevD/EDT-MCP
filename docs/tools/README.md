@@ -2,7 +2,7 @@
 
 One page per tool: what it does, every parameter, and how it works. Generated from the live server by `docs/generate_tool_docs.py` (re-run to refresh; the source of truth is each tool's Java).
 
-**112 tools.**
+**118 tools.**
 
 ## Core
 
@@ -196,6 +196,12 @@ One page per tool: what it does, every parameter, and how it works. Generated fr
 
 | Tool | Description |
 |------|-------------|
+| [`inspect_project_version`](inspect_project_version.md) | Read immutable source versions, search literals and inspect a scoped perimeter. |
+| [`resolve_project_review`](resolve_project_review.md) | Resolve the base, final tree and individual build commits. |
+| [`read_change_artifact`](read_change_artifact.md) | Read a registered change document and its exact revision. |
+| [`write_change_artifact`](write_change_artifact.md) | Create or update a typed document with revision checks, or append a review event. |
+| [`stage_verified_entries`](stage_verified_entries.md) | Stage only the selected verified source bytes. |
+| [`inspect_change_evidence`](inspect_change_evidence.md) | Read durable results, compare retained baselines and recover commit receipts. |
 | [`confirm_project_commit`](confirm_project_commit.md) | Confirm a reviewed snapshot selection on an authorized local branch. |
 | [`git`](git.md) | Run a git command in a project's repository - the non-UI equivalent of typing it in a terminal. Send it as a shell-style string (e.g. 'status', 'diff HEAD~1'… *(not enabled by default)* |
 | [`preview_project_commit`](preview_project_commit.md) | Preview the exact Git tree for the selected entries from a project snapshot. |

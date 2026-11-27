@@ -20,6 +20,12 @@ import com.ditrix.edt.mcp.server.tools.impl.CompareConfigurationsTool;
 import com.ditrix.edt.mcp.server.tools.impl.CaptureProjectSnapshotTool;
 import com.ditrix.edt.mcp.server.tools.impl.ConfirmProjectCommitTool;
 import com.ditrix.edt.mcp.server.tools.impl.InspectProjectSnapshotTool;
+import com.ditrix.edt.mcp.server.tools.impl.InspectProjectVersionTool;
+import com.ditrix.edt.mcp.server.tools.impl.InspectChangeEvidenceTool;
+import com.ditrix.edt.mcp.server.tools.impl.WriteChangeArtifactTool;
+import com.ditrix.edt.mcp.server.tools.impl.ReadChangeArtifactTool;
+import com.ditrix.edt.mcp.server.tools.impl.StageVerifiedEntriesTool;
+import com.ditrix.edt.mcp.server.tools.impl.ResolveProjectReviewTool;
 import com.ditrix.edt.mcp.server.tools.impl.PreviewProjectCommitTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateGitBranchTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateInfobaseTool;
@@ -262,6 +268,12 @@ public final class BuiltInToolRegistrar
         catalogue.add(new MergeRulesTool());
         catalogue.add(new CaptureProjectSnapshotTool());
         catalogue.add(new InspectProjectSnapshotTool());
+        catalogue.add(new InspectProjectVersionTool());
+        catalogue.add(new InspectChangeEvidenceTool());
+        catalogue.add(new WriteChangeArtifactTool());
+        catalogue.add(new ReadChangeArtifactTool());
+        catalogue.add(new StageVerifiedEntriesTool());
+        catalogue.add(new ResolveProjectReviewTool());
         catalogue.add(new PreviewProjectCommitTool());
         catalogue.add(new ConfirmProjectCommitTool());
 

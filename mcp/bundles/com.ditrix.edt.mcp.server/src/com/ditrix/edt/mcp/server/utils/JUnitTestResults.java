@@ -41,6 +41,11 @@ public final class JUnitTestResults
     private final List<TestCase> failureDetails = new ArrayList<>();
     private final List<TestCase> errorDetails = new ArrayList<>();
     private final List<TestCase> skippedDetails = new ArrayList<>();
+    private final List<String> executedNames = new ArrayList<>();
+
+    void executed(String name) { executedNames.add(name); }
+
+    public List<String> getExecutedNames() { return Collections.unmodifiableList(executedNames); }
 
     public int getTotal()
     {

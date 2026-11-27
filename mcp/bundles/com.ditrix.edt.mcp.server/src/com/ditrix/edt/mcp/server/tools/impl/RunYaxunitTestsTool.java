@@ -223,6 +223,9 @@ public class RunYaxunitTestsTool implements IMcpTool
         return JsonSchemaBuilder.object()
             .stringProperty("snapshotId", "Build and test a YAxUnit-ready capture in its own temporary Windows " //$NON-NLS-1$ //$NON-NLS-2$
                 + "file infobase. Supply only selectors and timeout with this argument.") //$NON-NLS-1$
+            .stringProperty("candidateInputsId", "Isolated run on an unexpired build preview.")
+            .objectProperty("retainCycle", "Reserve durable inputs and terminal evidence before starting.")
+            .objectProperty("commitSource", "Isolated run on repoId, projectName, branch, commitSha and optional ordered dependencies.")
             .stringProperty("launchConfigurationName", //$NON-NLS-1$
                 "Exact runtime-client launch config name (preferred; from list_configurations).") //$NON-NLS-1$
             .stringProperty("projectName", "Live EDT project name (required for a live run without launchConfigurationName).") //$NON-NLS-1$ //$NON-NLS-2$
@@ -537,18 +540,26 @@ public class RunYaxunitTestsTool implements IMcpTool
 
     static boolean hasSnapshotId(Map<String, String> params)
     {
-        return params.containsKey("snapshotId"); //$NON-NLS-1$
+        return params.containsKey("retainCycle") || params.containsKey("snapshotId") || params.containsKey("candidateInputsId") || params.containsKey("commitSource"); //$NON-NLS-1$
     }
 
     private String startSnapshotRun(Map<String, String> params, String owningTool)
     {
-        if (!NAME.equals(owningTool) || !Set.of("snapshotId", "timeout", KEY_EXTENSIONS, KEY_MODULES, //$NON-NLS-1$ //$NON-NLS-2$
+        if (!NAME.equals(owningTool) || !Set.of("retainCycle", "snapshotId", "candidateInputsId", "commitSource", "timeout", KEY_EXTENSIONS, KEY_MODULES, //$NON-NLS-1$ //$NON-NLS-2$
             KEY_TESTS, KEY_TAGS).containsAll(params.keySet()))
         {
             return ToolResult.error("snapshotId accepts only test selectors and timeout.").toJson(); //$NON-NLS-1$
         }
         String raw = JsonUtils.extractStringArgument(params, "snapshotId"); //$NON-NLS-1$
-        if (raw == null || !raw.matches("[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}")) //$NON-NLS-1$
+        String retention = JsonUtils.extractStringArgument(params, "retainCycle");
+        String candidate = JsonUtils.extractStringArgument(params, "candidateInputsId");
+        String commit = JsonUtils.extractStringArgument(params, "commitSource");
+        if ((params.containsKey("retainCycle") && (retention == null || params.containsKey("snapshotId"))) || java.util.stream.Stream.of("snapshotId","candidateInputsId","commitSource").filter(params::containsKey).count() != 1)
+        {
+            return ToolResult.error("Choose exactly one isolated execution source.").toJson();
+        }
+        String identifier = candidate == null ? raw : candidate;
+        if (commit == null && (identifier == null || !identifier.matches("[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}"))) //$NON-NLS-1$
         {
             return ToolResult.error("snapshotId must be a UUID from capture_project_snapshot.").toJson(); //$NON-NLS-1$
         }
@@ -565,7 +576,10 @@ public class RunYaxunitTestsTool implements IMcpTool
         int wait = clampTimeout(JsonUtils.extractIntArgument(params, "timeout", DEFAULT_TIMEOUT)); //$NON-NLS-1$
         try
         {
-            JobSnapshot job = SnapshotYaxunitRunner.start(jobs, NAME, UUID.fromString(raw), selectors);
+            JobSnapshot job;
+            if (commit != null) { job = SnapshotYaxunitRunner.startCommit(jobs,NAME,commit,selectors,retention); }
+            else if (candidate != null) { job = SnapshotYaxunitRunner.startCandidate(jobs,NAME,UUID.fromString(candidate),selectors,retention); }
+            else { job = SnapshotYaxunitRunner.start(jobs, NAME, UUID.fromString(raw), selectors); }
             if (job == null)
             {
                 return ToolResult.error("Snapshot YAxUnit execution is busy. Retry after the active job finishes.").toJson(); //$NON-NLS-1$

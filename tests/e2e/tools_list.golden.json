@@ -3081,6 +3081,98 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
+    "description": "Recover retained build results, commit receipts and baseline comparisons. Full parameters and examples: call get_tool_guide('inspect_change_evidence').",
+    "inputSchema": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "changeId": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "cycle": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "documentRevisions": {
+          "description": "Exact normative revision map for document comparison.",
+          "type": "object"
+        },
+        "group": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "repoId": {
+          "type": "string"
+        },
+        "targetSha": {
+          "type": "string"
+        },
+        "view": {
+          "enum": [
+            "list",
+            "job",
+            "files",
+            "content",
+            "compare",
+            "receipts"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoId",
+        "projectName",
+        "branch",
+        "changeId",
+        "view"
+      ],
+      "type": "object"
+    },
+    "name": "inspect_change_evidence",
+    "outputSchema": {
+      "properties": {
+        "base64": {
+          "type": "string"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "entries": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "nextCursor": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Read an immutable manifest or diff page from capture_project_snapshot, or compare two retained snapshots. Full parameters and examples: call get_tool_guide('inspect_project_snapshot').",
     "inputSchema": {
       "properties": {
@@ -3166,6 +3258,170 @@
         },
         "yaxunitReady": {
           "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Read immutable project sources or find a UTF-8 literal, including unchanged files. Full parameters and examples: call get_tool_guide('inspect_project_version').",
+    "inputSchema": {
+      "properties": {
+        "baseSha": {
+          "type": "string"
+        },
+        "baselineId": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "commitSha": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "fileId": {
+          "type": "string"
+        },
+        "literal": {
+          "type": "string"
+        },
+        "planId": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "repoId": {
+          "type": "string"
+        },
+        "scope": {
+          "enum": [
+            "projectSources",
+            "perimeter",
+            "repository"
+          ],
+          "type": "string"
+        },
+        "side": {
+          "enum": [
+            "head",
+            "index",
+            "disk",
+            "commit"
+          ],
+          "type": "string"
+        },
+        "snapshotId": {
+          "type": "string"
+        },
+        "treeId": {
+          "type": "string"
+        },
+        "view": {
+          "enum": [
+            "manifest",
+            "diff",
+            "content",
+            "literalSearch"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoId",
+        "projectName",
+        "view"
+      ],
+      "type": "object"
+    },
+    "name": "inspect_project_version",
+    "outputSchema": {
+      "properties": {
+        "base64": {
+          "type": "string"
+        },
+        "baseSha": {
+          "type": "string"
+        },
+        "baselineId": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "byteOffset": {
+          "type": "integer"
+        },
+        "bytes": {
+          "type": "integer"
+        },
+        "commitSha": {
+          "type": "string"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "contentId": {
+          "type": "string"
+        },
+        "entries": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "expiresAt": {
+          "type": "string"
+        },
+        "fileId": {
+          "type": "string"
+        },
+        "manifestId": {
+          "type": "string"
+        },
+        "nextCursor": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "planId": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "repoId": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "side": {
+          "type": "string"
+        },
+        "snapshotId": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "treeId": {
+          "type": "string"
         }
       },
       "required": [
@@ -3882,6 +4138,10 @@
     "description": "Preview the exact Git tree for selected entries from an authorized project snapshot. Review the plan before calling confirm_project_commit. Full parameters and examples: call get_tool_guide('preview_project_commit').",
     "inputSchema": {
       "properties": {
+        "buildReview": {
+          "description": "Build scope: repoId, projectName, changeId, optional exact artifacts and pinned dependencies.",
+          "type": "object"
+        },
         "entryIds": {
           "items": {
             "type": "string"
@@ -3908,6 +4168,12 @@
         "branch": {
           "type": "string"
         },
+        "buildReview": {
+          "type": "object"
+        },
+        "candidateInputsId": {
+          "type": "string"
+        },
         "entries": {
           "items": {
             "type": "object"
@@ -3918,6 +4184,15 @@
           "type": "string"
         },
         "expiresAt": {
+          "type": "string"
+        },
+        "inputs": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "manifestId": {
           "type": "string"
         },
         "message": {
@@ -3941,6 +4216,90 @@
         },
         "treeId": {
           "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "List typed change documents or read their exact bytes and Git blob IDs. Full parameters and examples: call get_tool_guide('read_change_artifact').",
+    "inputSchema": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "changeId": {
+          "type": "string"
+        },
+        "commitSha": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "repoId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "view": {
+          "enum": [
+            "list",
+            "read"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoId",
+        "projectName",
+        "branch",
+        "changeId",
+        "view"
+      ],
+      "type": "object"
+    },
+    "name": "read_change_artifact",
+    "outputSchema": {
+      "properties": {
+        "artifact": {
+          "type": "object"
+        },
+        "artifacts": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "base64": {
+          "type": "string"
+        },
+        "changeId": {
+          "type": "string"
+        },
+        "repoId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -4101,6 +4460,94 @@
     },
     "name": "rename_metadata_object",
     "outputSchema": null
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Resolve the review base, build deltas and final commit for a change. Full parameters and examples: call get_tool_guide('resolve_project_review').",
+    "inputSchema": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "changeId": {
+          "type": "string"
+        },
+        "expectedFinal": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "repoId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoId",
+        "projectName",
+        "branch",
+        "changeId"
+      ],
+      "type": "object"
+    },
+    "name": "resolve_project_review",
+    "outputSchema": {
+      "properties": {
+        "baseSha": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "buildDeltas": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "changeId": {
+          "type": "string"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "finalSha": {
+          "type": "string"
+        },
+        "observedHead": {
+          "type": "string"
+        },
+        "phases": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "range": {
+          "type": "object"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "repoId": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
   },
   {
     "annotations": {
@@ -4302,6 +4749,13 @@
           "description": "Application ID from get_applications (required for a live run without launchConfigurationName).",
           "type": "string"
         },
+        "candidateInputsId": {
+          "type": "string"
+        },
+        "commitSource": {
+          "description": "Isolated run on repoId, projectName, branch, commitSha and optional ordered dependencies.",
+          "type": "object"
+        },
         "debug": {
           "description": "true launches in DEBUG mode so breakpoints fire: a short start returns the launch handle and you call wait_for_break next, while Pending returns a jobId for get_job_status. Default false polls and returns the report.",
           "type": "boolean"
@@ -4329,6 +4783,10 @@
         "projectName": {
           "description": "Live EDT project name (required for a live run without launchConfigurationName).",
           "type": "string"
+        },
+        "retainCycle": {
+          "description": "Reserve durable inputs and terminal evidence before starting.",
+          "type": "object"
         },
         "snapshotId": {
           "type": "string"
@@ -4662,6 +5120,66 @@
         },
         "variableName": {
           "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Stage selected disk versions from a project snapshot without committing. Full parameters and examples: call get_tool_guide('stage_verified_entries').",
+    "inputSchema": {
+      "properties": {
+        "entryIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "repoId": {
+          "type": "string"
+        },
+        "snapshotId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoId",
+        "snapshotId",
+        "entryIds"
+      ],
+      "type": "object"
+    },
+    "name": "stage_verified_entries",
+    "outputSchema": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "entries": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "parentSha": {
+          "type": "string"
+        },
+        "repoId": {
+          "type": "string"
+        },
+        "snapshotId": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -5767,6 +6285,83 @@
         },
         "topFrameRef": {
           "type": "integer"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Create a typed change document, update an exact revision or append an idempotent build event. Full parameters and examples: call get_tool_guide('write_change_artifact').",
+    "inputSchema": {
+      "properties": {
+        "base64": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "changeId": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "create",
+            "put",
+            "checkbox",
+            "append"
+          ],
+          "type": "string"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "projectName": {
+          "type": "string"
+        },
+        "repoId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoId",
+        "projectName",
+        "branch",
+        "changeId",
+        "operation",
+        "kind",
+        "expectedRevision",
+        "base64"
+      ],
+      "type": "object"
+    },
+    "name": "write_change_artifact",
+    "outputSchema": {
+      "properties": {
+        "artifact": {
+          "type": "object"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
         }
       },
       "required": [
